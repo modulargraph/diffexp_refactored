@@ -139,19 +139,15 @@ FIRE-added numerator slots; merge-position numerators, incomplete merge
 sequences, and currently unwired custom branch or kinematic-assumption fields
 fail before numerical transport rather than being ignored.
 
-The underlying driver remains available for advanced and batch use:
+The same public facade is available from the command line:
 
 ```sh
-DE2_RECURRENCE_BACKEND=Cpp \
 DE2_CPP_THREADS=4 \
-FT_EXAMPLES=bubble \
-FT_WORKING_PRECISION=300 \
-FT_EXPANSION_ORDER=40 \
-wolframscript -file Scripts/run_ft_stepwise2.m
+wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
 ```
 
 See [Feynman Trick](Docs/FeynmanTrick.md) for registry names, numerical
-settings, cache controls, and checkpoint resumption.
+settings, plan inspection, cache controls, and checkpoint resumption.
 
 ## Capabilities
 

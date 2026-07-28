@@ -1887,6 +1887,75 @@ ft2NativeMatchingReservoirRetryQ[failure_] := FailureQ[failure] &&
   Quiet[Check[failure[[1]] ===
     "FeynmanTrickNativeMatchingReservoir", False]];
 
+(* A long ordinary arm can lose one private high coefficient at each
+   finite-Laurent materialization.  If a wider retry certifies the previous
+   obstruction and the failure moves to a later match, adding one order at a
+   time would replay the whole arm once per chart.  Exponentially back off the
+   private halo in that demonstrated-progress case.  This is conservative:
+   the halo is not a publication request, and every retry must still pass the
+   same coefficientwise residual certificates. *)
+ft2NativeMatchingReservoirBackoff[current_Integer, additional_Integer,
+    previousBackend_, currentBackend_] := Module[
+  {previousArm, currentArm, previousMatch, currentMatch},
+  If[current < 0 || additional < 1,
+    Return[$Failed, Module]];
+  previousArm = If[AssociationQ[previousBackend],
+    Lookup[previousBackend, "arm", None], None];
+  currentArm = If[AssociationQ[currentBackend],
+    Lookup[currentBackend, "arm", None], None];
+  previousMatch = If[AssociationQ[previousBackend],
+    Lookup[previousBackend, "match", None], None];
+  currentMatch = If[AssociationQ[currentBackend],
+    Lookup[currentBackend, "match", None], None];
+  If[StringQ[previousArm] && currentArm === previousArm &&
+      IntegerQ[previousMatch] && IntegerQ[currentMatch] &&
+      currentMatch > previousMatch,
+    Max[current + additional, 2 current],
+    current + additional]];
+
+(* A terminal factorized observable can consume more epsilon orders than the
+   ordinary one-row primitive.  That is a property of the producing level's
+   matched functional, not of the lower consumer's matching solve.  Learn the
+   observed producer loss separately; increasing the consumer halo here would
+   raise the requested handoff edge and create a moving goalpost. *)
+ft2NativeHandoffProducerRetry[lowerLevel_Integer, producerLevel_Integer,
+    requiredTop_Integer, availableTop_Integer,
+    producerSourceTop_Integer, baseIntrinsicLoss_Integer,
+    currentProducerPrivateLoss_Integer] := Module[
+  {observedLoss, requiredPrivateLoss, additional},
+  If[lowerLevel < 1 || producerLevel =!= lowerLevel + 1 ||
+      availableTop >= requiredTop, Return[None, Module]];
+  observedLoss = producerSourceTop - availableTop;
+  requiredPrivateLoss = Max[0, observedLoss - baseIntrinsicLoss];
+  additional = requiredPrivateLoss - currentProducerPrivateLoss;
+  If[observedLoss < 0 || additional < 1,
+    Return[Failure["FeynmanTrickNativeProducerReservoirStalled", <|
+      "Detail" ->
+        "short native handoff did not imply a larger producer-loss bound",
+      "Level" -> producerLevel, "ConsumerLevel" -> lowerLevel,
+      "RequiredCompleteMax" -> requiredTop,
+      "AvailableCompleteMax" -> availableTop,
+      "ProducerSourceCompleteMax" -> producerSourceTop,
+      "BaseIntrinsicLoss" -> baseIntrinsicLoss,
+      "CurrentProducerPrivateLoss" -> currentProducerPrivateLoss|>],
+      Module]];
+  Failure["FeynmanTrickNativeProducerReservoir", <|
+    "Detail" ->
+      "native level handoff needs a wider producer epsilon reservoir",
+    "Level" -> producerLevel, "ConsumerLevel" -> lowerLevel,
+    "AdditionalOrders" -> additional,
+    "RequiredCompleteMax" -> requiredTop,
+    "AvailableCompleteMax" -> availableTop,
+    "ProducerSourceCompleteMax" -> producerSourceTop,
+    "ObservedProducerLoss" -> observedLoss,
+    "BaseIntrinsicLoss" -> baseIntrinsicLoss,
+    "CurrentProducerPrivateLoss" -> currentProducerPrivateLoss,
+    "RequiredProducerPrivateLoss" -> requiredPrivateLoss|>]];
+
+ft2NativeProducerReservoirRetryQ[failure_] := FailureQ[failure] &&
+  Quiet[Check[failure[[1]] ===
+    "FeynmanTrickNativeProducerReservoir", False]];
+
 (* A complete epsilon residual with an inconclusive accuracy verdict is not a
    reservoir deficit.  A stored-Taylor residual directly motivates a larger
    Taylor work order.  An independently materialized continuity failure does
@@ -2001,7 +2070,7 @@ ft2NativeTerminalOutputProducerRetry[failure_?FailureQ,
     IntegerQ[reportedAdditional] && reportedAdditional > 0,
     reportedAdditional,
     DiffExp2`Tolerances`$SafetyDigits];
-  If[level > 1 && level <= nLevels && currentLevelDigits > 0 &&
+  If[level >= 1 && level <= nLevels && currentLevelDigits > 0 &&
       additional > 0 && AssociationQ[backend] &&
       Lookup[backend, "reason", None] ===
         "terminal_output_ball_inconclusive" &&
@@ -2039,6 +2108,7 @@ ft2RaiseMatchingProducerDigits[current_Association,
 
 ft2NativeMatchingRetryQ[failure_] :=
   ft2NativeMatchingReservoirRetryQ[failure] ||
+  ft2NativeProducerReservoirRetryQ[failure] ||
   ft2NativeMatchingClearanceRetryQ[failure] ||
   ft2NativeMatchingProducerRetryQ[failure];
 
@@ -2094,16 +2164,18 @@ ft2MatchingHaloProfileContract[name_String, prepKey_,
     basePlan_Association] := Module[{record, identity},
   If[!ft2NativeEpsilonPlanQ[basePlan] ||
       basePlan["Record", "MatchingPrivateHalos"] =!=
+        ConstantArray[0, basePlan["NumLevels"]] ||
+      basePlan["Record", "ProducerPrivateLosses"] =!=
         ConstantArray[0, basePlan["NumLevels"]],
     Return[Failure["FeynmanTrickMatchingHaloProfile", <|
       "Detail" -> "matching-halo profile contract requires the exact zero-private-halo base plan"|>],
     Module]];
   record = Join[<|
-    "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v2",
+    "Schema" -> "FeynmanTrick.MatchingHaloProfileContract/v3",
     "Example" -> name,
     "PrepKey" -> prepKey,
     "MatchingProofPolicy" ->
-      "exact-action-determinant-and-certified-shadow-prefix-v1",
+      "exact-match-reservoir-and-observed-producer-loss-v2",
     "BasePlanIdentity" -> basePlan["Identity"],
     "BasePlanRecord" -> basePlan["Record"],
     "Configuration" -> <|
@@ -2131,9 +2203,9 @@ ft2MatchingHaloProfileContractQ[contract_] := AssociationQ[contract] &&
   Sort[Keys[contract]] === Sort[{"Record", "Identity", "NumLevels"}] &&
   AssociationQ[contract["Record"]] &&
   Lookup[contract["Record"], "Schema", None] ===
-    "FeynmanTrick.MatchingHaloProfileContract/v2" &&
+      "FeynmanTrick.MatchingHaloProfileContract/v3" &&
   Lookup[contract["Record"], "MatchingProofPolicy", None] ===
-    "exact-action-determinant-and-certified-shadow-prefix-v1" &&
+    "exact-match-reservoir-and-observed-producer-loss-v2" &&
   IntegerQ[contract["NumLevels"]] && contract["NumLevels"] >= 1 &&
   With[{base = Lookup[contract["Record"], "BasePlanRecord", <||>]},
     AssociationQ[base] &&
@@ -2143,6 +2215,8 @@ ft2MatchingHaloProfileContractQ[contract_] := AssociationQ[contract] &&
       ListQ[Lookup[base, "Levels", None]] &&
       Length[base["Levels"]] === contract["NumLevels"] &&
       Lookup[base, "MatchingPrivateHalos", None] ===
+        ConstantArray[0, contract["NumLevels"]] &&
+      Lookup[base, "ProducerPrivateLosses", None] ===
         ConstantArray[0, contract["NumLevels"]]] &&
   Lookup[contract["Record"], "BasePlanIdentity", None] ===
     ft2CanonicalIdentity["ft2-native-epsilon-plan-",
@@ -2154,14 +2228,27 @@ ft2MatchingHaloProfileFile[contract_Association] :=
   FileNameJoin[{matchingHaloProfileRoot,
     "matching_halos_" <> StringTake[contract["Identity"], -64] <> ".mx"}];
 
-ft2MatchingHaloProfileQ[profile_, contract_Association] := Module[{core},
+ft2MatchingHaloProfileQ[profile_, contract_Association] := Module[
+  {core, schema, expectedKeys},
+  schema = If[AssociationQ[profile],
+    Lookup[profile, "Schema", None], None];
+  expectedKeys = Switch[schema,
+    "FeynmanTrick.MatchingHaloProfile/v2",
+      {"Schema", "Contract", "ContractIdentity", "NumLevels",
+        "MatchingPrivateHalos", "ProducerPrivateLosses", "Identity"},
+    "FeynmanTrick.MatchingHaloProfile/v3",
+      {"Schema", "Contract", "ContractIdentity", "NumLevels",
+        "MatchingPrivateHalos", "ProducerPrivateLosses",
+        "ProducerMatchingDigitExtras", "Identity"},
+    _, {}];
   If[!ft2MatchingHaloProfileContractQ[contract] ||
       !AssociationQ[profile] ||
-      Sort[Keys[profile]] =!= Sort[{"Schema", "Contract",
-        "ContractIdentity", "NumLevels", "MatchingPrivateHalos",
-        "Identity"}], Return[False, Module]];
+      expectedKeys === {} ||
+      Sort[Keys[profile]] =!= Sort[expectedKeys],
+    Return[False, Module]];
   core = KeyDrop[profile, "Identity"];
-  TrueQ[profile["Schema"] === "FeynmanTrick.MatchingHaloProfile/v1" &&
+  TrueQ[MemberQ[{"FeynmanTrick.MatchingHaloProfile/v2",
+        "FeynmanTrick.MatchingHaloProfile/v3"}, schema] &&
     profile["Contract"] === contract["Record"] &&
     profile["ContractIdentity"] === contract["Identity"] &&
     profile["NumLevels"] === contract["NumLevels"] &&
@@ -2169,6 +2256,16 @@ ft2MatchingHaloProfileQ[profile_, contract_Association] := Module[{core},
     Length[profile["MatchingPrivateHalos"]] === contract["NumLevels"] &&
     AllTrue[profile["MatchingPrivateHalos"],
       IntegerQ[#] && 0 <= # <= $ft2MatchingHaloProfileMax &] &&
+    ListQ[profile["ProducerPrivateLosses"]] &&
+    Length[profile["ProducerPrivateLosses"]] === contract["NumLevels"] &&
+    AllTrue[profile["ProducerPrivateLosses"],
+      IntegerQ[#] && 0 <= # <= $ft2MatchingHaloProfileMax &] &&
+    (schema === "FeynmanTrick.MatchingHaloProfile/v2" ||
+      (ListQ[profile["ProducerMatchingDigitExtras"]] &&
+       Length[profile["ProducerMatchingDigitExtras"]] ===
+         contract["NumLevels"] &&
+       AllTrue[profile["ProducerMatchingDigitExtras"],
+         IntegerQ[#] && 0 <= # <= $ft2MatchingHaloProfileMax &])) &&
     profile["Identity"] === ft2CanonicalIdentity[
       "ft2-matching-halo-profile-", core]]];
 
@@ -2187,6 +2284,31 @@ ft2LoadMatchingHaloProfile[file_String, contract_Association] := Module[
   Print["FTLADDER MATCH PROFILE HIT ", file,
     " privateHalos=", profile["MatchingPrivateHalos"]];
   profile["MatchingPrivateHalos"]];
+
+ft2LoadProducerLossProfile[file_String, contract_Association] := Module[
+  {ok, profile},
+  If[!FileExistsQ[file], Return[ConstantArray[0,
+    contract["NumLevels"]], Module]];
+  Clear[Global`$FT2MatchingHaloProfile];
+  ok = Quiet[Check[Get[file]; True, False]];
+  profile = If[TrueQ[ok], Global`$FT2MatchingHaloProfile, None];
+  Clear[Global`$FT2MatchingHaloProfile];
+  If[!TrueQ[ok] || !ft2MatchingHaloProfileQ[profile, contract],
+    Return[ConstantArray[0, contract["NumLevels"]], Module]];
+  profile["ProducerPrivateLosses"]];
+
+ft2LoadProducerDigitProfile[file_String, contract_Association] := Module[
+  {ok, profile},
+  If[!FileExistsQ[file], Return[ConstantArray[0,
+    contract["NumLevels"]], Module]];
+  Clear[Global`$FT2MatchingHaloProfile];
+  ok = Quiet[Check[Get[file]; True, False]];
+  profile = If[TrueQ[ok], Global`$FT2MatchingHaloProfile, None];
+  Clear[Global`$FT2MatchingHaloProfile];
+  If[!TrueQ[ok] || !ft2MatchingHaloProfileQ[profile, contract],
+    Return[ConstantArray[0, contract["NumLevels"]], Module]];
+  Lookup[profile, "ProducerMatchingDigitExtras",
+    ConstantArray[0, contract["NumLevels"]]]];
 
 ft2AcquireMatchingHaloProfileLock[file_String] := Module[
   {lock = file <> ".lock", acquired, age, attempts = 200},
@@ -2209,18 +2331,34 @@ ft2AcquireMatchingHaloProfileLock[file_String] := Module[
     "File" -> file, "Lock" -> lock|>]];
 
 ft2SaveMatchingHaloProfileUnlocked[file_String, contract_Association,
-    bounds_] := Module[
-  {existing, merged, core, profile, tmp, wrote, renamed},
+    bounds_, producerLossBounds_:Automatic,
+    producerDigitBounds_:Automatic] := Module[
+  {existing, existingProducer, existingProducerDigits, merged,
+   mergedProducer, mergedProducerDigits, core, profile, tmp, wrote, renamed},
   existing = ft2LoadMatchingHaloProfile[file, contract];
+  existingProducer = ft2LoadProducerLossProfile[file, contract];
+  existingProducerDigits = ft2LoadProducerDigitProfile[file, contract];
   merged = ft2MergeMatchingHaloBounds[contract["NumLevels"],
     {existing, bounds}];
   If[FailureQ[merged], Return[merged, Module]];
+  mergedProducer = ft2MergeMatchingHaloBounds[contract["NumLevels"],
+    {existingProducer, producerLossBounds}];
+  If[FailureQ[mergedProducer], Return[mergedProducer, Module]];
+  mergedProducerDigits = ft2MergeMatchingHaloBounds[
+    contract["NumLevels"],
+    {existingProducerDigits, producerDigitBounds}];
+  If[FailureQ[mergedProducerDigits],
+    Return[mergedProducerDigits, Module]];
   core = <|
-    "Schema" -> "FeynmanTrick.MatchingHaloProfile/v1",
+    "Schema" -> "FeynmanTrick.MatchingHaloProfile/v3",
     "Contract" -> contract["Record"],
     "ContractIdentity" -> contract["Identity"],
     "NumLevels" -> contract["NumLevels"],
     "MatchingPrivateHalos" -> Lookup[merged,
+      Range[contract["NumLevels"]], 0],
+    "ProducerPrivateLosses" -> Lookup[mergedProducer,
+      Range[contract["NumLevels"]], 0],
+    "ProducerMatchingDigitExtras" -> Lookup[mergedProducerDigits,
       Range[contract["NumLevels"]], 0]|>;
   profile = Append[core, "Identity" -> ft2CanonicalIdentity[
     "ft2-matching-halo-profile-", core]];
@@ -2247,11 +2385,14 @@ ft2SaveMatchingHaloProfileUnlocked[file_String, contract_Association,
       "Detail" -> "could not atomically publish the matching-halo profile",
       "File" -> file|>], Module]];
   Print["FTLADDER MATCH PROFILE ", file,
-    " privateHalos=", profile["MatchingPrivateHalos"]];
+    " privateHalos=", profile["MatchingPrivateHalos"],
+    " producerLosses=", profile["ProducerPrivateLosses"],
+    " producerDigitExtras=", profile["ProducerMatchingDigitExtras"]];
   profile];
 
 ft2SaveMatchingHaloProfile[file_String, contract_Association,
-    bounds_] := Module[{lock},
+    bounds_, producerLossBounds_:Automatic,
+    producerDigitBounds_:Automatic] := Module[{lock},
   If[!ft2MatchingHaloProfileContractQ[contract],
     Return[Failure["FeynmanTrickMatchingHaloProfile", <|
       "Detail" -> "cannot save a matching-halo profile under a malformed contract"|>],
@@ -2260,7 +2401,8 @@ ft2SaveMatchingHaloProfile[file_String, contract_Association,
   If[FailureQ[lock], Return[lock, Module]];
   Internal`WithLocalSettings[
     Null,
-    ft2SaveMatchingHaloProfileUnlocked[file, contract, bounds],
+    ft2SaveMatchingHaloProfileUnlocked[
+      file, contract, bounds, producerLossBounds, producerDigitBounds],
     If[DirectoryQ[lock], Quiet[Check[
       DeleteDirectory[lock, DeleteContents -> True], Null]]]]];
 
@@ -2499,12 +2641,14 @@ ft2PrepareBoundaryEntries[level_Integer, batch_Association,
    so q cancels and must never be recursively charged as a new halo. *)
 ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
     halos_List, normalize_, suppliedBatches_:Automatic,
-    matchingPrivateHalos_:Automatic] := Module[
+    matchingPrivateHalos_:Automatic,
+    producerPrivateLosses_:Automatic] := Module[
   {levels = Lookup[ftData, "Levels", None], nLevels, previousRequired,
    previousPublicRequired,
    levelRecords = {}, runtimeLevels = <||>, levelData, matrix, gauge,
-   batch, entries, active, entryLosses, intrinsicLoss, matchingSolveLoss,
-   matchingHalos, userFloor, publicRequired,
+   batch, entries, active, entryLosses, baseIntrinsicLoss, intrinsicLoss,
+   matchingSolveLoss, matchingHalos, producerLosses, producerPrivateLoss,
+   userFloor, publicRequired,
    required, record, identity},
   nLevels = Lookup[ftData, "NumLevels", If[AssociationQ[levels],
     Length[Select[Keys[levels], IntegerQ[#] && # > 0 &]], None]];
@@ -2527,6 +2671,21 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
     True, Return[ft2NativeFailure[
       "native epsilon preplanner received invalid private matching halos",
       <|"MatchingPrivateHalos" -> matchingPrivateHalos,
+        "NumLevels" -> nLevels|>], Module]];
+  producerLosses = Which[
+    producerPrivateLosses === Automatic, ConstantArray[0, nLevels],
+    ListQ[producerPrivateLosses] &&
+        Length[producerPrivateLosses] === nLevels &&
+        AllTrue[producerPrivateLosses, IntegerQ[#] && # >= 0 &],
+      producerPrivateLosses,
+    AssociationQ[producerPrivateLosses] &&
+        AllTrue[Range[nLevels],
+          IntegerQ[Lookup[producerPrivateLosses, #, 0]] &&
+            Lookup[producerPrivateLosses, #, 0] >= 0 &],
+      Lookup[producerPrivateLosses, Range[nLevels], 0],
+    True, Return[ft2NativeFailure[
+      "native epsilon preplanner received invalid private producer losses",
+      <|"ProducerPrivateLosses" -> producerPrivateLosses,
         "NumLevels" -> nLevels|>], Module]];
   previousRequired = epsilonOrder;
   previousPublicRequired = epsilonOrder;
@@ -2559,8 +2718,10 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
       entry["MasterIndex"] -> Max[0,
         If[entry["Case"] === "integrate", 1, 0] -
           entry["MinimumEpsilonShift"]]], active];
-    intrinsicLoss = If[entryLosses === <||>, 0,
+    baseIntrinsicLoss = If[entryLosses === <||>, 0,
       Max[Values[entryLosses]]];
+    producerPrivateLoss = producerLosses[[level]];
+    intrinsicLoss = baseIntrinsicLoss + producerPrivateLoss;
     (* Matching is an internal change of basis, not a physical epsilon-order
        consumer.  Its factorization/refinement halo is private to the match
        transaction and the residual certificate is authoritative only through
@@ -2588,6 +2749,8 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
       "RelativeMinimumEpsilonShifts" ->
         Lookup[entries, "MinimumEpsilonShift"],
       "EntryLosses" -> entryLosses,
+      "BaseIntrinsicLoss" -> baseIntrinsicLoss,
+      "ProducerPrivateLoss" -> producerPrivateLoss,
       "IntrinsicLoss" -> intrinsicLoss,
       "MatchingSolveLoss" -> matchingSolveLoss,
       "UserRawFloor" -> userFloor,
@@ -2611,6 +2774,7 @@ ft2BuildNativeEpsilonPlan[ftData_Association, epsilonOrder_Integer,
     "EpsilonOrder" -> epsilonOrder,
     "LevelEpsilonHalos" -> halos,
     "MatchingPrivateHalos" -> matchingHalos,
+    "ProducerPrivateLosses" -> producerLosses,
     "NumLevels" -> nLevels,
     "Levels" -> levelRecords,
     "DeepRequiredPublicRawTop" -> previousPublicRequired,
@@ -2657,7 +2821,7 @@ ft2RuntimeLevelMatrix[levelData_Association, plannedLevel_,
 
 ft2NativeEpsilonPlanQ[plan_] := Module[
   {record, levels, nLevels, levelRecords, deepRequired, deepPublic,
-   matchingHalos},
+   matchingHalos, producerLosses},
   If[!AssociationQ[plan], Return[False, Module]];
   record = Lookup[plan, "Record", None];
   levels = Lookup[plan, "Levels", None];
@@ -2676,12 +2840,15 @@ ft2NativeEpsilonPlanQ[plan_] := Module[
   deepRequired = Lookup[record, "DeepRequiredRawTop", None];
   deepPublic = Lookup[record, "DeepRequiredPublicRawTop", None];
   matchingHalos = Lookup[record, "MatchingPrivateHalos", None];
+  producerLosses = Lookup[record, "ProducerPrivateLosses", None];
   If[!ListQ[levelRecords] || Length[levelRecords] =!= nLevels ||
       Sort[Keys[levels]] =!= Range[nLevels] ||
       !IntegerQ[deepRequired] || !IntegerQ[deepPublic] ||
       deepPublic > deepRequired ||
       !ListQ[matchingHalos] || Length[matchingHalos] =!= nLevels ||
       !AllTrue[matchingHalos, IntegerQ[#] && # >= 0 &] ||
+      !ListQ[producerLosses] || Length[producerLosses] =!= nLevels ||
+      !AllTrue[producerLosses, IntegerQ[#] && # >= 0 &] ||
       Lookup[plan, "DeepRequiredPublicRawTop", None] =!= deepPublic ||
       Lookup[plan, "DeepRequiredRawTop", None] =!= deepRequired ||
       Lookup[Last[levelRecords], "RequiredPublicRawTop", None] =!=
@@ -2716,6 +2883,13 @@ ft2NativeEpsilonPlanQ[plan_] := Module[
           Lookup[saved, "RequiredRawTop", 0] &&
         Lookup[saved, "MatchingSolveLoss", None] ===
           matchingHalos[[level]] &&
+        Lookup[saved, "ProducerPrivateLoss", None] ===
+          producerLosses[[level]] &&
+        IntegerQ[Lookup[saved, "BaseIntrinsicLoss", None]] &&
+        Lookup[saved, "BaseIntrinsicLoss", -1] >= 0 &&
+        Lookup[saved, "IntrinsicLoss", None] ===
+          Lookup[saved, "BaseIntrinsicLoss", 0] +
+            Lookup[saved, "ProducerPrivateLoss", 0] &&
         IntegerQ[Lookup[saved, "IntrinsicLoss", None]] &&
         Lookup[saved, "IntrinsicLoss", -1] >= 0 &&
         IntegerQ[Lookup[saved, "MatchingSolveLoss", None]] &&
@@ -3521,7 +3695,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
 runExample[name_String, familyRequest_:None,
     matchingPrivateHalos_:Automatic,
     matchingTaylorOrders_:Automatic,
-    matchingDigitsByLevel_:Automatic] := Module[
+    matchingDigitsByLevel_:Automatic,
+    producerPrivateLosses_:Automatic] := Module[
   {topology, sequence, prepContract, prepKey, prepFile, ftData, outputDir, nLevels,
    boundaryOrder, deepBoundary, currentBCs, currentPrefactors,
    resumeCheckpoint = None, startLevel, finalRaw = None,
@@ -3529,7 +3704,10 @@ runExample[name_String, familyRequest_:None,
    dimExpr, normalizeFT, nativeEpsilonPlan = None,
    baseNativeEpsilonPlan = None, matchingHaloProfileContract = None,
    matchingHaloProfileFile = "", loadedMatchingPrivateHalos = <||>,
+   loadedProducerPrivateLosses = <||>,
+   loadedProducerMatchingDigitExtras = {}, loadedProducerMatchingDigits = <||>,
    effectiveMatchingPrivateHalos = <||>,
+   effectiveProducerPrivateLosses = <||>,
    effectiveMatchingTaylorOrders = <||>,
    effectiveMatchingDigitsByLevel = <||>, baseNativeBatches = <||>,
    nativeEpsilonExecution = None, initialDeepPrefactors,
@@ -3698,6 +3876,22 @@ runExample[name_String, familyRequest_:None,
       ft2LoadMatchingHaloProfile[matchingHaloProfileFile,
         matchingHaloProfileContract],
       ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]]];
+    loadedProducerPrivateLosses = If[matchingHaloProfileEnabled,
+      ft2LoadProducerLossProfile[matchingHaloProfileFile,
+        matchingHaloProfileContract],
+      ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]]];
+    loadedProducerMatchingDigitExtras = If[matchingHaloProfileEnabled,
+      ft2LoadProducerDigitProfile[matchingHaloProfileFile,
+        matchingHaloProfileContract],
+      ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]]];
+    loadedProducerMatchingDigits = Select[
+      AssociationThread[
+        Range[baseNativeEpsilonPlan["NumLevels"]],
+        matchDigits + loadedProducerMatchingDigitExtras],
+      # > matchDigits &];
+    effectiveMatchingDigitsByLevel = Merge[
+      {effectiveMatchingDigitsByLevel,
+        loadedProducerMatchingDigits}, Max];
     effectiveMatchingPrivateHalos = ft2MergeMatchingHaloBounds[
       baseNativeEpsilonPlan["NumLevels"],
       {loadedMatchingPrivateHalos, matchingPrivateHalos}];
@@ -3705,16 +3899,40 @@ runExample[name_String, familyRequest_:None,
       Print["FTLADDER MATCH PROFILE MERGE FAIL ",
         effectiveMatchingPrivateHalos];
       Return[$Failed]];
+    effectiveProducerPrivateLosses = ft2MergeMatchingHaloBounds[
+      baseNativeEpsilonPlan["NumLevels"],
+      {loadedProducerPrivateLosses, producerPrivateLosses}];
+    If[FailureQ[effectiveProducerPrivateLosses],
+      Print["FTLADDER PRODUCER LOSS PROFILE MERGE FAIL ",
+        effectiveProducerPrivateLosses];
+      Return[$Failed]];
+    If[matchingHaloProfileEnabled &&
+        AssociationQ[matchingDigitsByLevel] &&
+        matchingDigitsByLevel =!= <||>,
+      With[{savedProfile = ft2SaveMatchingHaloProfile[
+          matchingHaloProfileFile, matchingHaloProfileContract,
+          effectiveMatchingPrivateHalos,
+          effectiveProducerPrivateLosses,
+          AssociationMap[
+            Max[0, Lookup[effectiveMatchingDigitsByLevel, #,
+                matchDigits] - matchDigits] &,
+            Range[baseNativeEpsilonPlan["NumLevels"]]]]},
+        If[FailureQ[savedProfile],
+          Print["FTLADDER PRODUCER DIGIT PROFILE SAVE WARNING ",
+            savedProfile]]]];
     baseNativeBatches = AssociationMap[
       baseNativeEpsilonPlan["Levels"][#]["Batch"] &,
       Range[baseNativeEpsilonPlan["NumLevels"]]];
     nativeEpsilonPlan = If[
       Values[effectiveMatchingPrivateHalos] ===
-        ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]],
+          ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]] &&
+        Values[effectiveProducerPrivateLosses] ===
+          ConstantArray[0, baseNativeEpsilonPlan["NumLevels"]],
       baseNativeEpsilonPlan,
       ft2BuildNativeEpsilonPlan[
         ftData, epsOrder, levelEpsilonHalos, normalizeFT,
-        baseNativeBatches, effectiveMatchingPrivateHalos]];
+        baseNativeBatches, effectiveMatchingPrivateHalos,
+        effectiveProducerPrivateLosses]];
     If[FailureQ[nativeEpsilonPlan],
       Print["FTLADDER NATIVE EPSILON PLAN FAIL ", nativeEpsilonPlan];
       Return[$Failed]];
@@ -3724,6 +3942,8 @@ runExample[name_String, familyRequest_:None,
         "IntrinsicLoss"],
       " matchLosses=", Lookup[nativeEpsilonPlan["Record", "Levels"],
         "MatchingSolveLoss"],
+      " producerLosses=", Lookup[nativeEpsilonPlan["Record", "Levels"],
+        "ProducerPrivateLoss"],
       " required=", Lookup[nativeEpsilonPlan["Record", "Levels"],
         "RequiredRawTop"]]];
   If[resumeLadderFile =!= "",
@@ -4122,6 +4342,8 @@ runExample[name_String, familyRequest_:None,
           Throw[If[ft2NativeMatchingRetryQ[retry],
             Failure[retry[[1]], Join[retry[[2]], <|
               "MatchingPrivateHalos" -> effectiveMatchingPrivateHalos,
+              "ProducerPrivateLosses" ->
+                effectiveProducerPrivateLosses,
               "MatchingTaylorOrders" -> effectiveMatchingTaylorOrders,
               "MatchingDigitsByLevel" ->
                 effectiveMatchingDigitsByLevel,
@@ -4434,9 +4656,34 @@ runExample[name_String, familyRequest_:None,
       If[(recurrenceBackend === "Cpp" && needTop < nextReq) ||
           AnyTrue[kmaxAvail, # < needTop &],
         Print["FTLADDER INCOMPLETE level=", level - 1,
-          " requiredTop=", needTop, " availableTops=", kmaxAvail,
+          " requiredTop=", If[recurrenceBackend === "Cpp",
+            nextReq, needTop], " availableTops=", kmaxAvail,
           " shift=", shift];
-        Throw[$Failed, "FT2Abort"]];
+        If[recurrenceBackend === "Cpp" && needTop < nextReq,
+          With[{retry = ft2NativeHandoffProducerRetry[
+              level - 1, level, nextReq, Min[kmaxAvail],
+              nativeLedger["AvailableSourceCompleteMax"] -
+                runtimePlanCheck["CommonOffset"],
+              plannedLevel["Record", "BaseIntrinsicLoss"],
+              plannedLevel["Record", "ProducerPrivateLoss"]]},
+            Throw[If[ft2NativeProducerReservoirRetryQ[retry],
+              Failure[retry[[1]], Join[retry[[2]], <|
+                "MatchingPrivateHalos" ->
+                  effectiveMatchingPrivateHalos,
+                "ProducerPrivateLosses" ->
+                  effectiveProducerPrivateLosses,
+                "MatchingTaylorOrders" ->
+                  effectiveMatchingTaylorOrders,
+                "MatchingDigitsByLevel" ->
+                  effectiveMatchingDigitsByLevel,
+                "MatchingHaloProfileEnabled" ->
+                  matchingHaloProfileEnabled,
+                "MatchingHaloProfileContract" ->
+                  matchingHaloProfileContract,
+                "MatchingHaloProfileFile" ->
+                  matchingHaloProfileFile|>]],
+              $Failed], "FT2Abort"]],
+          Throw[$Failed, "FT2Abort"]]];
       (* Numericize only at a genuine level handoff: exact Log-trees from
          tile antiderivatives otherwise compound into symbolic giants that
          grind the next level's recursion (meprec storms). *)
@@ -4531,36 +4778,87 @@ runExample[name_String, familyRequest_:None,
 ft2RunExampleWithMatchingRetries[name_String,
     familyRequest_:None, initialMatchingPrivateHalos_:<||>,
     initialMatchingTaylorOrders_:<||>,
-    initialMatchingDigitsByLevel_:<||>] := Module[
+    initialMatchingDigitsByLevel_:<||>,
+    initialProducerPrivateLosses_:<||>] := Module[
   {matchingPrivateHalos = initialMatchingPrivateHalos,
    matchingTaylorOrders = initialMatchingTaylorOrders,
    matchingDigitsByLevel = initialMatchingDigitsByLevel,
+   producerPrivateLosses = initialProducerPrivateLosses,
    result, data, level, additional, current, merged, updated,
    currentExpansionOrder, currentTaylorOrders, profileEnabled, profileContract,
    profileFile, profileSave, nLevels, attempt = 0, maxAttempts = 12,
    residualVerdicts, previousResidualVerdicts,
    matchingTaylorProgress = <||>,
+   matchingReservoirProgress = <||>,
    producerLevel, currentMatchingDigits, currentMatchingDigitsByLevel,
+   currentProducerLosses, mergedProducerLosses,
    raisedMatchingDigits, preapprovedMatchingDigits, overLimitLevels,
+   backendFailure, previousBackendFailure,
    maxHalo = $ft2MatchingHaloProfileMax,
    maxTaylorOrder = 4 expansionOrder,
    maxProducerDigits = Min[wp,
      matchDigits + 4 DiffExp2`Tolerances`$SafetyDigits]},
   If[!And @@ (AssociationQ /@
         {matchingPrivateHalos, matchingTaylorOrders,
-          matchingDigitsByLevel}),
+          matchingDigitsByLevel, producerPrivateLosses}),
     Return[$Failed, Module]];
   While[attempt < maxAttempts,
     ++attempt;
     result = runExample[name, familyRequest, matchingPrivateHalos,
-      matchingTaylorOrders, matchingDigitsByLevel];
+      matchingTaylorOrders, matchingDigitsByLevel,
+      producerPrivateLosses];
     If[!ft2NativeMatchingRetryQ[result], Return[result, Module]];
     data = result[[2]];
     level = Lookup[data, "Level", None];
     additional = Lookup[data, "AdditionalOrders", None];
-    If[!IntegerQ[level] || level < 1 ||
+    If[!IntegerQ[level] ||
         !IntegerQ[additional] || additional < 1,
       Return[$Failed, Module]];
+    If[ft2NativeProducerReservoirRetryQ[result],
+      currentProducerLosses = Lookup[
+        data, "ProducerPrivateLosses", producerPrivateLosses];
+      profileContract = Lookup[data, "MatchingHaloProfileContract", None];
+      nLevels = Lookup[profileContract, "NumLevels", None];
+      If[!ft2MatchingHaloProfileContractQ[profileContract] ||
+          !IntegerQ[nLevels] || level > nLevels,
+        Print["FTLADDER PRODUCER LOSS RETRY PROFILE CONTRACT FAIL"];
+        Return[$Failed, Module]];
+      mergedProducerLosses = ft2MergeMatchingHaloBounds[
+        nLevels, {producerPrivateLosses, currentProducerLosses}];
+      If[FailureQ[mergedProducerLosses],
+        Print["FTLADDER PRODUCER LOSS RETRY PROFILE FAIL ",
+          mergedProducerLosses];
+        Return[$Failed, Module]];
+      updated = Lookup[mergedProducerLosses, level, 0] + additional;
+      If[updated > maxHalo,
+        Print["FTLADDER PRODUCER LOSS RETRY EXHAUSTED level=",
+          level, " requestedPrivateLoss=", updated,
+          " limit=", maxHalo];
+        Return[$Failed, Module]];
+      AssociateTo[mergedProducerLosses, level -> updated];
+      producerPrivateLosses = mergedProducerLosses;
+      current = Lookup[data, "MatchingPrivateHalos",
+        matchingPrivateHalos];
+      merged = ft2MergeMatchingHaloBounds[
+        nLevels, {matchingPrivateHalos, current}];
+      If[FailureQ[merged], Return[$Failed, Module]];
+      matchingPrivateHalos = merged;
+      profileEnabled = TrueQ[Lookup[data,
+        "MatchingHaloProfileEnabled", False]];
+      profileFile = Lookup[data, "MatchingHaloProfileFile", ""];
+      If[profileEnabled && StringQ[profileFile] &&
+          StringLength[profileFile] > 0,
+        profileSave = ft2SaveMatchingHaloProfile[
+          profileFile, profileContract, matchingPrivateHalos,
+          producerPrivateLosses];
+        If[FailureQ[profileSave],
+          Print["FTLADDER PRODUCER LOSS PROFILE SAVE WARNING ",
+            profileSave]]];
+      Print["FTLADDER NATIVE PRODUCER RESERVOIR RETRY level=", level,
+        " additional=", additional,
+        " producerLosses=", producerPrivateLosses];
+      DiffExp2`Solve`ClearSolveCaches[];
+      Continue[]];
     If[ft2NativeMatchingProducerRetryQ[result],
       producerLevel = Lookup[data, "ProducerLevel", None];
       nLevels = Lookup[data, "NumLevels", None];
@@ -4604,6 +4902,7 @@ ft2RunExampleWithMatchingRetries[name_String,
         " levelDigits=", matchingDigitsByLevel];
       DiffExp2`Solve`ClearSolveCaches[];
       Continue[]];
+    If[level < 1, Return[$Failed, Module]];
     If[ft2NativeMatchingClearanceRetryQ[result],
       currentExpansionOrder = Lookup[
         data, "CurrentExpansionOrder", None];
@@ -4622,8 +4921,45 @@ ft2RunExampleWithMatchingRetries[name_String,
           level, " previousVerdicts=", previousResidualVerdicts,
           " currentVerdicts=", residualVerdicts,
           " currentExpansionOrder=", currentExpansionOrder];
+        profileContract = Lookup[
+          data, "MatchingHaloProfileContract", None];
+        nLevels = If[AssociationQ[profileContract],
+          Lookup[profileContract, "NumLevels", None], None];
+        currentMatchingDigitsByLevel = Lookup[
+          data, "MatchingDigitsByLevel", matchingDigitsByLevel];
+        producerLevel = level + 1;
+        If[ft2MatchingHaloProfileContractQ[profileContract] &&
+            IntegerQ[nLevels] && producerLevel <= nLevels &&
+            AssociationQ[currentMatchingDigitsByLevel],
+          currentMatchingDigits = Lookup[
+            currentMatchingDigitsByLevel, producerLevel, matchDigits];
+          updated = currentMatchingDigits +
+            DiffExp2`Tolerances`$SafetyDigits;
+          preapprovedMatchingDigits = Merge[
+            {matchingDigitsByLevel,
+              currentMatchingDigitsByLevel}, Max];
+          raisedMatchingDigits = ft2RaiseMatchingProducerDigits[
+            preapprovedMatchingDigits,
+            producerLevel, updated, nLevels];
+          overLimitLevels = If[AssociationQ[raisedMatchingDigits],
+            Select[Keys[raisedMatchingDigits],
+              raisedMatchingDigits[#] >
+                  Lookup[preapprovedMatchingDigits, #, matchDigits] &&
+                raisedMatchingDigits[#] > maxProducerDigits &],
+            {None}];
+          If[AssociationQ[raisedMatchingDigits] &&
+              overLimitLevels === {},
+            matchingDigitsByLevel = raisedMatchingDigits;
+            Print[
+              "FTLADDER NATIVE MATCH TAYLOR STALL PRODUCER RETRY level=",
+              level, " producerLevel=", producerLevel,
+              " previousProducerDigits=", currentMatchingDigits,
+              " nextProducerDigits=", updated,
+              " levelDigits=", matchingDigitsByLevel];
+            DiffExp2`Solve`ClearSolveCaches[];
+            Continue[]]];
         Return[Failure["FeynmanTrickNativeMatchingTaylorStalled", <|
-          "Detail" -> "raising the finite-Taylor order did not reduce the residual's inconclusive coefficient count",
+          "Detail" -> "raising the finite-Taylor order did not reduce the residual's inconclusive coefficient count and no bounded upstream producer retry remains",
           "Level" -> level,
           "CurrentExpansionOrder" -> currentExpansionOrder,
           "PreviousResidualVerdicts" -> previousResidualVerdicts,
@@ -4660,7 +4996,16 @@ ft2RunExampleWithMatchingRetries[name_String,
     If[FailureQ[merged],
       Print["FTLADDER NATIVE MATCH RETRY PROFILE FAIL ", merged];
       Return[$Failed, Module]];
-    updated = Lookup[merged, level, 0] + additional;
+    backendFailure = Lookup[data, "BackendFailure", None];
+    previousBackendFailure = Lookup[
+      matchingReservoirProgress, level, None];
+    updated = ft2NativeMatchingReservoirBackoff[
+      Lookup[merged, level, 0], additional,
+      previousBackendFailure, backendFailure];
+    If[updated === $Failed, Return[$Failed, Module]];
+    If[AssociationQ[backendFailure],
+      AssociateTo[matchingReservoirProgress,
+        level -> backendFailure]];
     If[updated > maxHalo,
       Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED level=", level,
         " requestedPrivateHalo=", updated, " limit=", maxHalo];
@@ -4673,7 +5018,8 @@ ft2RunExampleWithMatchingRetries[name_String,
     If[profileEnabled && ft2MatchingHaloProfileContractQ[profileContract] &&
         StringQ[profileFile] && StringLength[profileFile] > 0,
       profileSave = ft2SaveMatchingHaloProfile[
-        profileFile, profileContract, matchingPrivateHalos];
+        profileFile, profileContract, matchingPrivateHalos,
+        producerPrivateLosses];
       If[FailureQ[profileSave],
         Print["FTLADDER MATCH PROFILE SAVE WARNING ", profileSave]]];
     Print["FTLADDER NATIVE MATCH RETRY level=", level,
@@ -4682,6 +5028,7 @@ ft2RunExampleWithMatchingRetries[name_String,
     DiffExp2`Solve`ClearSolveCaches[]];
   Print["FTLADDER NATIVE MATCH RETRY EXHAUSTED attempts=", maxAttempts,
     " privateHalos=", matchingPrivateHalos,
+    " producerLosses=", producerPrivateLosses,
     " taylorOrders=", matchingTaylorOrders,
     " levelDigits=", matchingDigitsByLevel];
   $Failed];

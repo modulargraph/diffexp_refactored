@@ -17,7 +17,7 @@ allowlist. It rejects both missing files and accidental additions.
 | `FeynmanTrick.m` | Stable root loader for Feynman-trick preparation and execution |
 | selected `FeynmanTrick/*.m` | Exact family/request contracts, topology algebra, FIRE7 Classical/modular execution, iteration, level reductions, boundary data, and pipeline facade |
 | `cpp/`, `CMakeLists.txt` | C++20/FLINT recurrence backend and native test |
-| `Examples/` | Runnable direct and Feynman-trick examples |
+| `Examples/` | Runnable direct examples and the public Feynman-trick `RunExample.m` launcher profiles |
 | selected `Docs/*.md` | Installation, tutorials, API, continuation, results, migration, citation, and backend documentation |
 | `Scripts/run_ft_stepwise2.m` | Transitional runtime used by the public Feynman-trick subprocess facade |
 | `Scripts/FTExamples.m` | Built-in example/topology registry used by that runtime |

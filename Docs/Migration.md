@@ -159,9 +159,9 @@ computed and added manually when only their combination is finite.
 
 ## Feynman-trick migration
 
-Use ``FeynmanTrick`RunIntegrationPipeline`` (or its underlying
-``Scripts/run_ft_stepwise2.m`` runner), not the legacy
-``Scripts/run_ft_stepwise.m``. The DiffExp 2 runner consumes the exact
+Use `FeynmanTrick`RunIntegrationPipeline` (or the public
+`Examples/FeynmanTrick/RunExample.m` command-line launcher), not the legacy
+`Scripts/run_ft_stepwise.m`. The DiffExp 2 pipeline consumes the exact
 in-memory differential matrix, transports exact local sectors, supports
 separate FIRE preparation caches and ladder checkpoints, and refuses
 incomplete epsilon windows.

@@ -162,14 +162,40 @@ int main() {
       throw std::runtime_error(
           "scalar singular-to-ordinary bridge was not certified: " +
           bridge.detail);
+    if (bridge.detail.find("ordinary_tail_method=all-future-q/C-recurrence") ==
+        std::string::npos)
+      throw std::runtime_error(
+          "scalar singular-to-ordinary bridge did not use the recurrence "
+          "tail: " +
+          bridge.detail);
     require_contains(bridge.evaluation.value.at(0, 0), exact,
                      "bridged scalar Frobenius value");
+    const auto outward_bridge =
+        diffexp2::certify_singular_rational_shadow_ordinary_bridge(
+            equation, local, EpsilonWindow{0, 0}, 4,
+            diffexp2::RealEvaluationPoint::rational("1/6"), "1/2", point, 16,
+            "31/192", {}, &prefix_certificate);
+    if (outward_bridge.status != TailMajorantStatus::Certified)
+      throw std::runtime_error(
+          "outward singular-to-ordinary witness was not certified: " +
+          outward_bridge.detail);
+    if (!(outward_bridge.ordinary_tail.value.absolute.front()
+              .approximate_upper() <
+          bridge.ordinary_tail.value.absolute.front().approximate_upper()))
+      throw std::runtime_error(
+          "outward recurrence witness did not tighten the certified tail: "
+          "midpoint=" +
+          bridge.ordinary_tail.value.absolute.front().dump_exact() +
+          "; outward=" +
+          outward_bridge.ordinary_tail.value.absolute.front().dump_exact());
+    require_contains(outward_bridge.evaluation.value.at(0, 0), exact,
+                     "outward bridged scalar Frobenius value");
 
     // The singular tail and ordinary continuation need not use the same
     // frame.  h=exp(t) is Fuchsian with theta h=t h, while f=t h obeys the
     // physically irregular cleared equation
     //
-    //                  t theta f = (2 t + t^2) f.
+    //                  t theta f = (t + t^2) f.
     //
     // Certify the tail in h, map the enclosed seed by f=t h, and continue
     // only then in the original physical equation.
@@ -183,7 +209,7 @@ int main() {
                                  rational(0, {"1"})};
     irregular_physical.c_lags.resize(3);
     irregular_physical.c_lags[1].push_back(
-        PhysicalODEMatrixEntry<Rational>{0, 0, rational(0, {"2"})});
+        PhysicalODEMatrixEntry<Rational>{0, 0, rational(0, {"1"})});
     irregular_physical.c_lags[2].push_back(
         PhysicalODEMatrixEntry<Rational>{0, 0, rational(0, {"1"})});
     const auto tail_prefix = diffexp2::certify_singular_rational_shadow_prefix(
@@ -210,6 +236,37 @@ int main() {
           framed_bridge.detail);
     require_contains(framed_bridge.evaluation.value.at(0, 0), exact,
                      "frame-changing bridged physical value");
+
+    // A private reservoir may prepend a structurally zero epsilon row.  Local
+    // evaluation legitimately trims that row; the full physical tail theorem
+    // must be sliced to the public evaluated frame before the bridge inflates
+    // the result.
+    const auto leading_zero_frame_bridge = diffexp2::
+        certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
+            equation, local, equation,
+            [](const diffexp2::EpsilonVector &seed,
+               const diffexp2::RealEvaluationPoint &)
+                -> std::optional<diffexp2::EpsilonVector> {
+              diffexp2::EpsilonVector physical;
+              physical.epsilon = {-1, 0};
+              physical.dimension = seed.dimension;
+              physical.coefficients.assign(
+                  physical.epsilon.width() * physical.dimension,
+                  ComplexBall(0));
+              physical.at(0, 0) = seed.at(0, 0);
+              return physical;
+            },
+            EpsilonWindow{0, 0}, 4,
+            diffexp2::RealEvaluationPoint::rational("1/6"), "1/2", point, 16,
+            "1/8", {}, &prefix_certificate);
+    if (leading_zero_frame_bridge.status != TailMajorantStatus::Certified ||
+        leading_zero_frame_bridge.evaluation.value.epsilon.min_power != 0 ||
+        leading_zero_frame_bridge.evaluation.value.epsilon.complete_max != 0)
+      throw std::runtime_error(
+          "leading-zero private epsilon frame blocked the singular bridge: " +
+          leading_zero_frame_bridge.detail);
+    require_contains(leading_zero_frame_bridge.evaluation.value.at(0, 0),
+                     exact, "leading-zero-frame bridged value");
 
     auto common_monomial_equation = equation;
     for (auto &value : common_monomial_equation.q_lags)
@@ -243,6 +300,44 @@ int main() {
         negative_quarter * diffexp2::local_detail::cb_exp(negative_quarter);
     require_contains(negative_bridge.evaluation.value.at(0, 0), negative_exact,
                      "negative-ray bridged scalar Frobenius value");
+
+    auto high_epsilon_coupling = constant_equation(1);
+    high_epsilon_coupling.c_lags.resize(2);
+    high_epsilon_coupling.c_lags[1].push_back(
+        PhysicalODEMatrixEntry<Rational>{0, 0, rational(1, {"8192"})});
+    const auto high_weight_contraction = diffexp2::
+        singular_tail_majorant_detail::certify_interval_transfer_contraction(
+            high_epsilon_coupling, EpsilonWindow{0, 1}, Rational(0),
+            Rational(0), 0, 0, 5, Rational(1));
+    if (high_weight_contraction.status != TailMajorantStatus::Certified ||
+        high_weight_contraction.epsilon_weight_base <= 1024)
+      throw std::runtime_error(
+          "ordinary recurrence contraction did not search beyond the old "
+          "epsilon-weight ceiling: " +
+          high_weight_contraction.detail);
+    auto radius_sensitive = constant_equation(1);
+    radius_sensitive.c_lags.resize(2);
+    radius_sensitive.c_lags[1].push_back(
+        PhysicalODEMatrixEntry<Rational>{0, 0, rational(0, {"100"})});
+    const auto loose_radius_contraction = diffexp2::
+        singular_tail_majorant_detail::certify_interval_transfer_contraction(
+            radius_sensitive, EpsilonWindow{0, 0}, Rational(0), Rational(0),
+            0, 0, 17, Rational("1/5"));
+    const auto tight_radius_contraction = diffexp2::
+        singular_tail_majorant_detail::certify_interval_transfer_contraction(
+            radius_sensitive, EpsilonWindow{0, 0}, Rational(0), Rational(0),
+            0, 0, 17, Rational("1/10"));
+    if (loose_radius_contraction.status != TailMajorantStatus::Certified ||
+        loose_radius_contraction.contraction_upper.back()
+                .approximate_upper() <=
+            1.0 ||
+        tight_radius_contraction.status != TailMajorantStatus::Certified ||
+        tight_radius_contraction.contraction_upper.back()
+                .approximate_upper() >=
+            1.0)
+      throw std::runtime_error(
+          "ordinary recurrence contraction did not distinguish loose and "
+          "tight witness radii");
 
     const auto too_large =
         diffexp2::prepare_singular_rational_shadow_tail_model(

@@ -470,6 +470,7 @@ All three pipeline functions share these options:
 | `"RequestDirectory"` | `Automatic` | content-addressed custom-family WXF handoff directory |
 | `"ExtraEnvironment"` | `<||>` | additional string-valued environment entries |
 | `"Asynchronous"` | `False` | return a running process record instead of waiting |
+| `"EchoOutput"` | `False` | stream synchronous child output to the parent while retaining it in the result |
 
 The facade returns one of:
 
@@ -485,13 +486,12 @@ execution is supported on macOS and Linux. It starts a clean
 occupy two Wolfram license seats. Native C++ worker threads do not each start
 a Wolfram kernel.
 
-The command-line driver remains available for advanced multi-example runs:
+The documented registry profiles are also available through the public
+command-line launcher:
 
 ```sh
-FT_EXAMPLES=bubble,banana \
-DE2_RECURRENCE_BACKEND=Cpp \
 DE2_CPP_THREADS=4 \
-wolframscript -file Scripts/run_ft_stepwise2.m
+wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
 ```
 
 ## Compatibility boundary

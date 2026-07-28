@@ -89,6 +89,29 @@ assert["complete matching clearance retries Taylor order, not epsilon width",
     clearanceRetry[[2, "AdditionalOrders"]] === 50 &&
     clearanceRetry[[2, "ResidualVerdicts", "inconclusive"]] === 5,
   {reservoirRetry, clearanceRetry}];
+assert["later-match reservoir progress exponentially backs off private discovery",
+  ft2NativeMatchingReservoirBackoff[
+      4, 1, <|"arm" -> "upper", "match" -> 9|>,
+      <|"arm" -> "upper", "match" -> 10|>] === 8 &&
+    ft2NativeMatchingReservoirBackoff[
+      4, 1, <|"arm" -> "upper", "match" -> 9|>,
+      <|"arm" -> "upper", "match" -> 9|>] === 5 &&
+    ft2NativeMatchingReservoirBackoff[
+      4, 1, <|"arm" -> "lower", "match" -> 9|>,
+      <|"arm" -> "upper", "match" -> 10|>] === 5];
+handoffProducerRetry = ft2NativeHandoffProducerRetry[
+  1, 2, 3, 2, 6, 1, 0];
+assert["short private handoff grows the producer supply without moving the consumer target",
+  ft2NativeProducerReservoirRetryQ[handoffProducerRetry] &&
+    ft2NativeMatchingRetryQ[handoffProducerRetry] &&
+    handoffProducerRetry[[2, "Level"]] === 2 &&
+    handoffProducerRetry[[2, "ConsumerLevel"]] === 1 &&
+    handoffProducerRetry[[2, "ObservedProducerLoss"]] === 4 &&
+    handoffProducerRetry[[2, "RequiredProducerPrivateLoss"]] === 3 &&
+    handoffProducerRetry[[2, "AdditionalOrders"]] === 3 &&
+    ft2NativeHandoffProducerRetry[
+      1, 2, 3, 3, 6, 1, 0] === None,
+  handoffProducerRetry];
 assert["materialized handoff clearance permits one failing-level Taylor probe",
   ft2NativeMatchingReservoirRetry[continuityFailure, 1] === None &&
     ft2NativeMatchingClearanceRetryQ[continuityRetry] &&
@@ -185,7 +208,7 @@ measuredTerminalOutputFailure = Failure["DiffExp2", <|
 measuredTerminalOutputRetry = ft2NativeTerminalOutputProducerRetry[
   measuredTerminalOutputFailure, 5, 6, 10];
 assert[
-  "wide terminal boundary retries its own level as the next consumer's producer",
+  "wide terminal output retries its own level as the downstream producer",
   ft2NativeMatchingProducerRetryQ[terminalOutputRetry] &&
     terminalOutputRetry[[2, "Level"]] === 4 &&
     terminalOutputRetry[[2, "ProducerLevel"]] === 5 &&
@@ -194,8 +217,11 @@ assert[
     terminalOutputRetry[[2, "AdditionalOrders"]] ===
       DiffExp2`Tolerances`$SafetyDigits &&
     measuredTerminalOutputRetry[[2, "AdditionalOrders"]] === 1 &&
-    ft2NativeTerminalOutputProducerRetry[
-      terminalOutputFailure, 1, 6, 10] === None,
+    With[{finalRetry = ft2NativeTerminalOutputProducerRetry[
+        terminalOutputFailure, 1, 6, 10]},
+      ft2NativeMatchingProducerRetryQ[finalRetry] &&
+        finalRetry[[2, "Level"]] === 0 &&
+        finalRetry[[2, "ProducerLevel"]] === 1],
   <|"fallback" -> terminalOutputRetry,
     "measured" -> measuredTerminalOutputRetry|>];
 
@@ -210,7 +236,8 @@ assert["matching Taylor progress requires fewer inconclusive coefficients",
 matchingTaylorRetryCalls = {};
 matchingTaylorRetryResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[matchingTaylorRetryCalls, taylorOrders];
       If[Length[matchingTaylorRetryCalls] === 1,
         Failure["FeynmanTrickNativeMatchingTaylor", <|
@@ -230,7 +257,8 @@ assert["matching retry driver doubles only the failing level Taylor order",
 matchingTaylorStallCalls = {};
 matchingTaylorStallResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[matchingTaylorStallCalls, taylorOrders];
       Failure["FeynmanTrickNativeMatchingTaylor", <|
         "Level" -> 2, "AdditionalOrders" -> expansionOrder,
@@ -250,7 +278,8 @@ assert["matching retry stops after a Taylor order increase makes no progress",
 continuityTaylorStallCalls = {};
 continuityTaylorStallResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[continuityTaylorStallCalls, taylorOrders];
       Failure["FeynmanTrickNativeMatchingTaylor", <|
         "Level" -> 1, "AdditionalOrders" -> expansionOrder,
@@ -272,10 +301,46 @@ assert[
       "scope"]] === "materialized-continuity-clearance",
   {continuityTaylorStallResult, continuityTaylorStallCalls}];
 
+producerFallbackCalls = {};
+producerFallbackResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
+      AppendTo[producerFallbackCalls, {taylorOrders, levelDigits}];
+      If[Length[producerFallbackCalls] <= 2,
+        Failure["FeynmanTrickNativeMatchingTaylor", <|
+          "Level" -> 1, "AdditionalOrders" -> expansionOrder,
+          "CurrentExpansionOrder" ->
+            Lookup[taylorOrders, 1, expansionOrder],
+          "ResidualVerdicts" -> <|
+            "pass" -> 22, "fail" -> 0, "inconclusive" -> 20|>,
+          "MatchingTaylorOrders" -> taylorOrders,
+          "MatchingDigitsByLevel" -> levelDigits,
+          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>|>],
+        True]],
+    ft2MatchingHaloProfileContractQ = Function[contract,
+      AssociationQ[contract] &&
+        Lookup[contract, "NumLevels", None] === 3],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "matching-taylor-producer-fallback-fixture"]];
+assert[
+  "nonimproving Taylor clearance tightens the upstream producer without changing the consumer target",
+  producerFallbackResult === True &&
+    producerFallbackCalls === {
+      {<||>, <||>},
+      {<|1 -> 2 expansionOrder|>, <||>},
+      {<|1 -> 2 expansionOrder|>,
+        <|2 -> matchDigits + DiffExp2`Tolerances`$SafetyDigits,
+          3 -> matchDigits +
+            2 DiffExp2`Tolerances`$SafetyDigits|>}},
+  producerFallbackCalls];
+
 matchingProducerRetryCalls = {};
 matchingProducerRetryResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[matchingProducerRetryCalls, levelDigits];
       If[Length[matchingProducerRetryCalls] === 1,
         Failure["FeynmanTrickNativeMatchingProducer", <|
@@ -293,10 +358,80 @@ assert["matching retry driver tightens only the preceding producer level",
         DiffExp2`Tolerances`$SafetyDigits|>},
   matchingProducerRetryCalls];
 
+producerReservoirRetryCalls = {};
+producerReservoirRetryResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
+      AppendTo[producerReservoirRetryCalls,
+        {epsilonHalos, producerLosses}];
+      If[Length[producerReservoirRetryCalls] === 1,
+        Failure["FeynmanTrickNativeProducerReservoir", <|
+          "Level" -> 2, "ConsumerLevel" -> 1,
+          "AdditionalOrders" -> 3,
+          "MatchingPrivateHalos" -> <|1 -> 2|>,
+          "ProducerPrivateLosses" -> producerLosses,
+          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>,
+          "MatchingHaloProfileEnabled" -> False|>], True]],
+    ft2MatchingHaloProfileContractQ = Function[contract,
+      AssociationQ[contract] &&
+        Lookup[contract, "NumLevels", None] === 3],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "producer-reservoir-retry-fixture"]];
+assert["producer reservoir retry grows supply while retaining the consumer matching halo",
+  producerReservoirRetryResult === True &&
+    producerReservoirRetryCalls === {
+      {<||>, <||>}, {<|1 -> 2, 2 -> 0, 3 -> 0|>,
+        <|1 -> 0, 2 -> 3, 3 -> 0|>}},
+  producerReservoirRetryCalls];
+
+reservoirBackoffCalls = {};
+reservoirBackoffResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
+      AppendTo[reservoirBackoffCalls, epsilonHalos];
+      Switch[Length[reservoirBackoffCalls],
+        1, Failure["FeynmanTrickNativeMatchingReservoir", <|
+          "Level" -> 3, "AdditionalOrders" -> 2,
+          "BackendFailure" -> <|"arm" -> "upper", "match" -> 9|>,
+          "MatchingPrivateHalos" -> epsilonHalos,
+          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>,
+          "MatchingHaloProfileEnabled" -> False|>],
+        2, Failure["FeynmanTrickNativeMatchingReservoir", <|
+          "Level" -> 3, "AdditionalOrders" -> 2,
+          "BackendFailure" -> <|"arm" -> "upper", "match" -> 9|>,
+          "MatchingPrivateHalos" -> epsilonHalos,
+          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>,
+          "MatchingHaloProfileEnabled" -> False|>],
+        3, Failure["FeynmanTrickNativeMatchingReservoir", <|
+          "Level" -> 3, "AdditionalOrders" -> 1,
+          "BackendFailure" -> <|"arm" -> "upper", "match" -> 10|>,
+          "MatchingPrivateHalos" -> epsilonHalos,
+          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>,
+          "MatchingHaloProfileEnabled" -> False|>],
+        _, True]],
+    ft2MatchingHaloProfileContractQ = Function[contract,
+      AssociationQ[contract] &&
+        Lookup[contract, "NumLevels", None] === 3],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "matching-reservoir-backoff-fixture"]];
+assert[
+  "retry driver avoids one-full-arm-per-chart reservoir discovery",
+  reservoirBackoffResult === True &&
+    reservoirBackoffCalls === {
+      <||>, <|1 -> 0, 2 -> 0, 3 -> 2|>,
+      <|1 -> 0, 2 -> 0, 3 -> 4|>,
+      <|1 -> 0, 2 -> 0, 3 -> 8|>},
+  reservoirBackoffCalls];
+
 seededRetryCalls = {};
 seededRetryResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[seededRetryCalls,
         {epsilonHalos, taylorOrders, levelDigits}];
       If[Length[seededRetryCalls] === 1,
@@ -323,7 +458,8 @@ assert[
 preapprovedHighDigitCalls = {};
 preapprovedHighDigitResult = Block[{
     runExample = Function[
-      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits},
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
       AppendTo[preapprovedHighDigitCalls, levelDigits];
       If[Length[preapprovedHighDigitCalls] === 1,
         Failure["FeynmanTrickNativeMatchingProducer", <|

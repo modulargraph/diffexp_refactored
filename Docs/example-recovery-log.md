@@ -106,6 +106,22 @@ from 25 to 50 gained only one radius bit at the final paired line; matching-digi
 escalation does not tighten that line and triggers the rejected transitive
 14/16-digit cascade.
 
+## Generic Feynman-trick examples
+
+| ID | Observed issue | Controlled change | Result |
+|---|---|---|---|
+| FT-01 | The documented shell examples invoked the private `run_ft_stepwise2.m` implementation directly, so launch configuration, validation, and output handling were duplicated. | Add one public `RunExample.m` registry which builds `FeynmanTrick\`PipelinePlan` values and executes `FeynmanTrick\`RunIntegrationPipeline`; reduce all six shell files to thin launchers. | `--check` validates all six plans. Bubble, sunrise, box-bubble, and kite execute through the public facade. Banana4 is plan-validated only, as requested. |
+| FT-02 | Kite repeatedly requested more private epsilon reservoir although its exact local honestly contained lower Laurent rows that were discarded when the evaluation frame was narrowed to the incoming request. | Preserve every honest lower local row while keeping the requested upper edge unchanged, and add a production-shaped lower-Laurent terminal match fixture. | The focused match test passes and the false reservoir loop is gone. |
+| FT-03 | After FT-02, successive kite matches exposed independent producer-digit and same-arm private-clearance deficits. Linear one-order retries revisited equivalent failures. | Separate consumer matching halos, producer delivery losses, and producer matching-digit extras; grow a repeated same-arm matching halo exponentially. | Kite completes through the generic launcher with finite value `0.22398391910744253038193`, no retained poles, private halos `{1,0,42,0}`, and producer digit extras `{0,2,4,6}`. |
+| FT-04 | Unequal banana levels 3 and 2 pass, but level-1 upper match 29 assigns all 42 required residual coefficients unbounded balls. Their zero-radius midpoint residual is about `1.0e-68`, and each singular Frobenius tail is only about `1e-54`--`1e-61`. | Compact non-finite JSON diagnostics and inspect the terminal singular-to-ordinary bridge instead of raising epsilon depth or working precision. | The ordinary disk-wide Gronwall tail, not GCD or the singular tail, is approximately `2^3,730,000`. The automatic Taylor `70 -> 140` retry was stopped as misclassified. Log: `/tmp/diffexp2-unequal-banana-generic.log`. |
+| FT-05 | The first hypothesis was that returning the first certified ordinary witness selected a weak disk. | Compare witness radii in a scalar bridge fixture and reverse the candidate order only under test. | Disproved. Under the Gronwall theorem the midpoint disk is tighter than the outward disk. The production order was restored; do not repeat this radius-order-only change. |
+| FT-06 | The exact q/C recurrence retains cancellations that the global Gronwall norm destroys. A new all-future ordinary recurrence certificate works in controlled bridges but initially fell back in the real unequal banana. | Reuse the exact Rational all-future transfer theorem with the propagated Acb induction prefix; log fallback reasons; test epsilon weights through `2^20`. | The theorem is rigorous and exposed an inconsistent frame-change test equation that the old huge error ball had hidden. In the real bridge the midpoint recurrence contraction is `rho=1.657362`, independent of additional epsilon weight, so weight expansion alone is disproved. Logs: `/tmp/diffexp2-unequal-banana-recurrence-tail.log` and `/tmp/diffexp2-unequal-banana-recurrence-weighted.log`. |
+| FT-07 | A midpoint ordinary witness is too large for the recurrence theorem even at Taylor order 800, while the target lies well inside a smaller admissible disk. | Search recurrence witnesses beginning at `R=9|delta|/8`, disable Gronwall short-circuiting during that search, and add a fixture where a loose radius has `rho>1` but a tighter radius certifies. | Confirmed. The focused C++ tests pass and a clean generic-launcher run completes every unequal-banana level. Level 1 clears the former chart-29 failure in 989.17 seconds and publishes finite value `5.83402729266214946741`; the pipeline exits successfully. Log: `/tmp/diffexp2-unequal-banana-tight-recurrence.log`. |
+
+Current status: bubble, sunrise, box-bubble, and kite pass through the generic
+facade. Unequal banana also passes end to end through the generic facade.
+Banana4 remains intentionally unexecuted.
+
 ## Four-loop banana
 
 This table is the historical recovery summary through B4-145. The

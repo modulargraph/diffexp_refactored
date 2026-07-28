@@ -2595,7 +2595,30 @@ evaluate_physical_local_solution_with_certified_tail(
     result.evaluation.theta_value.error.provenance = result.tail.detail;
     return result;
   }
-  result.evaluation.value.error = result.tail.value;
+  if (result.evaluation.value.epsilon.min_power <
+          result.tail.value.frame.min_power ||
+      result.evaluation.value.epsilon.complete_max >
+          result.tail.value.frame.complete_max ||
+      result.evaluation.theta_value.epsilon.min_power <
+          result.tail.theta.frame.min_power ||
+      result.evaluation.theta_value.epsilon.complete_max >
+          result.tail.theta.frame.complete_max)
+    throw std::logic_error(
+        "physical tail certificate does not cover the evaluated epsilon "
+        "windows");
+  // Exact leading epsilon rows are structurally trimmed by local evaluation.
+  // Keep the full theorem in result.tail, but attach only the matching
+  // certified sub-envelope to each evaluated vector.
+  ErrorEnvelope value_error;
+  value_error.frame = result.evaluation.value.epsilon;
+  value_error.guarantee = ErrorGuarantee::Certified;
+  value_error.provenance = result.tail.value.provenance;
+  for (std::int64_t raw_power = value_error.frame.min_power;
+       raw_power <= value_error.frame.complete_max; ++raw_power)
+    value_error.absolute.push_back(result.tail.value.absolute.at(
+        static_cast<std::size_t>(
+            raw_power - result.tail.value.frame.min_power)));
+  result.evaluation.value.error = std::move(value_error);
   ErrorEnvelope theta_error;
   theta_error.frame = result.evaluation.theta_value.epsilon;
   theta_error.guarantee = ErrorGuarantee::Certified;

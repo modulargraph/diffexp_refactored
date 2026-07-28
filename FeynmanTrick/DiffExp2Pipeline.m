@@ -10,7 +10,7 @@
 BeginPackage["FeynmanTrick`DiffExp2Pipeline`"];
 
 PipelinePlan::usage = "PipelinePlan[example, opts] returns the reproducible command/environment/checkpoint plan for the DiffExp2 Feynman-trick ladder without running it. PipelinePlan[familySpec, integrals, opts] additionally creates an exact content-addressed custom-family request; integrals may be one index vector, an ordered list, or All for deterministic L0 master discovery at execution.";
-RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the DiffExp2 Feynman-trick ladder with the C++ recurrence backend by default. RunIntegrationPipeline[familySpec, integrals, opts] executes selected targets or execution-time All-master discovery with the built-in runner, or with an external runner explicitly declared request-aware. RunIntegrationPipeline[plan] executes an existing PipelinePlan. It returns a PipelineResult (or PipelineProcess when Asynchronous -> True).";
+RunIntegrationPipeline::usage = "RunIntegrationPipeline[example, opts] runs the DiffExp2 Feynman-trick ladder with the C++ recurrence backend by default. RunIntegrationPipeline[familySpec, integrals, opts] executes selected targets or execution-time All-master discovery with the built-in runner, or with an external runner explicitly declared request-aware. RunIntegrationPipeline[plan] executes an existing PipelinePlan. It returns a PipelineResult (or PipelineProcess when Asynchronous -> True); EchoOutput -> True streams synchronous child output while retaining it in the result.";
 ResumeIntegrationPipeline::usage = "ResumeIntegrationPipeline[example, checkpoint, opts] resumes the DiffExp2 ladder from an atomic transport or boundary checkpoint.";
 RunnerSettingsFromEnvironment::usage = "RunnerSettingsFromEnvironment[] parses and validates the runner environment. It is shared by the package facade and Scripts/run_ft_stepwise2.m.";
 
@@ -272,7 +272,8 @@ Options[PipelinePlan] = {
   "RequestAwareRunner" -> False,
   "RequestDirectory" -> Automatic,
   "ExtraEnvironment" -> <||>,
-  "Asynchronous" -> False
+  "Asynchronous" -> False,
+  "EchoOutput" -> False
 };
 
 boolQ[value_] := MemberQ[{True, False}, value];
@@ -315,7 +316,7 @@ validatePlanOptions[settings_Association] := Module[{checks},
       "SingularMatchPrecondition",
       "RebuildPreparation", "MigrateLegacyPreparation",
       "AllowStaleCheckpoint", "SaveNativeTransportCheckpoint",
-      "Asynchronous"}),
+      "Asynchronous", "EchoOutput"}),
     IntegerQ[settings["FIRETimeoutSeconds"]] &&
       settings["FIRETimeoutSeconds"] >= 1,
     MemberQ[{"Modular", "Classical"}, settings["FIREBackend"]],
@@ -439,6 +440,7 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "FIREModularCacheDirectory" -> fireModularCacheDirectory,
     "FIRETimeoutSeconds" -> OptionValue["FIRETimeoutSeconds"],
     "Asynchronous" -> OptionValue["Asynchronous"],
+    "EchoOutput" -> OptionValue["EchoOutput"],
     "ExtraEnvironment" -> OptionValue["ExtraEnvironment"]
   |>;
   valid = validatePlanOptions[settings];
@@ -960,6 +962,60 @@ processCommand[plan_Association] := Module[{envProgram, assignments},
     KeySort[plan["Environment"]]];
   Join[{envProgram}, assignments, plan["Command"]]];
 
+readAvailableProcessText[stream_] := Module[{chunk},
+  chunk = Quiet[Check[ReadString[stream, EndOfBuffer], ""]];
+  If[StringQ[chunk], chunk, ""]];
+
+echoProcessText[chunk_String, streams_List] := If[chunk =!= "",
+  Scan[
+    Function[stream,
+      Quiet[Check[
+        WriteString[stream, chunk];
+        Flush[stream],
+        Null]]],
+    streams]];
+
+runProcessStreaming[command_List, directory_String] := Module[
+  {process, harvest, captured, stdout, stderr, chunk, exit, poll = .05,
+   start = AbsoluteTime[]},
+  process = Quiet[Check[
+    StartProcess[command, ProcessDirectory -> directory], $Failed]];
+  If[Head[process] =!= ProcessObject, Return[$Failed, Module]];
+  harvest = CheckAbort[
+    Reap[
+      While[ProcessStatus[process] === "Running",
+        chunk = readAvailableProcessText[process["StandardOutput"]];
+        If[chunk =!= "",
+          Sow[chunk, "stdout"];
+          echoProcessText[chunk, $Output]];
+        chunk = readAvailableProcessText[process["StandardError"]];
+        If[chunk =!= "",
+          Sow[chunk, "stderr"];
+          echoProcessText[chunk, $Messages]];
+        Pause[poll];
+        If[AbsoluteTime[] - start > 2, poll = .25]];
+      chunk = readAvailableProcessText[process["StandardOutput"]];
+      If[chunk =!= "",
+        Sow[chunk, "stdout"];
+        echoProcessText[chunk, $Output]];
+      chunk = readAvailableProcessText[process["StandardError"]];
+      If[chunk =!= "",
+        Sow[chunk, "stderr"];
+        echoProcessText[chunk, $Messages]],
+      _, Rule],
+    If[ProcessStatus[process] === "Running", Quiet[KillProcess[process]]];
+    Abort[]];
+  captured = Association[harvest[[2]]];
+  stdout = StringJoin[Lookup[captured, "stdout", {}]];
+  stderr = StringJoin[Lookup[captured, "stderr", {}]];
+  exit = Quiet[Check[ProcessInformation[process, "ExitCode"], $Failed]];
+  If[!IntegerQ[exit],
+    exit = Lookup[Quiet[Check[ProcessInformation[process], <||>]],
+      "ExitCode", $Failed]];
+  <|"ExitCode" -> exit, "StandardOutput" -> stdout,
+    "StandardError" -> stderr|>
+];
+
 preparePlanRequest[plan_Association] := Module[
   {request, requestFile, expectedFile, written, policy, family,
    executionName},
@@ -1007,7 +1063,8 @@ preparePlanRequest[plan_Association] := Module[
   If[FailureQ[written], written, plan]
 ];
 
-runPlan[plan_, asynchronous_] := Module[{preparedPlan, process, command},
+runPlan[plan_, asynchronous_, echoOutput_:False] := Module[
+  {preparedPlan, process, command},
   If[FailureQ[plan], Return[plan, Module]];
   preparedPlan = preparePlanRequest[plan];
   If[FailureQ[preparedPlan], Return[preparedPlan, Module]];
@@ -1021,8 +1078,10 @@ runPlan[plan_, asynchronous_] := Module[{preparedPlan, process, command},
         <|"Plan" -> preparedPlan|>], Module]];
     <|"Schema" -> $pipelineProcessSchema, "Status" -> "Running",
       "Process" -> process, "Plan" -> preparedPlan|>,
-    process = Quiet[Check[RunProcess[command, All,
-      ProcessDirectory -> preparedPlan["WorkingDirectory"]], $Failed]];
+    process = If[TrueQ[echoOutput],
+      runProcessStreaming[command, preparedPlan["WorkingDirectory"]],
+      Quiet[Check[RunProcess[command, All,
+        ProcessDirectory -> preparedPlan["WorkingDirectory"]], $Failed]]];
     If[!AssociationQ[process],
       Return[failure["pipeline subprocess could not be executed",
         <|"Plan" -> preparedPlan|>], Module]];
@@ -1031,19 +1090,20 @@ runPlan[plan_, asynchronous_] := Module[{preparedPlan, process, command},
 Options[RunIntegrationPipeline] = Options[PipelinePlan];
 RunIntegrationPipeline[example_String, opts:OptionsPattern[]] := Module[{plan},
   plan = PipelinePlan[example, opts];
-  runPlan[plan, OptionValue["Asynchronous"]]];
+  runPlan[plan, OptionValue["Asynchronous"], OptionValue["EchoOutput"]]];
 
 RunIntegrationPipeline[family_Association, targets:(All | _List),
     opts:OptionsPattern[]] := Module[{plan},
   plan = PipelinePlan[family, targets, opts];
-  runPlan[plan, OptionValue["Asynchronous"]]];
+  runPlan[plan, OptionValue["Asynchronous"], OptionValue["EchoOutput"]]];
 
 RunIntegrationPipeline[plan_Association, opts:OptionsPattern[]] := Module[
   {schema, asynchronous, required, missing, optionRules = {opts}, familyPlan},
   schema = Lookup[plan, "Schema", Missing["NotAvailable"]];
   If[schema === "FeynmanTrick.FamilySpec/v1",
     familyPlan = PipelinePlan[plan, opts];
-    Return[runPlan[familyPlan, OptionValue["Asynchronous"]], Module]];
+    Return[runPlan[familyPlan, OptionValue["Asynchronous"],
+      OptionValue["EchoOutput"]], Module]];
   If[optionRules =!= {},
     Return[failure[
       "options cannot be applied while executing an existing PipelinePlan; rebuild the plan instead",
@@ -1060,7 +1120,8 @@ RunIntegrationPipeline[plan_Association, opts:OptionsPattern[]] := Module[
       <|"MissingKeys" -> missing|>], Module]];
   asynchronous = TrueQ[Lookup[Lookup[plan, "Settings", <||>],
     "Asynchronous", False]];
-  runPlan[plan, asynchronous]];
+  runPlan[plan, asynchronous, TrueQ[Lookup[
+    Lookup[plan, "Settings", <||>], "EchoOutput", False]]]];
 
 Options[ResumeIntegrationPipeline] = Options[PipelinePlan];
 ResumeIntegrationPipeline[example_String, checkpoint_String,
@@ -1069,7 +1130,7 @@ ResumeIntegrationPipeline[example_String, checkpoint_String,
     HoldPattern[Rule["ResumeFrom", _] | RuleDelayed["ResumeFrom", _]]];
   plan = PipelinePlan[example,
     Sequence @@ Join[rules, {"ResumeFrom" -> checkpoint}]];
-  runPlan[plan, OptionValue["Asynchronous"]]];
+  runPlan[plan, OptionValue["Asynchronous"], OptionValue["EchoOutput"]]];
 
 End[];
 EndPackage[];

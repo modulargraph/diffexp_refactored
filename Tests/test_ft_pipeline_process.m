@@ -41,6 +41,21 @@ planned = FeynmanTrick`PipelinePlan["bubble",
     "ft-pipeline-plan-process-checkpoints"}]];
 plannedResult = FeynmanTrick`RunIntegrationPipeline[planned];
 
+echoPath = FileNameJoin[{$TemporaryDirectory,
+  "ft-pipeline-echo-" <> ToString[$ProcessID] <> ".log"}];
+echoStream = OpenWrite[echoPath, PageWidth -> Infinity];
+echoResult = Block[{$Output = {echoStream}},
+  FeynmanTrick`RunIntegrationPipeline["bubble",
+    "Runner" -> runner,
+    "WorkingDirectory" -> repoRoot,
+    "PreparedCacheDirectory" -> FileNameJoin[{$TemporaryDirectory,
+      "ft-pipeline-echo-prep"}],
+    "CheckpointDirectory" -> FileNameJoin[{$TemporaryDirectory,
+      "ft-pipeline-echo-checkpoints"}],
+    "EchoOutput" -> True]];
+Close[echoStream];
+echoText = Import[echoPath, "Text"];
+
 If[!AssociationQ[result] || Lookup[result, "Status", "Failed"] =!= "Succeeded",
   Print["  DIAGNOSTIC: ", InputForm[result]]];
 
@@ -64,7 +79,13 @@ assert["an existing typed plan can be executed",
     plannedResult["Status"] === "Succeeded" &&
     plannedResult["Final", "Example"] === "bubble" &&
     !KeyExistsQ[plannedResult["Final"], "Coefficients"]];
+assert["synchronous runs can stream and retain child output",
+  echoResult["Status"] === "Succeeded" &&
+    StringContainsQ[echoText, "STEPWISE "] &&
+    StringContainsQ[echoText, "FINAL "] &&
+    StringContainsQ[echoResult["StandardOutput"], "STEPWISE "]];
 
 If[FileExistsQ[runner], DeleteFile[runner]];
+If[FileExistsQ[echoPath], DeleteFile[echoPath]];
 Print["Results: ", passed, " / ", passed + failed, " tests passed"];
 If[failed > 0, Exit[1], Exit[0]];

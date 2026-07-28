@@ -95,6 +95,39 @@ std::string prepare_taylor_chart(const std::string& session) {
   return std::string(response.at("chart").as_string());
 }
 
+std::string prepare_lower_laurent_chart(const std::string& session) {
+  auto response = request(json::parse(std::string(R"json({
+    "schema":2,"op":"chart.prepare","session":")json") + session +
+      R"json(","key":"acb-lower-laurent-match-chart",
+    "identity":"acb-lower-laurent-match-chart-v1",
+    "analytic":{
+      "geometry":{"center_exact":"0","scale_exact":"1",
+        "radius_exact":"2","infinite_radius":false,"prescriptions":[]},
+      "principal_matrix":[
+        [{"exact":"0","proven_zero":true},
+         {"exact":"0","proven_zero":true}],
+        [{"exact":"0","proven_zero":true},
+         {"exact":"0","proven_zero":true}]],
+      "native_scc_capabilities":{"regular":true,"identity_gauge":true,
+        "identity_v":true,"no_pseudo":true}},
+    "scc":{"components":[[0],[1]],"structural_edges":[],
+      "condensation_edges":[],"topological_order":[0,1],
+      "coupling_depth":0},
+    "problem":{"domain":"acb","precision_bits":256,
+      "d":2,"fb":-1,"w":7,
+      "d_lags":[[{"s":0,"v":"1"}]],"denominators":[],
+      "nhat_lags":[{"poly":[],"rat":[],
+        "val":[null,null,null,null]}],
+      "d0_inverse":"1","blocks":[[0],[1]],
+      "assembly":{"identity":true,"poly":[],"rat":[],
+        "val":[0,null,null,0]},"chop_digits":0}
+  })json").as_object());
+  if (response.at("status") != "ok")
+    throw std::runtime_error("prepare lower Laurent chart: " +
+                             json::serialize(response));
+  return std::string(response.at("chart").as_string());
+}
+
 json::object regular_run(std::vector<std::string> initial) {
   json::array encoded_initial;
   for (auto& value : initial)
@@ -270,13 +303,53 @@ json::object taylor_match_request(
                                     {"max_steps", 0}}}};
 }
 
+json::object lower_laurent_match_request(
+    const std::string& session, const std::string& chart,
+    const std::string& first, const std::string& second,
+    const std::string& incoming) {
+  return json::object{
+      {"schema", 2}, {"op", "local.match_acb"}, {"session", session},
+      {"basis", json::array{first, second}}, {"incoming", incoming},
+      {"basis_chart", chart}, {"incoming_chart", chart},
+      {"basis_point", json::object{{"exact", "1/2"}}},
+      {"incoming_point", json::object{{"exact", "1/2"}}},
+      // The public request starts at epsilon^0, while the incoming local has
+      // an honest epsilon^-1 coefficient. Matching must retain that lower
+      // slab internally instead of reporting an upper-reservoir deficit.
+      {"epsilon", json::object{{"min", 0}, {"max", 5},
+                                {"required_complete_max", 3}}},
+      {"basis_checkpoint_identities",
+       json::array{"lower-basis-0", "lower-basis-1"}},
+      {"incoming_checkpoint_identity", "lower-incoming"},
+      {"checkpoint_identity", "acb-lower-laurent-preservation-v1"},
+      {"native_unit_saturation",
+       json::object{
+           {"schema",
+            "diffexp2-native-acb-unit-leading-saturation-request-v2"},
+           {"tile_plan", "test-lower-laurent-plan"},
+           {"tile_plan_checkpoint_identity",
+            "test-lower-laurent-plan-checkpoint"},
+           {"arm", "upper"}, {"match", 0}}},
+      {"refinement", json::object{{"relative_tolerance", "1e-50"},
+                                    {"max_steps", 0}}}};
+}
+
+std::vector<std::string> lower_laurent_column(
+    std::string first_lower, std::string first_finite,
+    std::string second_lower, std::string second_finite) {
+  return {std::move(first_lower), std::move(first_finite),
+          "0", "0", "0", "0", "0",
+          std::move(second_lower), std::move(second_finite),
+          "0", "0", "0", "0", "0"};
+}
+
 }  // namespace
 
 int main() {
   const auto created = request(json::object{
       {"schema", 2}, {"op", "session.create"}, {"domain", "acb"},
       {"precision_bits", 256}, {"output_digits", 30},
-      {"local_capacity", 4}, {"match_capacity", 2}});
+      {"local_capacity", 4}, {"match_capacity", 4}});
   const auto session = std::string(created.at("session").as_string());
   const auto chart = prepare_regular_chart(session);
 
@@ -303,6 +376,26 @@ int main() {
       "acb-ambiguous-match-v1"));
 
   for (const auto& local : {first, second, incoming, ambiguous})
+    (void)request(json::object{{"schema", 2}, {"op", "local.release"},
+                               {"session", session}, {"local", local}});
+
+  const auto lower_chart = prepare_lower_laurent_chart(session);
+  const auto lower_first = solve_local(
+      session, lower_chart,
+      lower_laurent_column("0", "1", "0", "0"), "lower-basis-0");
+  const auto lower_second = solve_local(
+      session, lower_chart,
+      lower_laurent_column("0", "0", "0", "1"), "lower-basis-1");
+  const auto lower_incoming = solve_local(
+      session, lower_chart,
+      lower_laurent_column("2", "3", "0", "2"), "lower-incoming");
+  const auto lower_matched = request(lower_laurent_match_request(
+      session, lower_chart, lower_first, lower_second, lower_incoming));
+  const auto lower_match = lower_matched.at("status") == "ok"
+      ? std::string(lower_matched.at("match").as_string())
+      : std::string();
+  for (const auto& local :
+       {lower_first, lower_second, lower_incoming})
     (void)request(json::object{{"schema", 2}, {"op", "local.release"},
                                {"session", session}, {"local", local}});
 
@@ -354,8 +447,14 @@ int main() {
           .find("overlaps zero") != std::string::npos;
   const bool checkpoint_serialized =
       live_checkpoint.at("status") == "ok" &&
-      live_checkpoint.at("acb_matches") == 2 &&
+      live_checkpoint.at("acb_matches") == 3 &&
       live_checkpoint.at("locals") == 0;
+  const bool lower_laurent_preserved =
+      lower_matched.at("status") == "ok" &&
+      lower_matched.at("residual").as_object().at("verdict") == "pass" &&
+      lower_matched.at("epsilon").as_object().at("min") == -1 &&
+      lower_matched.at("weight_windows").as_array().front()
+          .as_object().at("min") == -1;
 
   const auto& taylor_residual = taylor_matched.at("status") == "ok"
       ? taylor_matched.at("residual").as_object()
@@ -391,6 +490,11 @@ int main() {
       : request(json::object{
             {"schema", 2}, {"op", "match.release"},
             {"session", session}, {"match", taylor_match}});
+  const auto lower_released = lower_match.empty()
+      ? json::object{{"status", "error"}}
+      : request(json::object{
+            {"schema", 2}, {"op", "match.release"},
+            {"session", session}, {"match", lower_match}});
   const auto saved = request(json::object{
       {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
       {"path", checkpoint_path.string()},
@@ -445,13 +549,15 @@ int main() {
       std::string(retained.at("match").as_string()) == match &&
       retained.at("provenance_identity") == matched.at("provenance_identity") &&
       ambiguous_rejected && checkpoint_serialized &&
+      lower_laurent_preserved &&
       stable_taylor_prefix_selected &&
       released.at("status") == "ok" &&
       released_again.at("status") == "error" &&
       taylor_released.at("status") == "ok" &&
+      lower_released.at("status") == "ok" &&
       saved.at("status") == "ok" && stats.at("locals") == 0 &&
       stats.at("matches") == 0 && stats.at("pending_matches") == 0 &&
-      stats.at("local_matches") == 2 &&
+      stats.at("local_matches") == 3 &&
       stats.at("acb_local_match_capability") ==
           "exact-lattice-guided-acb-local-match-v1";
 
@@ -459,6 +565,7 @@ int main() {
     std::cerr << "local.match_acb: " << json::serialize(matched) << '\n'
               << "match.stats: " << json::serialize(retained) << '\n'
               << "ambiguous: " << json::serialize(ambiguous_result) << '\n'
+              << "lower Laurent: " << json::serialize(lower_matched) << '\n'
               << "stable Taylor prefix: " << json::serialize(taylor_matched)
               << '\n'
               << "live checkpoint: " << json::serialize(live_checkpoint)

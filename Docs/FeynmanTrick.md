@@ -105,26 +105,19 @@ solver itself has no such platform restriction. Calling the facade from an
 already running kernel can occupy a second Wolfram license seat; its native
 C++ worker threads do not consume additional seats.
 
-## Command-line alternative
+## Public command-line launcher
 
 ```sh
-DE2_RECURRENCE_BACKEND=Cpp \
 DE2_CPP_THREADS=4 \
-FT_EXAMPLES=bubble \
-FT_WORKING_PRECISION=300 \
-FT_EXPANSION_ORDER=40 \
-FT_EPS_ORDER=0 \
-FT_BOUNDARY_EXTRA_ORDER=10 \
-FT_DIVISION_ORDER=3 \
-FT_RADIUS_OF_CONVERGENCE=1 \
-FT_PREP_CACHE_DIR="$HOME/.cache/diffexp2/fire" \
-FT_LADDER_CHECKPOINT_DIR="$HOME/.cache/diffexp2/ladder/bubble" \
-wolframscript -file Scripts/run_ft_stepwise2.m
+wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
 ```
 
-This is the command generated conceptually by the facade and remains useful
-for terminals and batch systems. The first run prepares FIRE data and writes a
-reusable preparation snapshot.
+`RunExample.m` constructs the same public `PipelinePlan` used from Wolfram and
+executes it with `RunIntegrationPipeline`. Use `--plan` before the example
+name to inspect the exact plan without running, or `--check` to validate every
+documented example profile. The small `.sh` files in
+`Examples/FeynmanTrick` forward to this launcher. The first run prepares FIRE
+data and writes a reusable preparation snapshot.
 Later runs print `FTPREP CACHE HIT` and skip that work.
 
 ## Built-in Euclidean examples
@@ -240,13 +233,13 @@ and source provenance remain unverified.  Exact re-keyed cache hits never
 launch FIRE; any future missing reduction is still rejected because no
 verified setup record was fabricated.
 
-The same cache root contains small learned matching-halo profiles. A profile
-stores only nonnegative private epsilon lower bounds, never numerical
-transport state. Its identity binds the exact prepared example, zero-halo
-epsilon plan, transport configuration, request identity, and solver source
-fingerprint. Certified reservoir deficits are merged componentwise upward and
-published atomically under a same-filesystem writer lock; malformed, tampered,
-or contract-mismatched profiles are ignored. Set
+The same cache root contains small learned matching-resource profiles. A
+profile stores only nonnegative private epsilon lower bounds and producer
+precision extras, never numerical transport state. Its identity binds the
+exact prepared example, zero-private-resource epsilon plan, transport
+configuration, and request identity. Certified deficits are merged
+componentwise upward and published atomically under a same-filesystem writer
+lock; malformed, tampered, or contract-mismatched profiles are ignored. Set
 `FT_DISABLE_MATCHING_HALO_PROFILE=1` for a cold discovery run.
 
 `FT_LADDER_CHECKPOINT_DIR` stores two kinds of checkpoint:
@@ -254,13 +247,13 @@ or contract-mismatched profiles are ignored. Set
 - a transport checkpoint after each completed lower or upper endpoint arm;
 - a boundary checkpoint after the next level's boundary vector is assembled.
 
-Resume explicitly:
+Resume explicitly through the public facade:
 
-```sh
-FT_RESUME_LADDER_CHECKPOINT=/absolute/path/to/example_level2_boundary.mx \
-DE2_RECURRENCE_BACKEND=Cpp \
-FT_EXAMPLES=example \
-wolframscript -file Scripts/run_ft_stepwise2.m
+```mathematica
+FeynmanTrick`ResumeIntegrationPipeline[
+  "bubble",
+  "/absolute/path/to/bubble_level0_boundary.mx"
+]
 ```
 
 The checkpoint records the example, backend, precision, expansion and epsilon

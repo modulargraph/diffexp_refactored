@@ -3452,10 +3452,46 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
           match_certified_max,
           receiving_evaluation.value.epsilon.complete_max,
           incoming_evaluation.value.epsilon.complete_max});
-      if (continuity_min > required_continuity_max ||
-          continuity_max < required_continuity_max)
+      if (continuity_max < required_continuity_max)
+        throw MatchingArithmeticError(
+            MatchingArithmeticErrorCode::InsufficientCompleteWindow,
+            "materialized receiving local does not cover its certified "
+            "handoff continuity window: required_max=" +
+                std::to_string(required_continuity_max) +
+                "; overlap=[" + std::to_string(continuity_min) + "," +
+                std::to_string(continuity_max) + "]" +
+                "; receiving=[" +
+                std::to_string(
+                    receiving_evaluation.value.epsilon.min_power) +
+                "," +
+                std::to_string(
+                    receiving_evaluation.value.epsilon.complete_max) +
+                "]; incoming=[" +
+                std::to_string(
+                    incoming_evaluation.value.epsilon.min_power) +
+                "," +
+                std::to_string(
+                    incoming_evaluation.value.epsilon.complete_max) +
+                "]; match_certified_max=" +
+                std::to_string(match_certified_max),
+            std::nullopt, std::nullopt, continuity_max);
+      if (continuity_min > required_continuity_max)
         throw std::domain_error(
-            "materialized receiving local does not cover its certified handoff continuity window");
+            "materialized receiving local does not cover its certified "
+            "handoff continuity window: required_max=" +
+            std::to_string(required_continuity_max) +
+            "; overlap=[" + std::to_string(continuity_min) + "," +
+            std::to_string(continuity_max) + "]" +
+            "; receiving=[" +
+            std::to_string(receiving_evaluation.value.epsilon.min_power) +
+            "," +
+            std::to_string(receiving_evaluation.value.epsilon.complete_max) +
+            "]; incoming=[" +
+            std::to_string(incoming_evaluation.value.epsilon.min_power) +
+            "," +
+            std::to_string(incoming_evaluation.value.epsilon.complete_max) +
+            "]; match_certified_max=" +
+            std::to_string(match_certified_max));
       const auto& refinement_record = as_object(
           native_match_summary.at("refinement"),
           "materialized continuity refinement");

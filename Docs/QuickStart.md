@@ -151,16 +151,12 @@ The runner:
 6. repeats to level zero and returns parsed `STEPWISE` and `FINAL` records.
 
 Prepared FIRE data and transport checkpoints are independent, so a solver
-rerun need not repeat the reduction. The command-line driver remains
-available for advanced or multi-example runs:
+rerun need not repeat the reduction. The same public pipeline profiles are
+available from the command line:
 
 ```sh
-DE2_RECURRENCE_BACKEND=Cpp \
 DE2_CPP_THREADS=4 \
-FT_EXAMPLES=bubble \
-FT_WORKING_PRECISION=300 \
-FT_EXPANSION_ORDER=40 \
-wolframscript -file Scripts/run_ft_stepwise2.m
+wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
 ```
 
 See [Feynman Trick](FeynmanTrick.md) for registry names, cache controls,

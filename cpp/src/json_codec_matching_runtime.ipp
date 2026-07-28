@@ -675,6 +675,19 @@ const char* acb_match_verdict_name(AcbMatchingResidualVerdict verdict) {
   return "inconclusive";
 }
 
+// Boost.JSON accepts non-finite doubles by spelling them as an enormous JSON
+// exponent.  Wolfram's JSON importer then expands that exponent into hundreds
+// of thousands of decimal digits when the diagnostic is printed.  Approximate
+// fields are advisory only; retain the exact compact FLINT magnitude beside
+// them and encode an out-of-range approximation as null.
+json::value finite_diagnostic_double(double value) {
+  return std::isfinite(value) ? json::value(value) : json::value(nullptr);
+}
+
+json::value finite_diagnostic_upper(const Magnitude& value) {
+  return finite_diagnostic_double(value.approximate_upper());
+}
+
 json::object encode_acb_match_residual_diagnostics(
     const AcbMatchingResidualDiagnostics& diagnostics) {
   std::size_t pass = 0, fail = 0, inconclusive = 0;
@@ -682,6 +695,7 @@ json::object encode_acb_match_residual_diagnostics(
               required_inconclusive = 0;
   std::size_t required_zero_overlaps = 0;
   double maximum_required_residual_to_scale_upper = 0.0;
+  bool maximum_required_residual_to_scale_unbounded = false;
   json::array inconclusive_examples;
   json::array required_inconclusive_examples;
   for (const auto& coefficient : diagnostics.coefficients) {
@@ -690,10 +704,19 @@ json::object encode_acb_match_residual_diagnostics(
     if (required) {
       if (coefficient.residual_lower.is_zero())
         ++required_zero_overlaps;
-      maximum_required_residual_to_scale_upper = std::max(
-          maximum_required_residual_to_scale_upper,
-          (coefficient.residual_upper / coefficient.scale_lower)
-              .approximate_upper());
+      if (coefficient.scale_lower.is_zero()) {
+        if (!coefficient.residual_upper.is_zero())
+          maximum_required_residual_to_scale_unbounded = true;
+      } else {
+        const auto ratio =
+            (coefficient.residual_upper / coefficient.scale_lower)
+                .approximate_upper();
+        if (std::isfinite(ratio))
+          maximum_required_residual_to_scale_upper = std::max(
+              maximum_required_residual_to_scale_upper, ratio);
+        else
+          maximum_required_residual_to_scale_unbounded = true;
+      }
     }
     if (coefficient.verdict == AcbMatchingResidualVerdict::Pass) {
       ++pass;
@@ -739,7 +762,12 @@ json::object encode_acb_match_residual_diagnostics(
       {"required_zero_overlapping_coefficients",
        required_zero_overlaps},
       {"maximum_required_residual_to_scale_upper_approx",
-       maximum_required_residual_to_scale_upper},
+       maximum_required_residual_to_scale_unbounded
+           ? json::value(nullptr)
+           : json::value(
+                 maximum_required_residual_to_scale_upper)},
+      {"maximum_required_residual_to_scale_upper_unbounded",
+       maximum_required_residual_to_scale_unbounded},
       {"inconclusive_examples", std::move(inconclusive_examples)},
       {"required_inconclusive_examples",
        std::move(required_inconclusive_examples)},
@@ -790,14 +818,14 @@ json::object diagnose_acb_laurent_matrix_overlap(
                 {"column", column},
                 {"epsilon_power", power},
                 {"discrepancy_absolute_upper_approx",
-                 Magnitude::upper_abs(discrepancy)
-                     .approximate_upper()},
+                 finite_diagnostic_upper(
+                     Magnitude::upper_abs(discrepancy))},
                 {"left_absolute_upper_approx",
-                 Magnitude::upper_abs(left_value)
-                     .approximate_upper()},
+                 finite_diagnostic_upper(
+                     Magnitude::upper_abs(left_value))},
                 {"right_absolute_upper_approx",
-                 Magnitude::upper_abs(right_value)
-                     .approximate_upper()},
+                 finite_diagnostic_upper(
+                     Magnitude::upper_abs(right_value))},
                 {"discrepancy_real_radius_exponent",
                  discrepancy.real_radius_exponent()},
                 {"discrepancy_imag_radius_exponent",
@@ -825,7 +853,7 @@ json::object diagnose_acb_laurent_matrix_overlap(
       {"disjoint_coefficients", disjoint},
       {"all_coefficients_overlap", disjoint == 0},
       {"maximum_relative_discrepancy_upper_approx",
-       maximum_relative_discrepancy_upper},
+       finite_diagnostic_double(maximum_relative_discrepancy_upper)},
       {"disjoint_examples", std::move(disjoint_examples)}};
 }
 
@@ -3378,7 +3406,8 @@ try_terminal_singular_rational_shadow_normal_seed(
     for (const auto& bound : evaluated.tail.value.absolute)
       tail_max = Magnitude::maximum(tail_max, bound);
     trial["tail_max_upper_exact"] = tail_max.dump_exact();
-    trial["tail_max_upper_approx"] = tail_max.approximate_upper();
+    trial["tail_max_upper_approx"] =
+        finite_diagnostic_upper(tail_max);
     auto inflated = inflate_certified_singular_seed_value(evaluated);
     auto normalized =
         tail_owner.normalize_rational_shadow_singular_seed(inflated);
@@ -3521,7 +3550,15 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
   const std::array<Rational, 5> singular_radius_multipliers{
       Rational("4"), Rational("3"), Rational("2"),
       Rational("3/2"), Rational("5/4")};
-  const std::array<Rational, 4> ordinary_witness_denominators{
+  // The all-future recurrence theorem needs a smaller disk than the global
+  // Gronwall witness in strongly gauged systems.  Begin at R=9|delta|/8
+  // when |seed|=3|delta| (denominator 16/15 below), then relax toward the
+  // balanced midpoint and outward.  The bridge call deliberately disables
+  // its Gronwall fallback during this search: a rigorous but astronomically
+  // loose fallback must not prevent the next recurrence witness from being
+  // tried.
+  const std::array<Rational, 7> ordinary_witness_denominators{
+      Rational("16/15"), Rational("9/8"), Rational("4/3"),
       Rational("2"), Rational("4"), Rational("8"),
       Rational("16")};
   const auto singular_taylor_complete_max =
@@ -3573,9 +3610,9 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
           seed_modulus * radius_multiplier;
       for (const auto& denominator :
            ordinary_witness_denominators) {
-        // Begin at the midpoint between the target displacement and the
-        // excluded singular center.  Later candidates move the witness
-        // outward only when the physical Neumann/Gronwall proof permits it.
+        // Begin just outside the target displacement for the recurrence
+        // contraction, then move outward only when the proof remains
+        // inconclusive.
         const auto ordinary_radius =
             seed_modulus -
             (seed_modulus - delta_modulus) / denominator;
@@ -3601,14 +3638,14 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
                   seed_point, singular_radius.str(), target,
                   ordinary_taylor_complete_max,
                   ordinary_radius.str(), options,
-                  &*prefix_certificate)
+                  &*prefix_certificate, false)
             : certify_singular_rational_shadow_ordinary_bridge(
                   equation, *exact_local, bridge_epsilon,
                   singular_taylor_complete_max, seed_point,
                   singular_radius.str(), target,
                   ordinary_taylor_complete_max,
                   ordinary_radius.str(), options,
-                  &*prefix_certificate);
+                  &*prefix_certificate, false);
         json::object trial{
             {"seed_fraction", seed_fraction.str()},
             {"seed_exact", seed_exact.str()},
@@ -3635,11 +3672,11 @@ try_terminal_singular_rational_shadow_ordinary_bridge(
           trial["singular_tail_max_upper_exact"] =
               singular_tail_max.dump_exact();
           trial["singular_tail_max_upper_approx"] =
-              singular_tail_max.approximate_upper();
+              finite_diagnostic_upper(singular_tail_max);
           trial["ordinary_tail_max_upper_exact"] =
               ordinary_tail_max.dump_exact();
           trial["ordinary_tail_max_upper_approx"] =
-              ordinary_tail_max.approximate_upper();
+              finite_diagnostic_upper(ordinary_tail_max);
           trials.push_back(trial);
           attempt.diagnostic["status"] = "certified";
           attempt.diagnostic["selected"] =
@@ -3901,6 +3938,20 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
   const auto incoming_evaluation = evaluate_local_solution(
       incoming->solution(), incoming_point, incoming_options);
   auto evaluation_window = window;
+  // The request window is the public coefficient slab that the caller needs
+  // back.  It is not permission to discard lower Laurent coefficients which
+  // are already present in an evaluated physical local.  Those coefficients
+  // participate in the finite-Laurent solve (and, for a singular receiver,
+  // in the V^-1/V normal-frame maps), so preserve the complete lower union of
+  // every evaluated column and the incoming value.  Previously a legitimate
+  // lower coefficient raised InsufficientCompleteWindow with its power; the
+  // ladder then mistook that lower-edge diagnostic for a missing upper edge
+  // and repeatedly grew the producer reservoir without making progress.
+  for (const auto& evaluation : basis_evaluations)
+    evaluation_window.min_power = std::min(
+        evaluation_window.min_power, evaluation.value.epsilon.min_power);
+  evaluation_window.min_power = std::min(
+      evaluation_window.min_power, incoming_evaluation.value.epsilon.min_power);
   if (expected_singular_request.has_value()) {
     auto common_basis_max = basis_evaluations.front().value.epsilon.complete_max;
     for (const auto& evaluation : basis_evaluations)
@@ -4567,7 +4618,8 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                 exact_shadow_seed_tail_max->dump_exact();
         normal_frame_attempt
             ["exact_shadow_correlated_tail_seed_max_upper_approx"] =
-                exact_shadow_seed_tail_max->approximate_upper();
+                finite_diagnostic_upper(
+                    *exact_shadow_seed_tail_max);
       }
     }
     if (!exact_shadow_seed_normalized_transformed_basis.has_value()) {
@@ -6034,7 +6086,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             {"power", power},
             {"absolute_upper_exact", magnitude.dump_exact()},
             {"absolute_upper_approx",
-             magnitude.approximate_upper()}});
+             finite_diagnostic_upper(magnitude)}});
       std::fprintf(
           stderr,
           "[diffexp2 terminal diagnostic] matching right coordinate association=%s incoming_structural_min=%d transformed_weight_scales=%s factorized_rhs_workers=%zu factorized_rhs_columns=%zu elapsed_ms=%.3f\n",

@@ -74,15 +74,11 @@ DiffExp2`LoadConfiguration[
 ];
 ```
 
-The Feynman-trick runner exposes the same setting through the environment:
+The public Feynman-trick launcher exposes the same setting:
 
 ```sh
-DE2_RECURRENCE_BACKEND=Cpp \
 DE2_CPP_THREADS=4 \
-FT_EXAMPLES=banana \
-FT_WORKING_PRECISION=500 \
-FT_EXPANSION_ORDER=50 \
-wolframscript -file Scripts/run_ft_stepwise2.m
+wolframscript -script Examples/FeynmanTrick/RunExample.m banana_unequal
 ```
 
 For the chart micro-benchmark, use `BENCH_BACKEND=Cpp`. The selected backend
@@ -98,7 +94,7 @@ batches currently run single-threaded.
 
 ### Lower/upper endpoint arms in one Wolfram kernel
 
-`run_ft_stepwise2.m` can also batch the boundary-independent homogeneous bases
+The pipeline implementation can also batch the boundary-independent homogeneous bases
 for corresponding lower/upper endpoint charts. The release runner requests
 this schedule by default; set `FT_CPP_BATCH_ENDPOINT_ARMS=0` to disable it.
 There is still only one Wolfram evaluator: planning, matching, transport state,

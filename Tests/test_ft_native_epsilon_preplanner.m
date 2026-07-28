@@ -126,6 +126,8 @@ assert["mixed direct/integrate losses include the one native primitive row",
   levelPlan["Record", "RelativeMinimumEpsilonShifts"] ===
       {-6, -2, 0, 1} &&
     levelPlan["Record", "EntryLosses"] === <|1 -> 7, 2 -> 2, 4 -> 0|> &&
+    levelPlan["Record", "BaseIntrinsicLoss"] === 7 &&
+    levelPlan["Record", "ProducerPrivateLoss"] === 0 &&
     levelPlan["Record", "IntrinsicLoss"] === 7,
   levelPlan];
 assert["proven-zero rows do not enter the level loss",
@@ -207,21 +209,35 @@ profileContract = ft2MatchingHaloProfileContract[
 profileFile = Block[{matchingHaloProfileRoot = profileTmp},
   ft2MatchingHaloProfileFile[profileContract]];
 profileSaved = ft2SaveMatchingHaloProfile[
-  profileFile, profileContract, <|1 -> 2|>];
+  profileFile, profileContract, <|1 -> 2|>, <|1 -> 3|>, <|1 -> 4|>];
 profileLoaded = ft2LoadMatchingHaloProfile[
   profileFile, profileContract];
+producerProfileLoaded = ft2LoadProducerLossProfile[
+  profileFile, profileContract];
+producerDigitProfileLoaded = ft2LoadProducerDigitProfile[
+  profileFile, profileContract];
 profileSavedLower = ft2SaveMatchingHaloProfile[
-  profileFile, profileContract, <|1 -> 1|>];
+  profileFile, profileContract, <|1 -> 1|>, <|1 -> 1|>, <|1 -> 1|>];
 profileLoadedAfterLower = ft2LoadMatchingHaloProfile[
+  profileFile, profileContract];
+producerProfileLoadedAfterLower = ft2LoadProducerLossProfile[
+  profileFile, profileContract];
+producerDigitProfileLoadedAfterLower = ft2LoadProducerDigitProfile[
   profileFile, profileContract];
 runLevelMergedBounds = ft2MergeMatchingHaloBounds[1,
   {profileLoadedAfterLower, <|1 -> 1|>}];
 assert["learned matching-halo profiles round-trip under an exact contract",
   ft2MatchingHaloProfileContractQ[profileContract] &&
     AssociationQ[profileSaved] && profileLoaded === {2} &&
-    AssociationQ[profileSavedLower] && profileLoadedAfterLower === {2},
+    producerProfileLoaded === {3} &&
+    producerDigitProfileLoaded === {4} &&
+    AssociationQ[profileSavedLower] && profileLoadedAfterLower === {2} &&
+    producerProfileLoadedAfterLower === {3} &&
+    producerDigitProfileLoadedAfterLower === {4},
   {profileContract, profileSaved, profileLoaded,
-    profileSavedLower, profileLoadedAfterLower}];
+    producerProfileLoaded, producerDigitProfileLoaded,
+    profileSavedLower, profileLoadedAfterLower,
+    producerProfileLoadedAfterLower, producerDigitProfileLoadedAfterLower}];
 assert["run-level merge keeps a loaded higher halo over an explicit lower bound",
   runLevelMergedBounds === <|1 -> 2|>, runLevelMergedBounds];
 assert["profile writes release the same-filesystem serialization lock",
@@ -246,7 +262,11 @@ assert["matching-affecting configuration changes select a distinct profile",
   ft2MatchingHaloProfileContractQ[changedProfileContract] &&
     changedProfileContract["Identity"] =!= profileContract["Identity"] &&
     changedProfileFile =!= profileFile &&
-    ft2LoadMatchingHaloProfile[profileFile, changedProfileContract] === {0},
+    ft2LoadMatchingHaloProfile[profileFile, changedProfileContract] === {0} &&
+    ft2LoadProducerLossProfile[
+      profileFile, changedProfileContract] === {0} &&
+    ft2LoadProducerDigitProfile[
+      profileFile, changedProfileContract] === {0},
   {profileContract, changedProfileContract}];
 
 sourceIndependentProfileContract =

@@ -1172,7 +1172,10 @@ certify_weighted_interval_transfer_contraction(
     return weighted_interval_transfer_contraction(degree_bounds, 1);
   IntervalTransferContractionResult last;
   for (const auto epsilon_weight_base :
-       {1UL, 2UL, 4UL, 8UL, 16UL, 32UL, 64UL, 128UL, 256UL, 512UL, 1024UL}) {
+       {1UL,       2UL,       4UL,       8UL,       16UL,      32UL,
+        64UL,      128UL,     256UL,     512UL,     1024UL,    2048UL,
+        4096UL,    8192UL,    16384UL,   32768UL,   65536UL,   131072UL,
+        262144UL,  524288UL,  1048576UL}) {
     last = weighted_interval_transfer_contraction(degree_bounds,
                                                   epsilon_weight_base);
     if (last.status == TailMajorantStatus::Certified &&
@@ -1718,6 +1721,283 @@ evaluate_singular_rational_shadow_with_certified_tail(
   return result;
 }
 
+// The ordinary leg of a singular-to-ordinary bridge is still governed by an
+// exact Rational q/C recurrence.  A disk-wide Gronwall norm can lose the
+// cancellations in that recurrence by many orders of magnitude after a
+// singular gauge transformation.  Reuse the all-future transfer theorem
+// above with the ordinary tower (a=b=0, log=0), and take the induction seed
+// from the rigorously reconstructed Acb coefficients.  This proves the tail
+// of every solution in the propagated seed balls; it does not replace an Acb
+// enclosure by a midpoint approximation.
+inline RegularTaylorPointTailCertificate
+certify_physical_ordinary_recurrence_point_tail(
+    const PreparedPhysicalClearedODE<Rational> &equation,
+    const PhysicalRegularTaylorTailModel &model,
+    const RealEvaluationPoint &input_point,
+    const std::string &witness_radius_exact,
+    std::optional<std::uint32_t> retained_complete_max = std::nullopt) {
+  using namespace singular_tail_majorant_detail;
+  RegularTaylorPointTailCertificate result;
+  const auto fail = [&](TailMajorantStatus status, std::string detail) {
+    result.status = status;
+    result.detail = std::move(detail);
+    result.disk.status = status;
+    result.disk.detail = result.detail;
+    return result;
+  };
+
+  physical_ode_detail::validate_ode(equation);
+  local_detail::validate_local_solution(model.reconstructed, false);
+  const auto &solution = model.reconstructed;
+  if (solution.dimension != equation.dimension ||
+      solution.dimension != model.dimension ||
+      equation.payload_identity != model.physical_payload_identity ||
+      solution.checkpoint_identity != model.local_checkpoint_identity ||
+      !tail_majorant_detail::same_epsilon_window(solution.epsilon,
+                                                 model.epsilon))
+    throw std::invalid_argument(
+        "ordinary recurrence tail lost its equation/local provenance binding");
+  if (!solution.error.empty() || solution.sectors.size() != 1 ||
+      solution.sectors.front().log_power != 0 ||
+      solution.sectors.front().a.is_zero != TruthValue::Yes ||
+      solution.sectors.front().b.is_zero != TruthValue::Yes)
+    return fail(TailMajorantStatus::Unsupported,
+                "ordinary recurrence tail requires one error-free "
+                "a=b=0, log=0 Taylor sector");
+  if (!equation.c_lags.front().empty())
+    return fail(TailMajorantStatus::Unsupported,
+                "ordinary recurrence tail requires C(0,epsilon)=0");
+
+  const auto retained =
+      retained_complete_max.value_or(model.taylor_complete_max);
+  if (retained > model.taylor_complete_max ||
+      retained > solution.taylor_complete_max)
+    throw std::invalid_argument(
+        "ordinary recurrence tail retained order exceeds its reconstructed "
+        "local");
+  const auto degree = polynomial_lag_degree(equation);
+  if (degree != 0 && retained + 1 < degree)
+    return fail(TailMajorantStatus::Unsupported,
+                "ordinary recurrence prefix is shorter than its polynomial "
+                "lag window");
+
+  const auto point = line_integration_detail::require_exact_rational_point(
+      input_point, "ordinary-recurrence-tail-evaluation");
+  const Rational exact_point(point.exact_coordinate);
+  const auto modulus = tail_majorant_detail::abs_rational(exact_point);
+  Rational radius(0);
+  try {
+    radius = Rational(witness_radius_exact);
+  } catch (const std::invalid_argument &) {
+    throw std::invalid_argument(
+        "ordinary recurrence witness radius must be exact rational");
+  }
+  if (radius.sign() <= 0)
+    throw std::invalid_argument(
+        "ordinary recurrence witness radius must be positive");
+  result.disk.witness_radius_exact = radius.str();
+  if (!(modulus < radius))
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary recurrence evaluation point is not strictly "
+                "inside its witness disk");
+  if (!solution.chart.infinite_radius &&
+      !arb_lt(acb_realref(ComplexBall::from_strings(radius.str()).raw()),
+              acb_realref(solution.chart.radius.raw())))
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary recurrence witness disk is not strictly inside "
+                "the retained chart radius");
+
+  const auto common_valuation = common_equation_valuation(equation);
+  const auto adjusted_q0 =
+      shifted_valuation(equation.q_lags.front(), common_valuation);
+  if (adjusted_q0.zero || adjusted_q0.valuation != 0)
+    return fail(TailMajorantStatus::Unsupported,
+                "ordinary recurrence common cancellation does not leave "
+                "q(0,epsilon) as a formal unit");
+  for (const auto &value : equation.q_lags)
+    if (!value.zero &&
+        shifted_valuation(value, common_valuation).valuation < 0)
+      return fail(TailMajorantStatus::Unsupported,
+                  "ordinary recurrence has a negative q epsilon valuation");
+  for (const auto &lag : equation.c_lags)
+    for (const auto &entry : lag)
+      if (shifted_valuation(entry.value, common_valuation).valuation < 0)
+        return fail(TailMajorantStatus::Unsupported,
+                    "ordinary recurrence has a negative C epsilon valuation");
+
+  const auto n0 = static_cast<std::uint64_t>(retained) + 1;
+  const auto future_inverse = certify_structured_future_inverse(
+      equation, model.epsilon, Rational(0), Rational(0), 0,
+      common_valuation, n0);
+  if (future_inverse.status != TailMajorantStatus::Certified)
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary all-future inverse is inconclusive: " +
+                    future_inverse.detail);
+  const auto contraction = certify_interval_transfer_contraction(
+      equation, model.epsilon, Rational(0), Rational(0), 0,
+      common_valuation, n0, radius);
+  if (contraction.status != TailMajorantStatus::Certified)
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary all-future contraction is inconclusive: " +
+                    contraction.detail);
+
+  const auto radius_upper =
+      tail_majorant_detail::exact_rational_upper(radius);
+  const auto epsilon_weight =
+      Magnitude::from_ui(contraction.epsilon_weight_base);
+  std::vector<Magnitude> induction_m(model.epsilon.width(),
+                                     Magnitude::zero());
+  const auto &sector = solution.sectors.front();
+  for (std::size_t prefix_index = 0;
+       prefix_index < model.epsilon.width(); ++prefix_index) {
+    const auto rho = contraction.contraction_upper.at(prefix_index);
+    if (Magnitude::positive_difference_lower(Magnitude::one(), rho)
+            .is_zero())
+      return fail(
+          TailMajorantStatus::Inconclusive,
+          "ordinary all-future contraction rho is not below one on epsilon "
+          "prefix ending at " +
+              std::to_string(
+                  static_cast<std::int64_t>(model.epsilon.min_power) +
+                  static_cast<std::int64_t>(prefix_index)) +
+              "; rho_upper=" + std::to_string(rho.approximate_upper()));
+    if (degree == 0)
+      continue;
+    const auto first = retained + 1 - degree;
+    for (std::uint32_t n = first; n <= retained; ++n) {
+      auto weighted_prefix = Magnitude::zero();
+      for (std::size_t epsilon_index = 0;
+           epsilon_index <= prefix_index; ++epsilon_index)
+        for (std::uint32_t component = 0;
+             component < solution.dimension; ++component)
+          weighted_prefix = Magnitude::maximum(
+              weighted_prefix,
+              Magnitude::upper_abs(
+                  sector.coefficients[local_detail::sector_index(
+                      solution, epsilon_index, n, component)]) /
+                  epsilon_weight.power_upper(
+                      static_cast<ulong>(epsilon_index)));
+      const auto coefficient_bound =
+          weighted_prefix *
+          epsilon_weight.power_upper(
+              static_cast<ulong>(prefix_index));
+      induction_m[prefix_index] = Magnitude::maximum(
+          induction_m[prefix_index],
+          coefficient_bound *
+              radius_upper.power_upper(static_cast<ulong>(n)));
+    }
+  }
+
+  const auto radius_lower =
+      tail_majorant_detail::exact_rational_lower(radius);
+  if (radius_lower.is_zero())
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary recurrence witness radius has no positive lower "
+                "bound");
+  const auto ratio_upper =
+      tail_majorant_detail::exact_rational_upper(modulus) / radius_lower;
+  Magnitude gap_lower;
+  const auto first_unseen = static_cast<ulong>(retained) + 1UL;
+  const auto value_factor = tail_majorant_detail::geometric_tail_factor(
+      ratio_upper, first_unseen, &gap_lower);
+  if (gap_lower.is_zero())
+    return fail(TailMajorantStatus::Inconclusive,
+                "ordinary recurrence evaluation ratio is not below one");
+  const auto inverse_gap = gap_lower.reciprocal_upper();
+  const auto theta_factor =
+      ratio_upper.power_upper(first_unseen) *
+      (Magnitude::from_ui(first_unseen) * inverse_gap +
+       ratio_upper * inverse_gap * inverse_gap);
+
+  result.value.frame = model.epsilon;
+  result.value.guarantee = ErrorGuarantee::Certified;
+  result.theta.frame = model.epsilon;
+  result.theta.guarantee = ErrorGuarantee::Certified;
+  result.value.absolute.reserve(induction_m.size());
+  result.theta.absolute.reserve(induction_m.size());
+  for (const auto &bound : induction_m) {
+    result.value.absolute.push_back(bound * value_factor);
+    result.theta.absolute.push_back(bound * theta_factor);
+  }
+  const auto provenance =
+      "certified ordinary all-future q/C recurrence tail; "
+      "epsilon_weight_base=" +
+      std::to_string(contraction.epsilon_weight_base) +
+      "; retained_taylor_complete_max=" + std::to_string(retained) +
+      "; witness_radius_exact=" + radius.str() +
+      "; physical_payload_identity=" + equation.payload_identity;
+  result.value.provenance = provenance;
+  result.theta.provenance = provenance;
+  result.disk.status = TailMajorantStatus::Certified;
+  result.disk.cauchy_circle_upper = induction_m;
+  result.disk.detail =
+      "all-future exact q/C recurrence contraction; " +
+      contraction.detail;
+  result.status = TailMajorantStatus::Certified;
+  result.detail =
+      "all omitted ordinary coefficients are bounded by the exact q/C "
+      "recurrence";
+  return result;
+}
+
+inline CertifiedLocalEvaluation
+evaluate_physical_local_solution_with_recurrence_tail(
+    const PreparedPhysicalClearedODE<Rational> &equation,
+    const PhysicalRegularTaylorTailModel &model,
+    const RealEvaluationPoint &point,
+    const std::string &witness_radius_exact,
+    EvaluationOptions options = {}) {
+  if (options.t_order_reduction > model.taylor_complete_max)
+    throw std::invalid_argument(
+        "ordinary recurrence tail evaluation reduction exceeds retained "
+        "order");
+  const auto retained =
+      model.taylor_complete_max - options.t_order_reduction;
+  options.compute_tail_estimate = false;
+  CertifiedLocalEvaluation result;
+  result.evaluation =
+      evaluate_local_solution(model.reconstructed, point, options);
+  result.tail = certify_physical_ordinary_recurrence_point_tail(
+      equation, model, point, witness_radius_exact, retained);
+  if (result.tail.status != TailMajorantStatus::Certified) {
+    result.evaluation.value.error.provenance = result.tail.detail;
+    result.evaluation.theta_value.error.provenance = result.tail.detail;
+    return result;
+  }
+  if (result.evaluation.value.epsilon.min_power <
+          result.tail.value.frame.min_power ||
+      result.evaluation.value.epsilon.complete_max >
+          result.tail.value.frame.complete_max ||
+      result.evaluation.theta_value.epsilon.min_power <
+          result.tail.theta.frame.min_power ||
+      result.evaluation.theta_value.epsilon.complete_max >
+          result.tail.theta.frame.complete_max)
+    throw std::logic_error(
+        "ordinary recurrence tail does not cover the evaluated epsilon "
+        "windows");
+  ErrorEnvelope value_error;
+  value_error.frame = result.evaluation.value.epsilon;
+  value_error.guarantee = ErrorGuarantee::Certified;
+  value_error.provenance = result.tail.value.provenance;
+  for (std::int64_t power = value_error.frame.min_power;
+       power <= value_error.frame.complete_max; ++power)
+    value_error.absolute.push_back(result.tail.value.absolute.at(
+        static_cast<std::size_t>(
+            power - result.tail.value.frame.min_power)));
+  result.evaluation.value.error = std::move(value_error);
+  ErrorEnvelope theta_error;
+  theta_error.frame = result.evaluation.theta_value.epsilon;
+  theta_error.guarantee = ErrorGuarantee::Certified;
+  theta_error.provenance = result.tail.theta.provenance;
+  for (std::int64_t power = theta_error.frame.min_power;
+       power <= theta_error.frame.complete_max; ++power)
+    theta_error.absolute.push_back(result.tail.theta.absolute.at(
+        static_cast<std::size_t>(
+            power - result.tail.theta.frame.min_power)));
+  result.evaluation.theta_value.error = std::move(theta_error);
+  return result;
+}
+
 inline EpsilonVector inflate_certified_singular_seed_value(
     const CertifiedSingularSeedEvaluation &certified) {
   if (certified.tail.status != TailMajorantStatus::Certified ||
@@ -1755,7 +2035,8 @@ certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
     std::uint32_t ordinary_taylor_complete_max,
     const std::string &ordinary_witness_radius_exact,
     EvaluationOptions singular_options = {},
-    const SingularFrobeniusPrefixCertificate *prefix_certificate = nullptr) {
+    const SingularFrobeniusPrefixCertificate *prefix_certificate = nullptr,
+    bool allow_disk_gronwall_fallback = true) {
   CertifiedSingularOrdinaryBridge result;
   result.seed_exact = seed_point.exact_coordinate;
   result.singular_witness_radius_exact = singular_witness_radius_exact;
@@ -1845,20 +2126,42 @@ certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
   EvaluationOptions ordinary_options;
   ordinary_options.compute_tail_estimate = false;
   auto ordinary_evaluation =
-      evaluate_physical_local_solution_with_certified_tail(
+      evaluate_physical_local_solution_with_recurrence_tail(
+          *recentered.equation, *ordinary_model.model,
+          RealEvaluationPoint::rational(delta.str()),
+          ordinary_witness_radius_exact, ordinary_options);
+  std::string ordinary_tail_method = "all-future-q/C-recurrence";
+  std::string recurrence_tail_detail;
+  if (ordinary_evaluation.tail.status != TailMajorantStatus::Certified) {
+    recurrence_tail_detail = ordinary_evaluation.tail.detail;
+    if (!allow_disk_gronwall_fallback)
+      return fail(
+          ordinary_evaluation.tail.status,
+          "ordinary recurrence bridge target evaluation: " +
+              recurrence_tail_detail);
+    ordinary_evaluation =
+        evaluate_physical_local_solution_with_certified_tail(
           *ordinary_model.model, RealEvaluationPoint::rational(delta.str()),
           ordinary_witness_radius_exact, ordinary_options);
+    ordinary_tail_method = "disk-gronwall-fallback";
+  }
   result.ordinary_tail = ordinary_evaluation.tail;
   if (ordinary_evaluation.tail.status != TailMajorantStatus::Certified)
     return fail(ordinary_evaluation.tail.status,
                 "ordinary bridge target evaluation: " +
-                    ordinary_evaluation.tail.detail);
+                    ordinary_evaluation.tail.detail +
+                    (recurrence_tail_detail.empty()
+                         ? std::string()
+                         : "; recurrence fallback reason: " +
+                               recurrence_tail_detail));
 
   auto final_value = ordinary_evaluation.evaluation.value;
+  const auto certified_error = final_value.error;
   final_value.error = ErrorEnvelope{};
   if (!tail_majorant_detail::same_epsilon_window(
-          final_value.epsilon, ordinary_evaluation.tail.value.frame) ||
-      ordinary_evaluation.tail.value.absolute.size() !=
+          final_value.epsilon, certified_error.frame) ||
+      certified_error.guarantee != ErrorGuarantee::Certified ||
+      certified_error.absolute.size() !=
           final_value.epsilon.width())
     throw std::logic_error(
         "ordinary bridge finite value and tail frames disagree");
@@ -1866,7 +2169,7 @@ certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
        epsilon_index < final_value.epsilon.width(); ++epsilon_index)
     for (std::uint32_t component = 0; component < final_value.dimension;
          ++component)
-      ordinary_evaluation.tail.value.absolute[epsilon_index].add_error_to(
+      certified_error.absolute[epsilon_index].add_error_to(
           final_value
               .coefficients[epsilon_index * final_value.dimension + component]);
   result.evaluation = std::move(ordinary_evaluation.evaluation);
@@ -1874,7 +2177,12 @@ certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
   result.evaluation.value.error = ErrorEnvelope{};
   result.status = TailMajorantStatus::Certified;
   result.detail = "certified Frobenius seed translated and propagated through "
-                  "an ordinary physical q/C chart";
+                  "an ordinary physical q/C chart; ordinary_tail_method=" +
+                  ordinary_tail_method +
+                  (recurrence_tail_detail.empty()
+                       ? std::string()
+                       : "; recurrence_fallback_reason=" +
+                             recurrence_tail_detail);
   return result;
 }
 
@@ -1889,14 +2197,16 @@ certify_singular_rational_shadow_ordinary_bridge(
     std::uint32_t ordinary_taylor_complete_max,
     const std::string &ordinary_witness_radius_exact,
     EvaluationOptions singular_options = {},
-    const SingularFrobeniusPrefixCertificate *prefix_certificate = nullptr) {
+    const SingularFrobeniusPrefixCertificate *prefix_certificate = nullptr,
+    bool allow_disk_gronwall_fallback = true) {
   return certify_singular_rational_shadow_ordinary_bridge_with_seed_map(
       equation, solution, equation,
       [](const EpsilonVector &seed, const RealEvaluationPoint &)
           -> std::optional<EpsilonVector> { return seed; },
       claimed_epsilon, singular_taylor_complete_max, seed_point,
       singular_witness_radius_exact, target_point, ordinary_taylor_complete_max,
-      ordinary_witness_radius_exact, singular_options, prefix_certificate);
+      ordinary_witness_radius_exact, singular_options, prefix_certificate,
+      allow_disk_gronwall_fallback);
 }
 
 } // namespace diffexp2

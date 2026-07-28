@@ -162,6 +162,7 @@ EXAMPLE_FILES = {
     "Examples/FeynmanTrick/FourLoopUnequalBanana.sh",
     "Examples/FeynmanTrick/Kite.sh",
     "Examples/FeynmanTrick/README.md",
+    "Examples/FeynmanTrick/RunExample.m",
     "Examples/FeynmanTrick/Sunrise.sh",
     "Examples/FeynmanTrick/UnequalBanana.sh",
     "Examples/OriginalDiffExp/HennNonplanarCanonical.wl",

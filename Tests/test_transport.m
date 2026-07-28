@@ -812,6 +812,12 @@ assert["tt16_value_mode_singular_and_margin_fallbacks",
   !FailureQ[value16] && MemberQ[valueCenters16, 1/2] &&
   Length[valueCenters16] <= Length[basisCenters16] &&
   Length[basisCenters16] === Length[plan4["Charts"]]];
+assert["tt16_singular_transfer_preserves_public_epsilon_window",
+  !FailureQ[basis16] && !FailureQ[value16] &&
+  basis16["Value", "EpsWindow"] ===
+    <|"Min" -> 0, "CompleteMax" -> 2|> &&
+  value16["Value", "EpsWindow"] ===
+    <|"Min" -> 0, "CompleteMax" -> 2|>];
 assert["tt16_value_mode_matches_basis_across_crossing",
   !FailureQ[basis16] && !FailureQ[value16] &&
   value16["Value", "EpsWindow"] === basis16["Value", "EpsWindow"] &&

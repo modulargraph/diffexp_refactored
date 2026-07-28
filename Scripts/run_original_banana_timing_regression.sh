@@ -37,6 +37,13 @@ if ! grep -q '^ORIGINAL_BANANA PASS$' "$scratch/original-banana.log"; then
   exit 1
 fi
 
+if ! grep -q '^ORIGINAL_BANANA route=real-prescribed ' \
+    "$scratch/original-banana.log"; then
+  echo "original equal-mass Banana did not use the prescribed real singular route" >&2
+  tail -80 "$scratch/original-banana.log" >&2
+  exit 1
+fi
+
 transport_seconds=$(
   sed -n 's/.*transportSeconds=\([^ ]*\).*/\1/p' \
     "$scratch/original-banana.log" | tail -1

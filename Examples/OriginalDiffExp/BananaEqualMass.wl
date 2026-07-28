@@ -53,6 +53,11 @@ DiffExp2`LoadConfiguration[{
   "ExpansionOrder" -> expansionOrder,
   "EpsilonOrder" -> epsilonOrder,
   "DivisionOrder" -> 2,
+  "DeltaPrescriptions" -> {
+    {Global`t, 1},
+    {Global`t - 4, 1},
+    {Global`t - 16, 1}
+  },
   "UsePade" -> True,
   "Verbosity" -> 0
 }];
@@ -146,14 +151,37 @@ plainValue[value_] := Transpose[
   ]
 ];
 
-transportLeg[boundary_, from_, to_, name_String] := Module[
+transportRealPath[boundary_, from_, to_] := Module[
+  {system, result, wallSeconds},
+  system = DiffExp2`LoadSystem[<|
+    "Matrix" -> matrix,
+    "Variable" -> t
+  |>];
+  wallSeconds = AbsoluteTiming[
+    result = Catch[
+      DiffExp2`TransportEndpoint[system, boundary, from, to],
+      "DiffExp2Error"
+    ];
+  ][[1]];
+  If[FailureQ[result],
+    Print["ORIGINAL_BANANA FAIL real-path ", result];
+    Exit[1]
+  ];
+  Print[
+    "ORIGINAL_BANANA route=real-prescribed",
+    " seconds=", N[wallSeconds, 8],
+    " segments=", result["SegmentCount"],
+    " valueWindow=", result["Value", "EpsWindow"],
+    " chartWindows=", (#["LocalSolution", "EpsWindow"] & /@
+      result["Charts"])
+  ];
+  {plainValue[result["Value"]], wallSeconds}
+];
+
+transportContourLeg[boundary_, from_, to_, name_String] := Module[
   {line, pulled, system, result, wallSeconds},
   line = from + (to - from) x;
-  pulled = Map[
-    Together,
-    (matrix /. t -> line) (to - from),
-    {2}
-  ];
+  pulled = Map[Together, (matrix /. t -> line) (to - from), {2}];
   system = DiffExp2`LoadSystem[<|
     "Matrix" -> pulled,
     "Variable" -> x
@@ -165,28 +193,44 @@ transportLeg[boundary_, from_, to_, name_String] := Module[
     ];
   ][[1]];
   If[FailureQ[result],
-    Print["ORIGINAL_BANANA FAIL leg=", name, " ", result];
+    Print["ORIGINAL_BANANA FAIL contour-leg=", name, " ", result];
     Exit[1]
   ];
   Print[
-    "ORIGINAL_BANANA leg=", name,
+    "ORIGINAL_BANANA contour-leg=", name,
     " seconds=", N[wallSeconds, 8],
     " segments=", result["SegmentCount"]
   ];
   {plainValue[result["Value"]], wallSeconds}
 ];
 
-(* The upper-half-plane route avoids the real regular-singular points
-   t=0,4,16 while retaining the notebook's physical continuation. *)
-leg1 = transportLeg[
-  boundaryAtMinusOne, -1, -1 + 5 I, "vertical-up"];
-leg2 = transportLeg[
-  leg1[[1]], -1 + 5 I, 20 + 5 I, "horizontal"];
-leg3 = transportLeg[
-  leg2[[1]], 20 + 5 I, 20, "vertical-down"];
+(* This is the original real route.  It crosses the regular-singular points
+   t=0,4,16 using exact singular sectors; t=16 carries the notebook's
+   t-16+i delta physical prescription. *)
+realPath = transportRealPath[boundaryAtMinusOne, -1, 20];
+valueAt20 = realPath[[1]];
+transportSeconds = realPath[[2]];
 
-valueAt20 = leg3[[1]];
-transportSeconds = Total[{leg1[[2]], leg2[[2]], leg3[[2]]}];
+(* The old three-leg contour is retained as an opt-in, homotopic
+   cross-check.  It is deliberately not the primary example: DiffExp 2's
+   singular transfer must work on the real prescribed route. *)
+If[environmentValue["ORIGINAL_BANANA_RUN_CONTOUR_CROSSCHECK"] === "1",
+  contourLeg1 = transportContourLeg[
+    boundaryAtMinusOne, -1, -1 + 5 I, "vertical-up"];
+  contourLeg2 = transportContourLeg[
+    contourLeg1[[1]], -1 + 5 I, 20 + 5 I, "horizontal"];
+  contourLeg3 = transportContourLeg[
+    contourLeg2[[1]], 20 + 5 I, 20, "vertical-down"];
+  contourDifference = Max[Abs[contourLeg3[[1]] - valueAt20]];
+  Print[
+    "ORIGINAL_BANANA contourCrosscheckMaxDifference=",
+    InputForm[N[contourDifference, 12]]
+  ];
+  If[!TrueQ[contourDifference < 10^-10],
+    Print["ORIGINAL_BANANA FAIL: real and contour routes disagree"];
+    Exit[1]
+  ]
+];
 errorsByOrder = Table[
   Max[Abs[
     valueAt20[[All, order + 1]] -

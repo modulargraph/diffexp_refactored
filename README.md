@@ -17,6 +17,29 @@ retains exact singularity analysis, branch control, matching, integration,
 and validation. Selecting either backend is strict: failures never trigger a
 silent fallback to the other implementation.
 
+## Verified speedups over DiffExp 1
+
+On the July 2026 development machine, DiffExp 2 is substantially faster on
+the original pentagon benchmarks while reproducing their saved reference
+values:
+
+| Example | DiffExp 1 | DiffExp 2 | Speedup | Maximum error |
+| --- | ---: | ---: | ---: | ---: |
+| nonplanar pentagon | 49.77 s | 6.84 s | 7.28× | `1.73e-12` |
+| planar pentagon (one loop) | 85.56 s | 28.58 s | 2.99× | `3.60e-12` |
+| planar pentagon (`zmz`) | 1391.14 s | 156.76 s | 8.87× | `2.18e-11` |
+| planar pentagon (`mzz`) | 992.46 s | 143.04 s | 6.94× | `3.23e-11` |
+| planar pentagon (`zzz`) | 1670.66 s | 174.18 s | 9.59× | `2.48e-11` |
+| unequal-mass Banana | 320.64 s | 211.15 s | 1.52× | `1.98e-14` |
+
+The comparisons use like-for-like endpoints and numerical scopes; timings
+remain machine-dependent. The equal-mass Banana also transports directly
+along the prescribed real path through the regular-singular points
+`t=0,4,16` in about 19 seconds. Its saved DiffExp 1 timing continued to a
+different endpoint, so it is not presented as a speedup ratio. Reproduction
+commands, settings, and the slower generic weight-20 MPL case are documented
+in [Original DiffExp example recovery](Docs/OriginalDiffExpExamples.md).
+
 ## Quick start
 
 Build the compiled backend as described in

@@ -1923,11 +1923,22 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
   errAcc = None;
     Do[Module[{chart = charts[[ci]], cs, sol, matchPt, tIn, centerTIn,
       matchTIn, vvals, F, w, ls, basis, satPlan, satVerify,
-      probeErrs, valueMode,
+      probeErrs, valueMode, seriesNormalized = False,
+      bridgeCurrent = None, solveReq,
       couplingDepth = 0},
     If[Environment["DEBUG_CHART"] === "1",
       Print["CHART ", chart["Name"], " prep start t=", SessionTime[]]];
     cs = DiffExp2`Solve`PrepareChart[sys, chart];
+    (* An interior singular chart is converted into an epsilon-regular
+       transfer frame before it is applied to the public boundary window.
+       Budget d-1 private leading-rank completions for a d-column frame.
+       Keep this guard off every ordinary chart; the outgoing transfer is
+       checked below before any public coefficient is returned. *)
+    solveReq = If[TrueQ[chart["Singular"]] && ci < Length[charts],
+      Join[req, <|"EpsWindow" -> Join[req["EpsWindow"], <|
+        "CompleteMax" -> req["EpsWindow", "CompleteMax"] +
+          Max[0, cs["SystemSize"] - 1]|>]|>],
+      req];
     (* Optional value-vector propagation for regular interior charts. The
        incoming object is evaluated AT THIS CHART'S CENTER — inside the
        previous chart's disk (the classic +1/k,-1/k construction keeps
@@ -1941,6 +1952,7 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
     valueMode = Environment["DE2_VALUE_TRANSPORT"] === "1" &&
       !TrueQ[chart["Singular"]] &&
       TrueQ[Lookup[cs["IndicialData"], "Regular", False]] &&
+      !TrueQ[Lookup[current, "PointDatum", False]] &&
       Module[{margin = valueCenterMargin[cfg["ExpansionOrder"]],
           currentScale = current["ChartMap", "Scale"], sameCenter},
         sameCenter = TrueQ[PossibleZeroQ[RootReduce[Together[
@@ -2029,7 +2041,7 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       ,
       If[Environment["DEBUG_CHART"] === "1",
         Print["CHART solve start t=", SessionTime[]]];
-      sol = DiffExp2`Solve`SolveChart[cs, req];
+      sol = DiffExp2`Solve`SolveChart[cs, solveReq];
       If[Environment["DEBUG_CHART"] === "1",
         Print["CHART solve done t=", SessionTime[]]];
       basis = recombineDegenerate[cs, sol["Basis"]["Columns"],
@@ -2037,15 +2049,17 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
       couplingDepth = sol["CouplingDepth"];
       (* basis values at the same point, in THIS chart's coordinate *)
       Module[{tLoc = Together[(matchPt - chart["Center"])/chart["Scale"]],
-          basisValues, pre},
-        basisValues[bb_List] := Module[{Feval},
+          basisValues, basisValuesAt, pre, unit, seriesFrame},
+        basisValuesAt[bb_List, coordinate_] := Module[{Feval},
           Feval = Map[DiffExp2`SectorSeries`EvaluateLocalSolution[#,
-            tLoc, "UsePade" -> False, "ImSign" -> sigmaFor[#, tLoc],
+            coordinate, "UsePade" -> False,
+            "ImSign" -> sigmaFor[#, coordinate],
             "ComputeTailEstimates" -> False]["Value"] &, bb];
           Table[esNew[esMin[Feval[[i]]],
             numHandoff[Table[esCoeff[Feval[[i]], k][[c]],
               {k, esMin[Feval[[i]]], esCM[Feval[[i]]]}]]],
             {c, cs["SystemSize"]}, {i, Length[bb]}]];
+        basisValues[bb_List] := basisValuesAt[bb, tLoc];
         F = basisValues[basis];
         satPlan = mwSaturationPlan[F, chart["Name"]];
         If[satPlan["Steps"] > 0 ||
@@ -2065,6 +2079,89 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
               "VerificationShifts" -> satVerify["InitialShifts"],
               "VerificationSteps" -> satVerify["Steps"],
               "Detail" -> "transformed LocalSolution basis did not verify as a regular epsilon lattice"|>]]];
+        If[TrueQ[chart["Singular"]] && ci < Length[charts],
+          unit[row_, column_] := esNew[0,
+            Join[{KroneckerDelta[row, column]},
+              ConstantArray[0,
+                solveReq["EpsWindow", "CompleteMax"]]]];
+          seriesFrame = Table[
+            MatchWeights[F, Table[unit[row, column],
+              {row, cs["SystemSize"]}],
+              chart["Name"] <> "#series-normalize-" <> ToString[column]],
+            {column, cs["SystemSize"]}];
+          basis = Table[
+            DiffExp2`SectorSeries`CombineLocalSolutions[
+              seriesFrame[[column]], basis],
+            {column, cs["SystemSize"]}];
+          F = basisValues[basis];
+          Do[Module[{target = Table[unit[row, column],
+                {row, cs["SystemSize"]}]},
+              matchingResidualAssert[F, target, target,
+                chart["Name"] <> "#series-normalized-" <>
+                  ToString[column]]],
+            {column, cs["SystemSize"]}];
+          seriesNormalized = True;
+          Module[{nextChart = charts[[ci + 1]], outgoingPoint,
+              tOutgoing, outgoingBasis = basis, sigma, outgoingMatrix,
+              outgoingValues, min, top},
+            outgoingPoint = chartMatchPoint[
+              chart, nextChart, plan["From"], dir,
+              cfg["DivisionOrder"]];
+            tOutgoing = Together[
+              (outgoingPoint - chart["Center"])/chart["Scale"]];
+            sigma = DiffExp2`SectorSeries`ChartImSign[First[basis]];
+            If[TrueQ[N[tOutgoing, 30] < 0],
+              outgoingBasis = ApplyCrossing[#, sigma] & /@ outgoingBasis;
+              tOutgoing = -tOutgoing];
+            outgoingMatrix = basisValuesAt[
+              outgoingBasis, tOutgoing];
+            outgoingMatrix = Map[
+              mwToES[mwInputTrim[mwFromES[#],
+                chart["Name"] <> ": outgoing normalized transfer"]] &,
+              outgoingMatrix, {2}];
+            If[AnyTrue[Flatten[outgoingMatrix], esMin[#] < 0 &],
+              err["E5", <|"Chart" -> chart["Name"],
+                "TransferWindows" ->
+                  Map[DiffExp2`EpsSeries`ESWindow,
+                    outgoingMatrix, {2}],
+                "Detail" -> "normalized singular transfer retained a material epsilon pole"|>]];
+            If[Min[esCM /@ Flatten[outgoingMatrix]] <
+                req["EpsWindow", "CompleteMax"],
+              err["E4", <|"Chart" -> chart["Name"],
+                "RequestedCompleteMax" ->
+                  req["EpsWindow", "CompleteMax"],
+                "InternalCompleteMax" ->
+                  solveReq["EpsWindow", "CompleteMax"],
+                "TransferWindows" ->
+                  Map[DiffExp2`EpsSeries`ESWindow,
+                    outgoingMatrix, {2}],
+                "Detail" -> "internal singular-transfer guard did not preserve the requested epsilon window"|>]];
+            outgoingValues = Table[
+              Fold[esAdd,
+                Table[esTimes[outgoingMatrix[[row, column]],
+                  vvals[[column]]],
+                  {column, cs["SystemSize"]}]],
+              {row, cs["SystemSize"]}];
+            min = Min[esMin /@ outgoingValues];
+            top = Min[esCM /@ outgoingValues];
+            bridgeCurrent = <|
+              "Center" -> outgoingPoint,
+              "ChartMap" -> <|
+                "Center" -> outgoingPoint, "Scale" -> 1|>,
+              "Radius" -> 1,
+              "Sectors" -> {<|
+                "a" -> 0, "b" -> 0, "p" -> 0,
+                "Coeffs" -> Table[
+                  {Table[esCoeff[outgoingValues[[component]], order],
+                    {component, cs["SystemSize"]}]},
+                  {order, min, top}]|>},
+              "EpsWindow" -> <|
+                "Min" -> min, "CompleteMax" -> top|>,
+              "TWindow" -> <|"CompleteMax" -> 0|>,
+              "ErrorEstimate" -> ConstantArray[0, top - min + 1],
+              "Prescriptions" -> {},
+              "PointDatum" -> True|>];
+          ];
         mwMaybeDumpMatchFixture[basis, F, vvals, tLoc,
           req["EpsWindow", "CompleteMax"], chart, matchPt];
         (* Ordinary charts use constant right-frame normalization in
@@ -2082,7 +2179,8 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
           If[Environment["DEBUG_MATCHACC"] === "1",
             Print["MATCHDBG ", chart["Name"],
               " preconditionedF=", mwDebugSummary[F]]]]];
-      w = MatchWeights[F, vvals, chart["Name"]];
+      w = If[seriesNormalized, vvals,
+        MatchWeights[F, vvals, chart["Name"]]];
       If[AnyTrue[w, esMin[#] < 0 &],
         err["E5", <|"Chart" -> chart["Name"],
           "WeightWindows" -> ({esMin[#], esCM[#]} & /@ w),
@@ -2135,9 +2233,10 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
         "Errors" -> N[probeErrs["Values"], 4],
         "AccuracyGoal" -> cfg["AccuracyGoal"],
         "Detail" -> "heuristic full-vs-reduced segment difference exceeds the explicitly requested absolute accuracy goal"|>]];
-    current = ls;
+    current = If[AssociationQ[bridgeCurrent], bridgeCurrent, ls];
     AppendTo[kept, <|"Chart" -> chart, "LocalSolution" -> ls|>];
-    lastSingular = TrueQ[chart["Singular"]];
+    lastSingular = TrueQ[chart["Singular"]] &&
+      !AssociationQ[bridgeCurrent];
     lastChart = chart],
     {ci, Length[charts]}];
   <|"Final" -> current,

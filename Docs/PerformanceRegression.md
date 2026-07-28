@@ -180,7 +180,7 @@ transport run then completed in 92.67 seconds with finite value
 and incoming boundary must still pass the full-ball forward residual before
 the candidate is published.
 
-## Original Henn canonical pentagon gate
+## Original nonplanar pentagon gate
 
 The independent 108-master canonical example from the original DiffExp
 repository is opt-in:
@@ -260,12 +260,13 @@ Scripts/run_original_banana_timing_regression.sh
 
 It can be appended to the release suite with
 `DE2_RUN_ORIGINAL_BANANA_TIMING=1`. The gate transports all four masters
-through epsilon order 4 from `t=-1` to `t=20` on a three-leg upper-half-plane
-contour and checks all 20 coefficients against the saved original notebook
-table with maximum absolute tolerance `1e-10`.
+through epsilon order 4 from `t=-1` to `t=20` on the prescribed real route,
+crossing the regular-singular points at `t=0,4,16`, and checks all 20
+coefficients against the saved original notebook table with maximum absolute
+tolerance `1e-10`.
 
-The default hard deadline is 180 seconds and the three-leg transport ceiling
-is 75 seconds. The July 2026 development run took 27.31 seconds at working
+The default hard deadline is 180 seconds and the real-route transport ceiling
+is 75 seconds. The July 2026 development run took 19.04 seconds at working
 precision 100 and expansion order 50. Override the limits with
 `ORIGINAL_BANANA_DEADLINE_SECONDS` and
 `ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`. The exact matrices are hash-pinned

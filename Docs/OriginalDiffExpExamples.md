@@ -10,12 +10,12 @@ The original repository revision used for the inventory is
 
 | Original example | System | DiffExp 2 status |
 | --- | --- | --- |
-| `5pNonPlanar.nb` | Henn et al. nonplanar five-point canonical system, 108 masters and 31 letters | passing |
+| `5pNonPlanar.nb` | nonplanar pentagon canonical system, 108 masters and 31 letters | passing |
 | `5pPlanar1Mass.nb` | one-loop and `zzz`/`zmz`/`mzz` planar one-mass canonical systems | passing |
 | `Banana.nb` | equal- and unequal-mass banana differential equations | both endpoints passing |
 | `MultiplePolylogarithms.nb` | multiple-polylogarithm demonstration | passing |
 
-## Henn nonplanar five-point system
+## Nonplanar pentagon
 
 Run:
 
@@ -195,22 +195,35 @@ high-precision numerical seed at `t=-1` generated once by the pinned DiffExp 1
 notebook. It is explicitly treated as external numerical input rather than a
 rigorous ball oracle.
 
-The real path crosses regular-singular points at `t=0,4,16`. A three-leg
-upper-half-plane contour,
+The primary DiffExp 2 route is the original real path. It crosses the
+regular-singular points at `t=0,4,16` with exact local sectors and explicit
+upper-rim prescriptions for `t`, `t-4`, and `t-16`. The solver normalizes
+each interior singular basis into an epsilon-regular transfer before applying
+the finite public boundary window. Thus requesting epsilon orders 0 through 4
+does not require additional physical boundary coefficients.
+
+The homotopic three-leg upper-half-plane contour
 
 ```text
 -1 -> -1+5i -> 20+5i -> 20,
 ```
 
-avoids singular basis matching while preserving the physical continuation.
+is retained only as an optional independent cross-check:
+
+```sh
+ORIGINAL_BANANA_RUN_CONTOUR_CROSSCHECK=1 \
+  wolframscript -file Examples/OriginalDiffExp/BananaEqualMass.wl
+```
+
 At working precision 100, expansion order 50, and epsilon orders 0 through 4,
-all 20 saved endpoint coefficients agree with the original notebook's
-25-digit table. On the July 2026 development machine:
+the real singular route reproduces the full requested epsilon window and all
+20 saved endpoint coefficients agree with the original notebook's 25-digit
+table. On the July 2026 development machine:
 
 | Implementation | Route | Time | Maximum error |
 | --- | --- | ---: | ---: |
 | DiffExp 1 saved notebook | `t=-1` to `t=32`, including the `t=20` table | 41.237399 s | saved estimate `1.27e-37` |
-| DiffExp 2 | three-leg contour ending at `t=20` | 27.31 s | `2.72e-11` |
+| DiffExp 2 | real prescribed route ending at `t=20` | 19.04 s | `5.63e-11` |
 
 The timings are useful historical context but not strictly endpoint-for-
 endpoint because the old call continued to `t=32`.
@@ -335,7 +348,7 @@ or directly:
 Scripts/run_original_banana_timing_regression.sh
 ```
 
-Its default hard deadline is 180 seconds and its three-leg transport ceiling
+Its default hard deadline is 180 seconds and its real-route transport ceiling
 is 75 seconds. Override them with `ORIGINAL_BANANA_DEADLINE_SECONDS` and
 `ORIGINAL_BANANA_MAX_TRANSPORT_SECONDS`.
 

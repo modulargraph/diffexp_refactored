@@ -28,7 +28,7 @@ that ambiguity.
 | --- | --- |
 | ``LoadConfiguration`` | ``DiffExp2`LoadConfiguration`` |
 | matrix directory with epsilon slices | ``DiffExp2`LoadSystem`` with an exact matrix or ``d<var>_full.m`` |
-| ``PrepareBoundaryConditions`` | ``DiffExp2`PrepareBoundary`` for finite regular-anchor expressions |
+| ``PrepareBoundaryConditions`` | ``DiffExp2`PrepareBoundary`` for finite regular-anchor expressions; ``DiffExp2`PrepareLaurentBoundary`` for Laurent-valued regular-anchor point data |
 | ``TransportTo`` | ``DiffExp2`TransportEndpoint`` |
 | explicit line segmentation | ``PlanLine`` followed by ``TransportLine`` |
 | saved segment expansions | ``LineSegments[result]`` with one exact ``LocalSolution`` per chart |
@@ -89,9 +89,10 @@ boundary = Transpose@Table[
 ```
 
 For finite expressions, ``PrepareBoundary[{f1[eps],f2[eps]}]`` constructs the
-same array at the configured epsilon order. Pole-normalized boundaries still
-need an explicit ``LocalSolution`` so their negative lower window is not
-discarded. Do not emulate missing data by inserting zero coefficients.
+same array at the configured epsilon order. For pole-normalized expressions,
+``PrepareLaurentBoundary[{f1[eps],f2[eps]}, center]`` constructs a validated
+regular-anchor ``LocalSolution`` and retains its negative lower window. Do not
+emulate missing data by inserting zero coefficients.
 
 ## Matrix format
 

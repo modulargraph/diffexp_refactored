@@ -23,6 +23,7 @@ wolfram_tests=(
   Tests/test_api.m
   Tests/test_canonical_transport.m
   Tests/test_public_api.m
+  Tests/test_prepare_laurent_boundary.m
   Tests/test_paclet_metadata.m
   Tests/test_cpp_backend.m
   Tests/test_cpp_arm_batch.m

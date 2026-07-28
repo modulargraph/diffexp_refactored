@@ -19,6 +19,7 @@ LoadCanonicalSystem::usage = "LoadCanonicalSystem[spec] loads a canonical dlog s
 CanonicalLineChartGeometry::usage = "CanonicalLineChartGeometry[sys, from, to, opts] constructs clearance-certified charts from the finite algebraic singularities of the active canonical alphabet.";
 BackendInformation::usage = "BackendInformation[] reports the compiled recurrence backend version and availability.";
 PrepareBoundary::usage = "PrepareBoundary[expressions, opts] expands one closed-form expression per master into the finite regular-anchor coefficient array accepted by TransportEndpoint and TransportLine. It does not construct a singular/asymptotic LocalSolution from line-coordinate powers or logs. Options: \"EpsilonSymbol\" and \"EpsilonOrder\".";
+PrepareLaurentBoundary::usage = "PrepareLaurentBoundary[expressions, center, opts] expands one closed-form expression per master into a validated regular-anchor LocalSolution while preserving the honest Laurent epsilon window. It is point data at center, not a singular/asymptotic solution. Options: \"EpsilonSymbol\", \"EpsilonOrder\", \"Radius\", and \"Prescriptions\".";
 
 PlanLine::usage = "PlanLine[sys, {from, to}, opts] constructs and validates a transport plan without solving it. Option: \"ExtraSingularFactors\".";
 TransportEndpoint::usage = "TransportEndpoint[sys, boundary, from, to, opts] transports boundary data to one endpoint and returns a named TransportResult.";
@@ -107,10 +108,76 @@ DiffExp2`PrepareBoundary[expressions_List, OptionsPattern[]] := Module[
       canonicalizeEps[#], eps, order] & /@ expressions;
   If[AnyTrue[series, DiffExp2`EpsSeries`ESMinPower[#] < 0 &],
     de2Error["E6",
-      "PrepareBoundary only accepts boundaries finite at eps=0; pass an explicit LocalSolution to preserve a Laurent lower window",
+      "PrepareBoundary only accepts boundaries finite at eps=0; use PrepareLaurentBoundary at a regular anchor to preserve a Laurent lower window",
       <|"Windows" -> (DiffExp2`EpsSeries`ESWindow /@ series)|>]];
   Table[DiffExp2`EpsSeries`ESCoefficient[series[[i]], k],
     {i, Length[series]}, {k, 0, order}]];
+
+(* Laurent-valued Cauchy data need the typed LocalSolution seam because the
+   transport core's plain matrix convention starts at eps^0.  This object is
+   deliberately a PointDatum: it contains one regular (0,0,0) sector at the
+   anchor and makes no claim to solve the differential equation away from it.
+   Singular powers/logs still belong to the separate asymptotic-boundary
+   constructor described in Docs/AsymptoticBoundaryPlan.md. *)
+Options[DiffExp2`PrepareLaurentBoundary] = {
+  "EpsilonSymbol" -> Automatic,
+  "EpsilonOrder" -> Automatic,
+  "Radius" -> Infinity,
+  "Prescriptions" -> {}
+};
+
+DiffExp2`PrepareLaurentBoundary[
+    expressions_List, center_, OptionsPattern[]] := Module[
+  {eps, order, radius, prescriptions, series, kmin, kmax, ncomp,
+   local},
+  If[expressions === {},
+    de2Error["E6",
+      "PrepareLaurentBoundary requires at least one master expression"]];
+  eps = Replace[OptionValue["EpsilonSymbol"],
+    Automatic :> DiffExp2`Config`CanonicalEps[]];
+  If[eps === Global`\[Epsilon], eps = DiffExp2`Config`CanonicalEps[]];
+  order = Replace[OptionValue["EpsilonOrder"],
+    Automatic :> DiffExp2`CurrentConfiguration[]["EpsilonOrder"]];
+  radius = OptionValue["Radius"];
+  prescriptions = OptionValue["Prescriptions"];
+  If[!MatchQ[eps, _Symbol],
+    de2Error["E6", "\"EpsilonSymbol\" must be a Symbol",
+      <|"Value" -> eps|>]];
+  If[!IntegerQ[order] || order < 0,
+    de2Error["E6", "\"EpsilonOrder\" must be a nonnegative integer",
+      <|"Value" -> order|>]];
+  If[radius =!= Infinity &&
+      (!NumericQ[radius] || !TrueQ[radius > 0]),
+    de2Error["E6", "\"Radius\" must be positive or Infinity",
+      <|"Value" -> radius|>]];
+  If[!ListQ[prescriptions],
+    de2Error["E6", "\"Prescriptions\" must be a list",
+      <|"Value" -> prescriptions|>]];
+  series = DiffExp2`EpsSeries`ESFromExpression[
+      canonicalizeEps[#], eps, order] & /@ expressions;
+  kmin = Min[DiffExp2`EpsSeries`ESMinPower /@ series];
+  kmax = Min[DiffExp2`EpsSeries`ESCompleteMax /@ series];
+  ncomp = Length[series];
+  local = <|
+    "Center" -> center,
+    "ChartMap" -> <|"Center" -> center, "Scale" -> 1|>,
+    "Radius" -> radius,
+    "Sectors" -> {<|
+      "a" -> 0, "b" -> 0, "p" -> 0,
+      "Coeffs" -> Table[
+        {Table[
+          DiffExp2`EpsSeries`ESCoefficient[series[[component]], k],
+          {component, ncomp}]},
+        {k, kmin, kmax}]
+    |>},
+    "EpsWindow" -> <|"Min" -> kmin, "CompleteMax" -> kmax|>,
+    "TWindow" -> <|"CompleteMax" -> 0|>,
+    "ErrorEstimate" -> ConstantArray[0, kmax - kmin + 1],
+    "Prescriptions" -> prescriptions,
+    "PointDatum" -> True
+  |>;
+  DiffExp2`SectorSeries`ValidateLocalSolution[local]
+];
 
 (* ---- systems ---- *)
 

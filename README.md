@@ -76,6 +76,11 @@ DiffExp2`EpsilonExpression[result, Global`eps]
 (* {1/4} *)
 ```
 
+For a pole-normalized boundary at a regular anchor, use
+`PrepareLaurentBoundary[expressions, center]`; it preserves the honest
+negative epsilon window and budgets the positive transport headroom consumed
+by that pole.
+
 The root `DiffExp2.m` loader installs the stable umbrella API and
 selects the compiled backend by default.
 

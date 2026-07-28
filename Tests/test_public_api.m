@@ -16,7 +16,7 @@ exports = {
   DiffExp2`LoadCanonicalSystem,
   DiffExp2`CanonicalLineChartGeometry,
   DiffExp2`TransportCanonicalLine,
-  DiffExp2`PrepareBoundary,
+  DiffExp2`PrepareBoundary, DiffExp2`PrepareLaurentBoundary,
   DiffExp2`PlanLine, DiffExp2`TransportEndpoint, DiffExp2`TransportLine,
   DiffExp2`LineSegments, DiffExp2`LineSegment, DiffExp2`EvaluateLine,
   DiffExp2`PiecewiseSolution, DiffExp2`EvaluateLocal,
@@ -69,6 +69,28 @@ assert["closed-form boundary preparation preserves the Laurent guard",
 emptyBoundary = Catch[DiffExp2`PrepareBoundary[{}], "DiffExp2Error"];
 assert["empty closed-form boundaries fail at the public seam",
   FailureQ[emptyBoundary]];
+
+laurentBoundary = DiffExp2`PrepareLaurentBoundary[
+  {1/Global`eps + 2 + 3 Global`eps, 1/Global`eps^2 + 5},
+  7, "EpsilonOrder" -> 2];
+assert["Laurent boundary constructor preserves the common honest window",
+  laurentBoundary["EpsWindow"] ===
+    <|"Min" -> -2, "CompleteMax" -> 2|> &&
+  laurentBoundary["PointDatum"] === True &&
+  laurentBoundary["Center"] === 7 &&
+  laurentBoundary["Radius"] === Infinity];
+assert["Laurent boundary constructor aligns component coefficients",
+  laurentBoundary["Sectors"][[1, "Coeffs"]] === {
+    {{0, 1}}, {{1, 0}}, {{2, 5}}, {{3, 0}}, {{0, 0}}
+  } &&
+  DiffExp2`SectorSeries`ValidateLocalSolution[laurentBoundary] ===
+    laurentBoundary];
+badLaurentRadius = Catch[
+  DiffExp2`PrepareLaurentBoundary[{1/Global`eps}, 0,
+    "Radius" -> 0],
+  "DiffExp2Error"];
+assert["Laurent boundary constructor rejects a nonpositive radius",
+  FailureQ[badLaurentRadius]];
 
 aliasSystem = DiffExp2`LoadSystem[<|
   "Matrix" -> {{Global`\[Epsilon]/(1 - Global`x)}},

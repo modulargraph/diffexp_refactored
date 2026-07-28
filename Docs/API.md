@@ -23,7 +23,7 @@ Configuration and backend:
 
 Systems, planning, and transport:
 
-- `LoadSystem`, `PrepareBoundary`
+- `LoadSystem`, `PrepareBoundary`, `PrepareLaurentBoundary`
 - `PlanLine`, `TransportEndpoint`, `TransportLine`
 - `LineSegments`, `LineSegment`, `EvaluateLine`, `PiecewiseSolution`
 
@@ -217,8 +217,43 @@ returns the masters-by-epsilon-coefficients array accepted by
 
 `PrepareBoundary` is intentionally limited to regular-anchor expressions
 finite at epsilon zero. A pole would lose a nonzero Laurent lower window, so
-the function rejects it; pass an explicit exact local solution when such a
-window must be preserved.
+the function rejects it.
+
+For Laurent-valued point data at a regular anchor, use:
+
+```mathematica
+DiffExp2`PrepareLaurentBoundary[expressions, center, opts]
+```
+
+This returns a validated `LocalSolution` with a single regular sector and an
+honest epsilon window. It is accepted directly by `TransportEndpoint` and
+`TransportLine`.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `"EpsilonSymbol"` | `Automatic` | expansion symbol; automatic uses the canonical global `eps` symbol |
+| `"EpsilonOrder"` | `Automatic` | complete Laurent expansion top |
+| `"Radius"` | `Infinity` | positive point-datum chart radius |
+| `"Prescriptions"` | `{}` | branch prescriptions retained on the typed object |
+
+For example:
+
+```mathematica
+boundary = DiffExp2`PrepareLaurentBoundary[
+  {1/eps + 2 + 3 eps, 1/eps^2 + 5},
+  0,
+  "EpsilonOrder" -> 2
+];
+
+DiffExp2`EpsilonWindow[boundary]
+(* <|"Min" -> -2, "CompleteMax" -> 2|> *)
+```
+
+`PrepareLaurentBoundary` represents Cauchy data at `center`; it is not a
+solution of the differential equation away from that point. It also does not
+construct a singular/asymptotic solution from powers or logarithms of the
+line coordinate. That separate feature is specified in
+`Docs/AsymptoticBoundaryPlan.md`.
 
 ## Planning and transport
 

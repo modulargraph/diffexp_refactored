@@ -1901,9 +1901,23 @@ ValidatePlan[plan_Association] := Module[
 TransportLine[sys_Association, boundary_, plan_Association] := Module[
   {charts = plan["Charts"], dir = plan["Direction"], current, errAcc,
    req, expOrd = cfg["ExpansionOrder"], epsOrd = cfg["EpsilonOrder"],
-   lastSingular = False, lastLS = None, lastChart = None, kept = {}},
+   boundaryMin, poleDepth, lastSingular = False, lastLS = None,
+   lastChart = None, kept = {}},
   ValidatePlan[plan];
-  req = <|"EpsWindow" -> <|"Min" -> 0, "CompleteMax" -> epsOrd|>,
+  boundaryMin = If[
+    AssociationQ[boundary] && KeyExistsQ[boundary, "Sectors"],
+    Lookup[Lookup[boundary, "EpsWindow", <||>], "Min", 0],
+    0
+  ];
+  If[!IntegerQ[boundaryMin],
+    err["E6", <|"BoundaryMin" -> boundaryMin,
+      "Detail" -> "typed boundary has no integer Laurent lower edge"|>]];
+  poleDepth = Max[0, -boundaryMin];
+  (* A Laurent-valued Cauchy datum consumes poleDepth positive orders when
+     multiplied by the regular fundamental matrix.  Solve that private
+     headroom explicitly so the public complete top remains epsOrd. *)
+  req = <|"EpsWindow" -> <|"Min" -> 0,
+      "CompleteMax" -> epsOrd + poleDepth|>,
     "TOrder" -> expOrd|>;
   (* boundary: LocalSolution (anchored at plan From) or plain values matrix *)
   current = If[AssociationQ[boundary] && KeyExistsQ[boundary, "Sectors"], boundary,
@@ -2181,7 +2195,7 @@ TransportLine[sys_Association, boundary_, plan_Association] := Module[
               " preconditionedF=", mwDebugSummary[F]]]]];
       w = If[seriesNormalized, vvals,
         MatchWeights[F, vvals, chart["Name"]]];
-      If[AnyTrue[w, esMin[#] < 0 &],
+      If[boundaryMin >= 0 && AnyTrue[w, esMin[#] < 0 &],
         err["E5", <|"Chart" -> chart["Name"],
           "WeightWindows" -> ({esMin[#], esCM[#]} & /@ w),
           "Detail" -> "epsilon-saturated matching returned Laurent weights"|>]];

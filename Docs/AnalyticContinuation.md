@@ -218,15 +218,15 @@ exact transformed system.
 
 ## Current public-interface gaps
 
-- `PrepareBoundary` accepts finite epsilon expansions at a regular anchor.
-  It does not yet reproduce the old `PrepareBoundaryConditions` mode that
+- `PrepareBoundary` accepts finite epsilon expansions at a regular anchor,
+  while `PrepareLaurentBoundary` constructs typed regular-anchor point data
+  with an honest Laurent window. Neither reproduces the old
+  `PrepareBoundaryConditions` mode that
   accepts an asymptotic/singular-start expression depending on the line
   coordinate and converts its `Log[x]` and fractional powers into a tagged
-  `LocalSolution`.  Starting a transport at a singular point is currently
-  unsupported; an explicit `LocalSolution` is accepted only at a regular
-  anchor (for example, to retain a Laurent epsilon window).  Ordinary
-  Euclidean-point boundaries and all subsequent transport crossings are
-  branch-aware as described above.
+  `LocalSolution`. Starting a transport at a singular point is currently
+  unsupported. Ordinary Euclidean-point boundaries and all subsequent
+  transport crossings are branch-aware as described above.
 - The public system consumes an already pulled-back one-variable matrix and
   prescriptions in that variable.  It does not yet accept a multivariate
   physical line association and pull physical prescription factors back

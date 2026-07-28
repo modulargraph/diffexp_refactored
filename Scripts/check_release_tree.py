@@ -285,6 +285,7 @@ TEST_FILES = {
     "Tests/test_path_planner_algebraic.m",
     "Tests/test_pentagon_massive_oracle.m",
     "Tests/test_paclet_metadata.m",
+    "Tests/test_prepare_laurent_boundary.m",
     "Tests/test_public_api.m",
     "Tests/test_public_native_line_dispatch.m",
     "Tests/test_regular_cleared_hoist.m",

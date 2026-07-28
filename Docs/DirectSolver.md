@@ -116,9 +116,10 @@ boundary = {
 
 The plain-array interface starts at epsilon order zero.  Internally, DiffExp 2
 uses `EpsSeries` records with explicit lower and complete upper window bounds;
-it never pads an unknown Laurent coefficient with zero.  Expert callers can
-pass a validated `LocalSolution` to `TransportLine`, but the release examples
-use finite arrays at regular anchors.
+it never pads an unknown Laurent coefficient with zero.
+`PrepareLaurentBoundary[expressions, center]` constructs typed Laurent-valued
+point data for a regular anchor. Expert callers may also pass a validated
+`LocalSolution` directly to `TransportLine`.
 
 ## 4. Plan and transport a line
 

@@ -3,9 +3,9 @@
 ## Status and objective
 
 DiffExp 2 already transports exact tagged sectors with the requested
-`+/- i0` convention, but its public boundary seam starts at a regular point.
-`PrepareBoundary` expands finite epsilon data only, and `SegmentLine` rejects
-a singular starting point.  This document specifies the missing DiffExp 1
+`+/- i0` convention, and `PrepareLaurentBoundary` preserves Laurent-valued
+point data at a regular anchor. `SegmentLine` still rejects a singular
+starting point. This document specifies the missing DiffExp 1 asymptotic
 boundary mode without weakening the existing branch or epsilon-window
 contracts.
 

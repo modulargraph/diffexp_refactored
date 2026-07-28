@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `PrepareLaurentBoundary` for pole-normalized Cauchy data at a regular
+  anchor, including honest negative epsilon windows and the private positive
+  transport headroom required to preserve the requested complete top.
 - Reproduced every example notebook in the pinned public DiffExp revision:
   the Henn and one-mass canonical pentagons, multiple polylogarithms, and
   both equal- and unequal-mass Banana endpoints, with hash-pinned inputs,

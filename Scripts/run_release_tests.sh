@@ -111,6 +111,19 @@ if [[ "${DE2_RUN_HENN_NONPLANAR_TIMING:-0}" == 1 ]]; then
   Scripts/run_henn_nonplanar_timing_regression.sh
 fi
 
+if [[ "${DE2_RUN_HENN_FT_BOUNDARY:-0}" == 1 ]]; then
+  echo "=== optional FT reconstruction of the Henn double-pentagon boundary"
+  Scripts/fetch_henn_nonplanar_data.sh
+  if [[ -n "${HENN_FT_COMPONENT:-}" ]]; then
+    sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh \
+      --component "$HENN_FT_COMPONENT"
+  elif [[ "${HENN_FT_ALL:-0}" == 1 ]]; then
+    sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --all
+  else
+    sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh
+  fi
+fi
+
 if [[ "${DE2_RUN_PLANAR_ONE_MASS_TIMING:-0}" == 1 ]]; then
   echo "=== optional original DiffExp planar one-mass canonical pentagons"
   Scripts/run_planar_one_mass_timing_regression.sh

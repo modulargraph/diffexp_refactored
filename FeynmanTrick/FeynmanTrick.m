@@ -73,6 +73,10 @@ $FTConfig = <|
   "WorkDirectory" -> FileNameJoin[{$TemporaryDirectory, "FeynmanTrick"}],
   "FeynmanParameter" -> FeynmanTrick`xx,
   "FixedParameterValue" -> 11/23,
+  (* Automatic preserves the historical scalar anchor above.  A list gives
+     one exact interior anchor per integration level, avoiding forced
+     diagonal coincidences such as x_j=x_i in multi-scale families. *)
+  "FixedParameterValues" -> Automatic,
   "DimensionVariable" -> Global`d,
   "DimensionExpression" -> Automatic,
   "EpsilonSymbol" -> FeynmanTrick`FTeps,

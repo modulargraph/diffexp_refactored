@@ -91,6 +91,34 @@ resolution.
 The parent independently validates every returned target identity and, for
 `All`, the discovery manifest.
 
+For multilevel families, the optional `"FixedParameterValues"` setting
+provides one exact rational anchor strictly between zero and one for every
+integration level:
+
+```mathematica
+plan = FeynmanTrick`PipelinePlan[family, targets,
+  "FixedParameterValues" -> {1/5, 3/10, 2/5}
+];
+```
+
+`Automatic` preserves the historical common anchor `11/23`. Distinct anchors
+are important when a family has singular loci such as `x2=x1`: using the same
+coordinate at every level would place a later differential system directly
+on its epsilon-zero singularity. Anchors are part of both the prepared-FIRE
+cache identity and the ladder checkpoint contract.
+
+If some slots are irreducible numerators rather than denominators, declare
+them as mathematical family metadata:
+
+```mathematica
+family = Join[family, <|"NumeratorPositions" -> {3, 7}|>];
+```
+
+Declared numerator positions must carry nonpositive indices, are excluded
+from the automatic merge sequence, survive every ladder level, and
+participate in the content-addressed family identity. They are distinct from
+`EliminatedPositions`, whose indices must be exactly zero.
+
 `All` is beta for arbitrary high-complexity families: its FIRE request covers
 sector corners and the first dot/numerator shell. This fixes the
 request-dependent dotted sunrise basis, but a family whose masters first
@@ -119,6 +147,39 @@ documented example profile. The small `.sh` files in
 `Examples/FeynmanTrick` forward to this launcher. The first run prepares FIRE
 data and writes a reusable preparation snapshot.
 Later runs print `FTPREP CACHE HIT` and skip that work.
+
+### Henn double-pentagon boundary reconstruction
+
+The extra
+[`HennDoublePentagonBoundary.sh`](../Examples/FeynmanTrick/HennDoublePentagonBoundary.sh)
+example reconstructs rather than imports the `X0={3,-1,1,1,-1}` boundary for
+the canonical nonplanar double-pentagon basis of Chicherina et al.,
+[arXiv:1812.11160](https://arxiv.org/abs/1812.11160). The maintained default
+computes component 1 through a four-level FT ladder, applies the paper
+normalization `eps^4 Exp[2 eps EulerGamma]`, and compares orders 0 through 4.
+`--all` expands the same procedure to the full 108-component, 257-scalar
+boundary.
+
+```sh
+Scripts/fetch_henn_nonplanar_data.sh
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --plan
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --all
+```
+
+The scalar targets split into exact families according to both their active
+denominator support and negative-power numerator pattern. Zero-power lines
+are absent from the scalar identity instead of being introduced and then
+removed through a singular endpoint limit. The three ISP slots are declared
+numerators in every family. The launcher executes a manifest sequentially so
+it needs only one Wolfram license seat at a time. Its exact anchor profile
+`{1/5,3/10,2/5,1/2,3/5,7/10,4/5}` avoids diagonal singular starts while
+leaving every endpoint contour on the real unit interval.
+
+The physical X0 sheet is part of the plan: the deepest Symanzik boundary uses
+the lower rim, while the projected level signs are `{+1,-1,...}` from level 1
+upward. This distinction is explicit because a deepest-boundary branch and a
+parameter-contour deformation are different mathematical choices.
 
 ## Built-in Euclidean examples
 
@@ -149,9 +210,11 @@ complete, source-controlled DiffExp 2 ladder result is not yet present.
 
 The typed facade defaults to C++, working precision 500, expansion order 50,
 epsilon order 0, boundary lookahead 4, halos `{0}`, division order 3, radius
-1, value transport enabled, and endpoint-arm batching requested. Native thread
-count is `Min[10,$ProcessorCount]` with a floor of one. Every setting can be
-overridden by a named `PipelinePlan` option and is serialized into its
+1, value transport enabled, endpoint-arm batching requested, and the `+1`
+deepest-boundary rim. Per-level deformation signs default to that same rim
+unless `"LevelDeltaPrescriptionSigns"` supplies one sign per level. Native
+thread count is `Min[10,$ProcessorCount]` with a floor of one. Every setting
+can be overridden by a named `PipelinePlan` option and is serialized into its
 `"Environment"` record.
 
 ## Numerical controls
@@ -165,6 +228,8 @@ overridden by a named `PipelinePlan` option and is serialized into its
 | `FT_EPS_ORDER` | highest final epsilon coefficient requested |
 | `FT_BOUNDARY_EXTRA_ORDER` | extra internal epsilon lookahead at each level |
 | `FT_LEVEL_EPS_HALOS` | comma-separated extra lookahead by level, listed from level 1 upward |
+| `FT_DELTA_PRESCRIPTION_SIGN` | `+1` or `-1` rim for a branch-sensitive deepest Symanzik boundary |
+| `FT_LEVEL_DELTA_PRESCRIPTION_SIGNS` | optional comma-separated `+1`/`-1` contour signs, one per integration level from level 1 upward |
 | `FT_DIVISION_ORDER` | coupled chart placement/matching divisor; adjacent regular charts meet at `+1/k` and `-1/k` |
 | `FT_RADIUS_OF_CONVERGENCE` | affine local-coordinate radius normalization |
 | `FT_FIRE_TIMEOUT_SECONDS` | watchdog timeout for one FIRE run |

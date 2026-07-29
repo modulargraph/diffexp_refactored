@@ -4002,6 +4002,71 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
        json::object{{"min", evaluation_window.min_power},
                     {"max", evaluation_window.complete_max}}},
       {"required_complete_max", required_complete_max}};
+  const bool diagnostic_terminal_state = [] {
+    const auto* raw = std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
+    return raw != nullptr && std::string(raw) == "1";
+  }();
+  const auto encode_vector_windows =
+      [](const FiniteLaurentVector<ComplexBall>& vector) {
+        json::array entries;
+        std::optional<std::int32_t> common_min;
+        std::optional<std::int32_t> common_max;
+        for (std::size_t row = 0; row < vector.size(); ++row) {
+          const auto& frame = vector[row];
+          entries.push_back(json::object{
+              {"row", row},
+              {"min", frame.min_power()},
+              {"max", frame.complete_max()}});
+          common_min = !common_min.has_value()
+              ? frame.min_power()
+              : std::min(*common_min, frame.min_power());
+          common_max = !common_max.has_value()
+              ? frame.complete_max()
+              : std::min(*common_max, frame.complete_max());
+        }
+        return json::object{
+            {"intersection",
+             common_min.has_value() && common_max.has_value()
+                 ? json::value(json::object{{"min", *common_min},
+                                            {"max", *common_max}})
+                 : json::value(nullptr)},
+            {"entries", std::move(entries)}};
+      };
+  const auto encode_matrix_windows =
+      [](const FiniteLaurentMatrix<ComplexBall>& matrix) {
+        json::array entries;
+        std::optional<std::int32_t> common_min;
+        std::optional<std::int32_t> common_max;
+        for (std::size_t row = 0; row < matrix.size(); ++row)
+          for (std::size_t column = 0; column < matrix[row].size();
+               ++column) {
+            const auto& frame = matrix[row][column];
+            entries.push_back(json::object{
+                {"row", row},
+                {"column", column},
+                {"min", frame.min_power()},
+                {"max", frame.complete_max()}});
+            common_min = !common_min.has_value()
+                ? frame.min_power()
+                : std::min(*common_min, frame.min_power());
+            common_max = !common_max.has_value()
+                ? frame.complete_max()
+                : std::min(*common_max, frame.complete_max());
+          }
+        return json::object{
+            {"intersection",
+             common_min.has_value() && common_max.has_value()
+                 ? json::value(json::object{{"min", *common_min},
+                                            {"max", *common_max}})
+                 : json::value(nullptr)},
+            {"entries", std::move(entries)}};
+      };
+  if (diagnostic_terminal_state) {
+    normal_frame_attempt["physical_basis_windows"] =
+        encode_matrix_windows(evaluated_basis);
+    normal_frame_attempt["physical_incoming_windows"] =
+        encode_vector_windows(incoming_value);
+  }
   if (expected_singular_request.has_value()) {
     const auto receiving_owner = basis.front()->retained_equation_owner();
     if (receiving_owner) {
@@ -4086,6 +4151,16 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         normal_frame_attempt["candidate_frame"] =
             compact_matching_identity_reference(
                 matching_frame_identity);
+        if (diagnostic_terminal_state) {
+          normal_frame_attempt["left_normalized_basis_windows"] =
+              encode_matrix_windows(*left_normalized_matching_basis);
+          normal_frame_attempt["right_denormalization_windows"] =
+              encode_matrix_windows(*matching_right_normalization_matrix);
+          normal_frame_attempt["matching_basis_windows"] =
+              encode_matrix_windows(matching_basis);
+          normal_frame_attempt["matching_incoming_windows"] =
+              encode_vector_windows(matching_incoming);
+        }
 
         std::optional<std::int32_t> common_min;
         std::optional<std::int32_t> common_max;
@@ -4105,12 +4180,35 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             ? json::value(json::object{{"min", *common_min},
                                       {"max", *common_max}})
             : json::value(nullptr);
+        std::optional<std::int32_t> normalized_incoming_min;
+        for (const auto& frame : matching_incoming)
+          normalized_incoming_min =
+              !normalized_incoming_min.has_value()
+              ? frame.min_power()
+              : std::min(*normalized_incoming_min, frame.min_power());
+        const auto projected_residual_complete_max =
+            common_max.has_value() && normalized_incoming_min.has_value()
+            ? std::optional<std::int32_t>(
+                  matching_detail::valuation_zero_residual_complete_max(
+                      evaluation_window.complete_max, *common_max,
+                      *normalized_incoming_min))
+            : std::nullopt;
+        normal_frame_attempt["normalized_incoming_min_power"] =
+            normalized_incoming_min.has_value()
+            ? json::value(*normalized_incoming_min)
+            : json::value(nullptr);
+        normal_frame_attempt["projected_residual_complete_max"] =
+            projected_residual_complete_max.has_value()
+            ? json::value(*projected_residual_complete_max)
+            : json::value(nullptr);
         if (!common_min.has_value() || !common_max.has_value() ||
             *common_min > *common_max ||
-            *common_max < required_complete_max) {
+            !projected_residual_complete_max.has_value() ||
+            *projected_residual_complete_max < required_complete_max) {
           if (require_normalized_singular_frame) {
             if (!common_min.has_value() || !common_max.has_value() ||
-                *common_min > *common_max)
+                *common_min > *common_max ||
+                !projected_residual_complete_max.has_value())
               throw MatchingArithmeticError(
                   MatchingArithmeticErrorCode::InvalidSaturationLattice,
                   checkpoint_identity +
@@ -4119,8 +4217,11 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             throw MatchingArithmeticError(
                 MatchingArithmeticErrorCode::InsufficientCompleteWindow,
                 checkpoint_identity +
-                    ": terminal singular Fuchsian frame does not reach the required epsilon prefix",
-                std::nullopt, std::nullopt, *common_max);
+                    ": terminal singular Fuchsian frame and valuation-zero "
+                    "physical residual do not reach the required epsilon "
+                    "prefix",
+                std::nullopt, std::nullopt,
+                *projected_residual_complete_max);
           }
           // A low public-order request need not recursively manufacture the
           // private Laurent halo consumed by V^-1/V.  In that case retain the
@@ -4149,9 +4250,7 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
               "owner for its required Fuchsian normal frame");
     }
   }
-  if (const auto* diagnostics =
-          std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE");
-      diagnostics != nullptr && std::string(diagnostics) == "1" &&
+  if (diagnostic_terminal_state &&
       expected_singular_request.has_value()) {
     const auto frame_scales = [](const auto& frames) {
       std::map<std::int32_t, ComplexBall> largest;
@@ -5293,6 +5392,31 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
           ? &*exact_shadow_physical_transformed_basis
           : factorized_physical_basis.has_value() ? &*factorized_physical_basis
           : nullptr;
+      if (diagnostic_terminal_state) {
+        normal_frame_attempt["refinement_route"] =
+            "retained-acb-lattice";
+        normal_frame_attempt["refinement_basis_windows"] =
+            encode_matrix_windows(matching_basis);
+        normal_frame_attempt["refinement_incoming_windows"] =
+            encode_vector_windows(matching_incoming);
+        normal_frame_attempt["refinement_transformed_basis_windows"] =
+            stable_transformed_basis.has_value()
+                ? json::value(encode_matrix_windows(
+                      *stable_transformed_basis))
+                : json::value(nullptr);
+        normal_frame_attempt["refinement_authoritative_basis_windows"] =
+            authoritative_residual_basis != nullptr
+                ? json::value(encode_matrix_windows(
+                      *authoritative_residual_basis))
+                : json::value(nullptr);
+        normal_frame_attempt["refinement_authoritative_incoming_windows"] =
+            authoritative_residual_basis != nullptr
+                ? json::value(encode_vector_windows(
+                      correlated_seed_authority
+                          ? *exact_shadow_seed_normalized_incoming
+                          : incoming_value))
+                : json::value(nullptr);
+      }
       return refine_acb_finite_laurent_match(
           matching_basis, matching_incoming, *exact_lattice.acb_transformation,
           refinement, refinement_context, false, false,
@@ -5332,6 +5456,31 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
         ? &*exact_shadow_physical_transformed_basis
         : factorized_physical_basis.has_value() ? &*factorized_physical_basis
         : nullptr;
+    if (diagnostic_terminal_state) {
+      normal_frame_attempt["refinement_route"] =
+          "specialized-rational-lattice";
+      normal_frame_attempt["refinement_basis_windows"] =
+          encode_matrix_windows(matching_basis);
+      normal_frame_attempt["refinement_incoming_windows"] =
+          encode_vector_windows(matching_incoming);
+      normal_frame_attempt["refinement_transformed_basis_windows"] =
+          stable_transformed_basis.has_value()
+              ? json::value(encode_matrix_windows(
+                    *stable_transformed_basis))
+              : json::value(nullptr);
+      normal_frame_attempt["refinement_authoritative_basis_windows"] =
+          authoritative_residual_basis != nullptr
+              ? json::value(encode_matrix_windows(
+                    *authoritative_residual_basis))
+              : json::value(nullptr);
+      normal_frame_attempt["refinement_authoritative_incoming_windows"] =
+          authoritative_residual_basis != nullptr
+              ? json::value(encode_vector_windows(
+                    correlated_seed_authority
+                        ? *exact_shadow_seed_normalized_incoming
+                        : incoming_value))
+              : json::value(nullptr);
+    }
     return refine_acb_finite_laurent_match(
         matching_basis, matching_incoming, specialized_transformation,
         refinement, refinement_context,
@@ -5404,6 +5553,24 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
        !refined.residual_history.back().complete_through_required ||
        refined.residual_history.back().verdict !=
            AcbMatchingResidualVerdict::Pass)) {
+    normal_frame_attempt["status"] =
+        "normalized-residual-not-certified";
+    if (!refined.residual_history.empty())
+      normal_frame_attempt["normalized_residual"] =
+          encode_acb_match_residual_diagnostics(
+              refined.residual_history.back());
+    if (diagnostic_terminal_state) {
+      normal_frame_attempt["refined_weight_windows"] =
+          encode_vector_windows(refined.weights);
+      normal_frame_attempt["refined_transformed_weight_windows"] =
+          encode_vector_windows(refined.transformed_weights);
+      normal_frame_attempt["refined_residual_windows"] =
+          encode_vector_windows(refined.residual);
+      std::fprintf(
+          stderr,
+          "[diffexp2 terminal normal-frame failure] %s\n",
+          json::serialize(normal_frame_attempt).c_str());
+    }
     if (require_normalized_singular_frame &&
         !refined.residual_history.empty() &&
         !refined.residual_history.back().complete_through_required)
@@ -5413,12 +5580,6 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
               ": terminal singular Fuchsian residual does not reach the required epsilon prefix",
           std::nullopt, std::nullopt,
           refined.residual_history.back().complete_window.complete_max);
-    normal_frame_attempt["status"] =
-        "normalized-residual-not-certified";
-    if (!refined.residual_history.empty())
-      normal_frame_attempt["normalized_residual"] =
-          encode_acb_match_residual_diagnostics(
-              refined.residual_history.back());
     if (!require_normalized_singular_frame) {
       reset_to_physical_matching_frame();
       exact_lattice = make_exact_lattice();
@@ -5444,6 +5605,14 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
       throw std::logic_error(
           "receiving SCC could not return Fuchsian matching weights to the "
           "physical basis");
+    if (diagnostic_terminal_state) {
+      normal_frame_attempt["terminal_right_denormalization_windows"] =
+          encode_matrix_windows(*terminal_right_transformation);
+      normal_frame_attempt["normalized_residual_before_pushforward_windows"] =
+          encode_vector_windows(refined.residual);
+      normal_frame_attempt["physical_weight_windows"] =
+          encode_vector_windows(*physical_weights);
+    }
     auto physical_options = refinement;
     physical_options.required_min_power = evaluation_window.min_power;
     bool physical_prefix_preserved = false;
@@ -5597,6 +5766,9 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
             pushed_residual->certificate_identity.empty())
           throw std::logic_error(
               "receiving SCC residual pushforward lost its exact frame binding");
+        if (diagnostic_terminal_state)
+          normal_frame_attempt["pushed_physical_residual_windows"] =
+              encode_vector_windows(pushed_residual->residual);
         auto certified =
             matching_detail::certify_precomputed_acb_matching_residual(
                 evaluated_basis, *physical_weights, incoming_value,
@@ -5768,12 +5940,19 @@ std::shared_ptr<StoredRefinedAcbMatch> build_refined_acb_match_once(
                   ": terminal singular Fuchsian pushforward did not retain a physical residual certificate; normal_frame_attempt=" +
                   json::serialize(normal_frame_attempt));
         if (!physical_certificate->diagnostics.complete_through_required)
+        {
+          if (diagnostic_terminal_state)
+            std::fprintf(
+                stderr,
+                "[diffexp2 terminal pushforward failure] %s\n",
+                json::serialize(normal_frame_attempt).c_str());
           throw MatchingArithmeticError(
               MatchingArithmeticErrorCode::InsufficientCompleteWindow,
               checkpoint_identity +
                   ": terminal singular Fuchsian pushforward does not reach the required physical epsilon prefix",
               std::nullopt, std::nullopt,
               physical_certificate->diagnostics.complete_window.complete_max);
+        }
         // Complete Inconclusive and complete Fail are valid diagnostic
         // outcomes, not malformed lattices.  Preserve the selected residual
         // authority (physical or correlated seed-normal) and terminal frame

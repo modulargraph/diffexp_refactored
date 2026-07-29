@@ -39,6 +39,18 @@ test["resume computes only missing endpoint arms",
 test["runner opens no Wolfram subkernels",
   And @@ (!StringContainsQ[runnerSource, #] & /@
     {"ParallelSubmit", "ParallelMap", "LaunchKernels", "ParallelNeeds"})];
+trimAmbiguityFixture = Failure["DiffExp2", <|
+  "ID" -> "E5", "Module" -> "Tolerances",
+  "Detail" ->
+    "cannot classify coefficient against scale within the ambiguity band"|>];
+test["ambiguous epsilon trimming is retained conservatively",
+  ft2EpsilonTrimAmbiguityFailureQ[trimAmbiguityFixture] &&
+    !ft2EpsilonTrimAmbiguityFailureQ[
+      Failure["DiffExp2", <|"ID" -> "E5",
+        "Module" -> "NativeTransport",
+        "Detail" -> "unrelated"|>]] &&
+    StringContainsQ[runnerSource,
+      "FTLADDER EPSILON TRIM AMBIGUOUS RETAIN"]];
 test["retained native branch uses the observable batch dispatcher",
   StringContainsQ[runnerSource,
     "nativeDispatch = ft2RunNativeBoundaryDispatch["] &&
@@ -161,8 +173,10 @@ test["IBP reductions are expressed in the active normalized basis",
     "eps^currentPrefactors[[j]]"] &&
     StringContainsQ[runnerSource,
       "currentPrefactors = epsilonBasis[\"BoundaryPrefactors\"]"]];
-projectedRunnerPrescriptions = levelDeltaPrescriptions[chainZ,
-  <|"SingularFactors" -> {}|>, {chainZ - 1/3 + chainEps}];
+projectedRunnerPrescriptions = Block[
+  {levelDeltaPrescriptionSigns = {1}},
+  levelDeltaPrescriptions[1, chainZ,
+    <|"SingularFactors" -> {}|>, {chainZ - 1/3 + chainEps}]];
 test["runner projects extra factors before constructing delta prescriptions",
   AnyTrue[projectedRunnerPrescriptions,
     FreeQ[First[#], chainEps] &&
@@ -246,11 +260,14 @@ FeynmanTrick`FIREInterface`Private`$ReductionCache = oldReductionCache;
 name = "checkpoint-fixture";
 prepKey = 112358;
 z = Global`z;
+fixtureAnchor = 11/23;
 mastersHere = {{2, 0}};
 mastersBelow = {{1, 1}};
 levelData = <|"Masters" -> mastersHere, "FeynmanParameter" -> z,
   "CombinedPositions" -> {1, 2}|>;
-data = <|"NumLevels" -> 1, "Levels" -> <|
+data = <|"NumLevels" -> 1,
+  "FixedParamValue" -> fixtureAnchor,
+  "FixedParamValues" -> {fixtureAnchor}, "Levels" -> <|
   0 -> <|"Masters" -> mastersBelow|>, 1 -> levelData|>|>;
 requests = FeynmanTrick`LevelReduction`BoundaryRequestRecords[
   mastersBelow, levelData["CombinedPositions"]];
@@ -273,7 +290,7 @@ basePayload = <|
   "MastersHere" -> mastersHere,
   "MastersBelow" -> mastersBelow, "Requests" -> requests,
   "Reductions" -> reductions, "ExtraSingularFactors" -> {},
-  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
   "RecurrenceBackend" -> recurrenceBackend,
   "DivisionOrder" -> divisionOrder,
   "RadiusOfConvergence" -> radiusOfConvergence,
@@ -388,7 +405,7 @@ saveLadderCheckpoint[highOrderBoundaryFile, <|
   "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
   "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
   "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
-  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
   "RecurrenceBackend" -> recurrenceBackend,
   "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
   "LevelEpsilonHalos" -> levelEpsilonHalos,
@@ -410,7 +427,7 @@ saveLadderCheckpoint[raisedPublicationBoundaryFile, <|
   "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
   "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
   "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
-  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
   "MatchingDigits" -> matchDigits,
   "PublicationDigits" -> matchDigits + 2,
   "RecurrenceBackend" -> recurrenceBackend,
@@ -428,12 +445,39 @@ test["boundary with explicit raised publication digits resumes only for that con
       raisedPublicationBoundaryFile, name, data, prepKey] === $Failed,
   loaded];
 
+privateComputationBoundaryFile =
+  FileNameJoin[{tmpDir, "private-computation-boundary.mx"}];
+saveLadderCheckpoint[privateComputationBoundaryFile, <|
+  "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
+  "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
+  "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
+  "MatchingDigits" -> matchDigits + 2,
+  "PublicationDigits" -> matchDigits,
+  "RecurrenceBackend" -> recurrenceBackend,
+  "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
+  "LevelEpsilonHalos" -> levelEpsilonHalos,
+  "SourceExpansionOrder" -> expansionOrder + 10,
+  "RequestedEpsilonOrder" -> requestedEpsilonOrder[1]|>];
+loaded = loadLadderCheckpoint[
+  privateComputationBoundaryFile, name, data, prepKey, None,
+  <|2 -> matchDigits + 2|>, <||>];
+test[
+  "private computation digits do not silently raise downstream publication",
+  AssociationQ[loaded] &&
+    loaded["MatchingDigits"] === matchDigits + 2 &&
+    loaded["PublicationDigits"] === matchDigits &&
+    loadLadderCheckpoint[
+      privateComputationBoundaryFile, name, data, prepKey, None,
+      <|2 -> matchDigits + 2|>, <|1 -> matchDigits + 2|>] === $Failed,
+  loaded];
+
 lowOrderBoundaryFile = FileNameJoin[{tmpDir, "low-order-boundary.mx"}];
 saveLadderCheckpoint[lowOrderBoundaryFile, <|
   "Kind" -> "Boundary", "Example" -> name, "Level" -> 1,
   "PrepKey" -> prepKey, "BoundaryValues" -> {{1}},
   "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
-  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
   "RecurrenceBackend" -> recurrenceBackend,
   "EpsilonOrder" -> epsOrder, "BoundaryExtraOrder" -> boundaryExtraOrder,
   "LevelEpsilonHalos" -> levelEpsilonHalos,

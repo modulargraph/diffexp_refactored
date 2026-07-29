@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Added a public Feynman-trick reconstruction of the 108-component Henn
+  nonplanar double-pentagon boundary, including declared irreducible-numerator
+  family slots, sequential single-license execution, and a direct comparison
+  with the hash-pinned paper ancillary data. Exact algebraic shared-anchor
+  normalization now uses the existing contained-rational native bridge.
+  Scalar requests are partitioned by their actual positive-denominator
+  support, so absent lines no longer create artificial endpoint levels.
+  Deepest-boundary and per-level continuation signs are separate typed plan
+  settings; the maintained Henn component uses the paper's lower boundary rim
+  and explicit projected contour orientations. A fresh-checkpoint,
+  deadline-controlled opt-in timing gate guards the complete four-level
+  numerical path.
+  Multilevel ladders can select one exact anchor per level, preventing a
+  repeated scalar anchor from landing on diagonal singular loci; finite-Taylor
+  matching retries now recognize a later failing handoff or a materially
+  smaller same-handoff midpoint defect as progress, while still stopping
+  bounded retries that do not improve.
 - Reproduced every example notebook in the pinned public DiffExp revision:
   the Henn and one-mass canonical pentagons, multiple polylogarithms, and
   both equal- and unequal-mass Banana endpoints, with hash-pinned inputs,

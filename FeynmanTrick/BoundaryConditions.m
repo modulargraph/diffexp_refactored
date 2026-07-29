@@ -14,7 +14,9 @@ Symanzik polynomials U and F using FIRE's UF construction. Returns {U, F, feynma
 EvaluateTadpoleBoundary::usage =
   "EvaluateTadpoleBoundary[U, F, v, numLoops, epsOrder] evaluates the generalized \
 tadpole I_v = Gamma(v-L*d/2)/Gamma(v) * U^(v-(L+1)*d/2) / F^(v-L*d/2) and expands \
-in eps using FTConfiguration[\"DimensionExpression\"]. Returns {epsMinPower, coefficients}.";
+in eps using FTConfiguration[\"DimensionExpression\"]. The option \
+\"DeltaPrescriptionSign\" selects the upper (+1) or lower (-1) rim for a \
+negative real Symanzik F. Returns {epsMinPower, coefficients}.";
 
 EvaluateTadpoleNumerical::usage =
   "EvaluateTadpoleNumerical[U, F, v, numLoops, epsValue, precision] evaluates the \
@@ -24,7 +26,8 @@ DeepestLevelBoundary::usage =
   "DeepestLevelBoundary[ftData, epsOrder] computes boundary conditions for all masters \
 at the deepest level of the Feynman trick iteration. Returns \
 <|\"BoundaryValues\" -> {bc1, bc2, ...}, \"EpsPrefactors\" -> {k1, k2, ...}, \
-\"EpsMinPower\" -> minPow|>.";
+\"EpsMinPower\" -> minPow|>. The option \"DeltaPrescriptionSign\" is passed \
+to the generalized tadpole boundary.";
 
 RescaledFeynmanParameters::usage =
   "RescaledFeynmanParameters[numProps] returns the rescaled Feynman parameters x_j' \
@@ -177,6 +180,16 @@ finitePositiveRealNumericalQ[value_] := Module[{numeric},
   ];
   numeric = Quiet[Check[N[value], $Failed]];
   numeric =!= $Failed && TrueQ[Im[numeric] == 0] && TrueQ[Re[numeric] > 0]
+];
+
+finiteNegativeRealNumericalQ[value_] := Module[{numeric},
+  If[
+    !NumericQ[value] ||
+      !FreeQ[value, Indeterminate | ComplexInfinity | _DirectedInfinity],
+    Return[False]
+  ];
+  numeric = Quiet[Check[N[value], $Failed]];
+  numeric =!= $Failed && TrueQ[Im[numeric] == 0] && TrueQ[Re[numeric] < 0]
 ];
 
 
@@ -341,7 +354,7 @@ fastNumericalTadpoleBoundary[
 
 seriesTadpoleBoundary[
     Uval_, Fval_, v_Integer, numLoops_Integer, epsOrder_Integer,
-    eps_, dExpr_, precision_Integer] :=
+    eps_, dExpr_, precision_Integer, prescriptionSign_Integer:1] :=
 Module[{gammaArg, UPow, FPow, fullExpr, series, coeffs, minPow},
 
   gammaArg = v - numLoops * dExpr / 2;
@@ -357,7 +370,11 @@ Module[{gammaArg, UPow, FPow, fullExpr, series, coeffs, minPow},
     ];
     fTerm = If[Chop[Fval - 1, 10^(-precision/2)] === 0,
       1,
-      SetPrecision[Fval, precision]^FPow
+      If[finiteNegativeRealNumericalQ[Fval],
+        Exp[FPow*(Log[Abs[SetPrecision[Fval, precision]]] +
+          I*Pi*prescriptionSign)],
+        SetPrecision[Fval, precision]^FPow
+      ]
     ];
     fullExpr = Gamma[gammaArg] / Gamma[v] * uTerm / fTerm;
   ];
@@ -373,11 +390,18 @@ Module[{gammaArg, UPow, FPow, fullExpr, series, coeffs, minPow},
 ];
 
 
-EvaluateTadpoleBoundary[Uval_?NumericQ, Fval_?NumericQ, v_Integer, numLoops_Integer, epsOrder_Integer] :=
-Module[{eps, coeffs, minPow, precision, dExpr, result},
+Options[EvaluateTadpoleBoundary] = {"DeltaPrescriptionSign" -> 1};
+
+EvaluateTadpoleBoundary[Uval_?NumericQ, Fval_?NumericQ, v_Integer,
+    numLoops_Integer, epsOrder_Integer, OptionsPattern[]] :=
+Module[{eps, coeffs, minPow, precision, dExpr, result,
+    prescriptionSign},
 
   precision = FeynmanTrick`Private`$FTConfig["WorkingPrecision"];
   If[!IntegerQ[precision] || precision < 50, precision = 200];
+  prescriptionSign = OptionValue["DeltaPrescriptionSign"];
+  If[!MemberQ[{-1, 1}, prescriptionSign],
+    Return[$Failed, Module]];
 
   eps = FeynmanTrick`Private`$FTConfig["EpsilonSymbol"];
   dExpr = FeynmanTrick`Private`DimensionExpression[];
@@ -386,7 +410,8 @@ Module[{eps, coeffs, minPow, precision, dExpr, result},
     Uval, Fval, v, numLoops, epsOrder, eps, dExpr, precision];
   If[result === $Failed,
     result = seriesTadpoleBoundary[
-      Uval, Fval, v, numLoops, epsOrder, eps, dExpr, precision]
+      Uval, Fval, v, numLoops, epsOrder, eps, dExpr, precision,
+      prescriptionSign]
   ];
   {minPow, coeffs} = result;
 
@@ -423,17 +448,24 @@ Module[{d, gammaArg, UPow, FPow, result},
 (* DeepestLevelBoundary - Main Entry Point                      *)
 (* ============================================================ *)
 
-DeepestLevelBoundary[ftData_Association, epsOrder_Integer:4] :=
+Options[DeepestLevelBoundary] = {"DeltaPrescriptionSign" -> 1};
+
+DeepestLevelBoundary[ftData_Association, epsOrder_Integer:4,
+    OptionsPattern[]] :=
 Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
         externalMomenta, replacements, numLoops, masters,
-        ufResult, U, F, feynVars, numOriginalProps, fixedValue, kinPoint,
+        ufResult, U, F, feynVars, numOriginalProps, fixedValues, kinPoint,
         Uval, Fval, bcValues, epsPrefactors, epsMinPower,
-        combinationSequence, nLevels, precision},
+        combinationSequence, nLevels, precision, prescriptionSign},
 
   nLevels = ftData["NumLevels"];
   deepestLevel = nLevels;
   precision = FeynmanTrick`Private`$FTConfig["WorkingPrecision"];
   If[!IntegerQ[precision] || precision < 50, precision = 200];
+  prescriptionSign = OptionValue["DeltaPrescriptionSign"];
+  If[!MemberQ[{-1, 1}, prescriptionSign],
+    Print["Error: DeltaPrescriptionSign must be +1 or -1."];
+    Return[$Failed, Module]];
 
   (* Check that the deepest level is computed *)
   If[!KeyExistsQ[ftData["Levels"], deepestLevel],
@@ -474,7 +506,8 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
   ];
 
   (* Get fixed parameter value and kinematic point *)
-  fixedValue = ftData["FixedParamValue"];
+  fixedValues = Lookup[ftData, "FixedParamValues",
+    ConstantArray[ftData["FixedParamValue"], nLevels]];
   kinPoint = ftData["NumericalPoint"];
   combinationSequence = ftData["CombinationSequence"];
 
@@ -500,8 +533,9 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
       Print["  Rescaled Feynman parameters (symbolic): ", rescaled];
     ];
 
-    (* Evaluate at fixed parameter value (all xx_k = fixedValue) *)
-    paramRules = Thread[params -> Table[SetPrecision[fixedValue, precision], {nLevels}]];
+    (* Evaluate each Feynman parameter at its own exact interior anchor. *)
+    paramRules = Thread[
+      params -> (SetPrecision[#, precision] & /@ fixedValues)];
     rescaledNumerical = rescaled /. paramRules;
 
     If[FeynmanTrick`Private`$FTConfig["Verbosity"] >= 2,
@@ -542,7 +576,9 @@ Module[{deepestLevel, levelData, originalTopology, propagators, loopMomenta,
         (* Zero integral *)
         {0, Table[0, {epsOrder + 1}]},
         (* Evaluate tadpole formula *)
-        {minPow, coeffs} = EvaluateTadpoleBoundary[Uval, Fval, v, numLoops, epsOrder];
+        {minPow, coeffs} = EvaluateTadpoleBoundary[
+          Uval, Fval, v, numLoops, epsOrder,
+          "DeltaPrescriptionSign" -> prescriptionSign];
         {minPow, coeffs}
       ]
     ],

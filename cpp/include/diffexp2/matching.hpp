@@ -75,6 +75,27 @@ inline std::int32_t checked_power(std::int64_t value,
   return static_cast<std::int32_t>(value);
 }
 
+// A valuation-zero Laurent solve preserves the right-hand side's lower
+// valuation in its solved weights.  Reconstructing an authoritative physical
+// residual then consumes `-rhs_min` coefficients from the physical basis when
+// that valuation is negative.  Intersect that product edge with the already
+// constructed normal-frame edge so a reservoir retry reports all stacked
+// finite-window losses at once, rather than first asking for the normal-frame
+// loss and discovering the weight-convolution loss on the next replay.
+inline std::int32_t valuation_zero_residual_complete_max(
+    std::int32_t physical_source_complete_max,
+    std::int32_t normal_frame_complete_max,
+    std::int32_t normalized_rhs_min_power) {
+  const auto solved_weight_floor =
+      std::min<std::int32_t>(0, normalized_rhs_min_power);
+  const auto physical_product_complete_max = checked_power(
+      static_cast<std::int64_t>(physical_source_complete_max) +
+          solved_weight_floor,
+      "valuation-zero physical residual complete maximum");
+  return std::min(normal_frame_complete_max,
+                  physical_product_complete_max);
+}
+
 enum class ZeroDecision : std::uint8_t { Zero, Nonzero, Ambiguous };
 
 template <typename Scalar>

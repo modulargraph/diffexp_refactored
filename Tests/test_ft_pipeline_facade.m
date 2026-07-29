@@ -19,14 +19,25 @@ plan = FeynmanTrick`PipelinePlan["bubble",
   "LevelEpsilonHalos" -> {0, 4}];
 minusPlan = FeynmanTrick`PipelinePlan["bubble",
   "DeltaPrescriptionSign" -> -1];
+levelSignPlan = FeynmanTrick`PipelinePlan["bubble",
+  "DeltaPrescriptionSign" -> -1,
+  "LevelDeltaPrescriptionSigns" -> {1}];
 invalidSignPlan = FeynmanTrick`PipelinePlan["bubble",
   "DeltaPrescriptionSign" -> 0];
+invalidLevelSignPlan = FeynmanTrick`PipelinePlan["bubble",
+  "LevelDeltaPrescriptionSigns" -> {1, 0}];
 migrationPlan = FeynmanTrick`PipelinePlan["bubble",
   "MigrateLegacyPreparation" -> True];
 nativeCheckpointPlan = FeynmanTrick`PipelinePlan["bubble",
   "SaveNativeTransportCheckpoint" -> True];
 basisOnlyValuePlan = FeynmanTrick`PipelinePlan["bubble",
   "ValueTransport" -> True, "NativeValueHopExecution" -> False];
+anchorVectorPlan = FeynmanTrick`PipelinePlan["banana_unequal",
+  "FixedParameterValues" -> {1/5, 3/10, 2/5}];
+invalidAnchorEndpointPlan = FeynmanTrick`PipelinePlan["bubble",
+  "FixedParameterValues" -> {0}];
+invalidInexactAnchorPlan = FeynmanTrick`PipelinePlan["bubble",
+  "FixedParameterValues" -> {0.2}];
 
 SetEnvironment["DE2_VALUE_TRANSPORT" -> None];
 SetEnvironment["DE2_NATIVE_VALUE_HOP_EXECUTION" -> None];
@@ -58,10 +69,24 @@ SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> "0"];
 invalidRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["FT_DELTA_PRESCRIPTION_SIGN" -> None];
+SetEnvironment["FT_LEVEL_DELTA_PRESCRIPTION_SIGNS" -> "+1,-1,+1"];
+levelSignRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_LEVEL_DELTA_PRESCRIPTION_SIGNS" -> "1,0"];
+invalidLevelSignRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_LEVEL_DELTA_PRESCRIPTION_SIGNS" -> None];
 SetEnvironment["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT" -> "2"];
 invalidNativeCheckpointRunnerSettings =
   FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
 SetEnvironment["FT_SAVE_NATIVE_TRANSPORT_CHECKPOINT" -> None];
+SetEnvironment["FT_FIXED_PARAMETER_VALUES" -> "1/5, 3/10"];
+anchorVectorRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_FIXED_PARAMETER_VALUES" -> "1/5, 1"];
+invalidAnchorVectorRunnerSettings =
+  FeynmanTrick`DiffExp2Pipeline`RunnerSettingsFromEnvironment[];
+SetEnvironment["FT_FIXED_PARAMETER_VALUES" -> None];
 
 rootFacadeDefinitions = DownValues[FeynmanTrick`PipelinePlan];
 Get[FileNameJoin[{repoRoot, "FeynmanTrick.m"}]];
@@ -111,6 +136,19 @@ assert["delta prescription sign carries strict -1 through plan and runner",
     minusPlan["Environment"] =!= plan["Environment"]];
 assert["delta prescription sign rejects zero in both public seams",
   FailureQ[invalidSignPlan] && FailureQ[invalidRunnerSettings]];
+assert["per-level delta signs round-trip independently of the deepest rim",
+  AssociationQ[levelSignPlan] &&
+    levelSignPlan["Settings", "DeltaPrescriptionSign"] === -1 &&
+    levelSignPlan["Settings", "LevelDeltaPrescriptionSigns"] === {1} &&
+    levelSignPlan["Environment", "FT_DELTA_PRESCRIPTION_SIGN"] === "-1" &&
+    levelSignPlan["Environment",
+      "FT_LEVEL_DELTA_PRESCRIPTION_SIGNS"] === "1" &&
+    AssociationQ[levelSignRunnerSettings] &&
+    levelSignRunnerSettings["LevelDeltaPrescriptionSigns"] ===
+      {1, -1, 1}];
+assert["per-level delta signs reject non-unit entries",
+  FailureQ[invalidLevelSignPlan] &&
+    FailureQ[invalidLevelSignRunnerSettings]];
 assert["legacy preparation migration is explicit in plan and environment",
   AssociationQ[migrationPlan] &&
     TrueQ[migrationPlan["Settings", "MigrateLegacyPreparation"]] &&
@@ -155,6 +193,18 @@ assert["FIRE installation path is explicit and reproducible",
   plan["Settings", "FIREPath"] === plan["Environment", "FT_FIRE_PATH"]];
 assert["epsilon halos serialize deterministically",
   plan["Environment", "FT_LEVEL_EPS_HALOS"] === "0,4"];
+assert["exact per-level anchors round-trip through plan and runner",
+  AssociationQ[anchorVectorPlan] &&
+    anchorVectorPlan["Settings", "FixedParameterValues"] ===
+      {1/5, 3/10, 2/5} &&
+    anchorVectorPlan["Environment", "FT_FIXED_PARAMETER_VALUES"] ===
+      "1/5,3/10,2/5" &&
+    AssociationQ[anchorVectorRunnerSettings] &&
+    anchorVectorRunnerSettings["FixedParameterValues"] === {1/5, 3/10}];
+assert["per-level anchors reject endpoints and inexact values",
+  FailureQ[invalidAnchorEndpointPlan] &&
+    FailureQ[invalidInexactAnchorPlan] &&
+    FailureQ[invalidAnchorVectorRunnerSettings]];
 assert["argv does not use a shell",
   ListQ[plan["Command"]] && plan["Command"][[1]] === "wolframscript" &&
     plan["Command"][[2]] === "-file"];

@@ -15,16 +15,18 @@ CreateFamily::usage =
   "by CreateFamily.";
 
 NormalizeOutputIntegrals::usage =
-  "NormalizeOutputIntegrals[spec, n, eliminated] converts Automatic, one index vector, " <>
-  "an ordered list of vectors, or All into the canonical output-target form " <>
-  "for an n-propagator family and enforces zero indices at eliminated positions.";
+  "NormalizeOutputIntegrals[spec, n, eliminated, numerators] converts Automatic, " <>
+  "one index vector, an ordered list of vectors, or All into the canonical " <>
+  "output-target form for an n-propagator family, enforces zero indices at " <>
+  "eliminated positions, and permits only nonpositive indices at declared " <>
+  "numerator positions. The last two arguments default to empty lists.";
 
 ValidateOutputIntegralsForSequence::usage =
-  "ValidateOutputIntegralsForSequence[integrals, sequence, eliminated] verifies that " <>
-  "every explicit target is supported by each ordered Feynman-trick merge. " <>
-  "Negative indices are allowed only at positions that never participate " <>
-  "in the sequence, and eliminated positions cannot be merged. The third " <>
-  "argument defaults to an empty list.";
+  "ValidateOutputIntegralsForSequence[integrals, sequence, eliminated, numerators] " <>
+  "verifies that every explicit target is supported by each ordered " <>
+  "Feynman-trick merge. Negative indices are allowed only at positions that " <>
+  "never participate in the sequence, and eliminated or declared numerator " <>
+  "positions cannot be merged. The last two arguments default to empty lists.";
 
 CreateFamily::input =
   "The first argument must be a raw family association or an existing topology association.";
@@ -48,6 +50,8 @@ CreateFamily::dimension =
   "Dimension `1` must resolve to an exact expression. Supply an exact Dimension field or configure an exact DimensionExpression.";
 CreateFamily::eliminated =
   "EliminatedPositions `1` must be a duplicate-free list of integer positions between 1 and `2`.";
+CreateFamily::numerators =
+  "NumeratorPositions `1` must be a duplicate-free list of integer positions between 1 and `2`, disjoint from EliminatedPositions.";
 CreateFamily::sequence =
   "CombinationSequence `1` must be Automatic or a list of distinct active-position pairs.";
 CreateFamily::pair =
@@ -67,8 +71,12 @@ NormalizeOutputIntegrals::nprop =
   "The propagator count `1` must be a positive integer.";
 NormalizeOutputIntegrals::eliminated =
   "EliminatedPositions `1` must be a duplicate-free list of integer positions between 1 and `2`.";
+NormalizeOutputIntegrals::numerators =
+  "NumeratorPositions `1` must be a duplicate-free list of integer positions between 1 and `2`, disjoint from EliminatedPositions.";
 NormalizeOutputIntegrals::sector =
   "Output integral `1` is incompatible with EliminatedPositions `2`; every eliminated index must be zero.";
+NormalizeOutputIntegrals::numerator =
+  "Output integral `1` is incompatible with NumeratorPositions `2`; declared numerator slots must have nonpositive indices.";
 ValidateOutputIntegralsForSequence::merge =
   "Output integral `1` is unsupported at merge step `2` (`3`): merged powers `4` must both be nonnegative integers. Negative indices are supported only at positions that never participate in a merge.";
 ValidateOutputIntegralsForSequence::sequence =
@@ -87,6 +95,7 @@ requiredFamilyKeys = {
 };
 
 mathematicalOptionalKeys = {
+  "NumeratorPositions",
   "AnalyticPrescription", "Prescriptions", "KinematicAssumptions"
 };
 
@@ -115,19 +124,21 @@ validFamilyNameQ[name_] :=
 stableDigest[expr_] :=
   IntegerString[Hash[expr, "SHA256"], 16, 64];
 
-automaticLeftToRightSequence[n_Integer, eliminated_List] := Module[
-  {active = Complement[Range[n], eliminated]},
+automaticLeftToRightSequence[n_Integer, eliminated_List,
+    numerators_List:{}] := Module[
+  {active = Complement[Range[n], Join[eliminated, numerators]]},
   If[Length[active] <= 1, {},
     Thread[{ConstantArray[First[active], Length[active] - 1], Rest[active]}]
   ]
 ];
 
-normalizeCombinationSequence[Automatic, n_Integer, eliminated_List] :=
-  automaticLeftToRightSequence[n, eliminated];
+normalizeCombinationSequence[Automatic, n_Integer, eliminated_List,
+    numerators_List:{}] :=
+  automaticLeftToRightSequence[n, eliminated, numerators];
 
 normalizeCombinationSequence[sequence_, n_Integer,
-    eliminated_List] := Module[
-  {active = Complement[Range[n], eliminated], pair, step},
+    eliminated_List, numerators_List:{}] := Module[
+  {active = Complement[Range[n], Join[eliminated, numerators]], pair, step},
   If[!ListQ[sequence] || Length[sequence] > Max[0, Length[active] - 1] ||
       !AllTrue[sequence, MatchQ[#, {_Integer, _Integer}] &],
     Message[CreateFamily::sequence, sequence];
@@ -181,7 +192,8 @@ canonicalDuplicatedMathematicsQ[input_Association] := Module[
           Lookup[definition, #, Missing["Absent"]] &]
 ];
 
-NormalizeOutputIntegrals[spec_, n_, eliminatedPositions_:{}] := Module[
+NormalizeOutputIntegrals[spec_, n_, eliminatedPositions_: {},
+    numeratorPositions_: {}] := Module[
   {vectors, checked, result, incompatible},
   If[!IntegerQ[n] || n <= 0,
     Message[NormalizeOutputIntegrals::nprop, n];
@@ -191,10 +203,15 @@ NormalizeOutputIntegrals[spec_, n_, eliminatedPositions_:{}] := Module[
     Message[NormalizeOutputIntegrals::eliminated, eliminatedPositions, n];
     Return[$Failed, Module]
   ];
+  If[!validEliminatedPositionsQ[numeratorPositions, n] ||
+      Intersection[eliminatedPositions, numeratorPositions] =!= {},
+    Message[NormalizeOutputIntegrals::numerators, numeratorPositions, n];
+    Return[$Failed, Module]
+  ];
   result = Which[
     spec === Automatic,
       {ReplacePart[ConstantArray[1, n],
-        Thread[eliminatedPositions -> 0]]},
+        Thread[Join[eliminatedPositions, numeratorPositions] -> 0]]},
     spec === All,
       All,
     ListQ[spec] && Length[spec] === n && !AnyTrue[spec, ListQ],
@@ -224,13 +241,26 @@ NormalizeOutputIntegrals[spec_, n_, eliminatedPositions_:{}] := Module[
       First[incompatible], eliminatedPositions];
     Return[$Failed, Module]
   ];
+  incompatible = Select[
+    result,
+    Function[vector,
+      AnyTrue[numeratorPositions,
+        Function[position, vector[[position]] > 0]]]
+  ];
+  If[incompatible =!= {},
+    Message[NormalizeOutputIntegrals::numerator,
+      First[incompatible], numeratorPositions];
+    Return[$Failed, Module]
+  ];
   result
 ];
 
-ValidateOutputIntegralsForSequence[All, _List, _List:{}] := All;
+ValidateOutputIntegralsForSequence[
+    All, _List, _List:{}, _List:{}] := All;
 
 ValidateOutputIntegralsForSequence[integrals_List,
-    sequence_List, eliminatedPositions_List:{}] := Module[
+    sequence_List, eliminatedPositions_List:{},
+    numeratorPositions_List:{}] := Module[
   {n, result = integrals, vector, pair, step, vi, vj, target, active},
   If[integrals === {}, Return[integrals, Module]];
   If[!AllTrue[integrals, ListQ] ||
@@ -244,6 +274,11 @@ ValidateOutputIntegralsForSequence[integrals_List,
     Message[NormalizeOutputIntegrals::eliminated, eliminatedPositions, n];
     Return[$Failed, Module]
   ];
+  If[!validEliminatedPositionsQ[numeratorPositions, n] ||
+      Intersection[eliminatedPositions, numeratorPositions] =!= {},
+    Message[NormalizeOutputIntegrals::numerators, numeratorPositions, n];
+    Return[$Failed, Module]
+  ];
   If[!AllTrue[sequence,
       MatchQ[#, {_Integer, _Integer}] &&
       #[[1]] =!= #[[2]] &&
@@ -255,7 +290,8 @@ ValidateOutputIntegralsForSequence[integrals_List,
      merge removed its second position.  Validate the ordered active-position
      evolution here as well as in CreateFamily so direct DefineFTIteration
      callers cannot bypass the canonical sequence contract. *)
-  active = Complement[Range[n], eliminatedPositions];
+  active = Complement[
+    Range[n], Join[eliminatedPositions, numeratorPositions]];
   Do[
     pair = sequence[[step]];
     If[!MemberQ[active, pair[[1]]] || !MemberQ[active, pair[[2]]],
@@ -297,14 +333,15 @@ ValidateOutputIntegralsForSequence[integrals_List,
   integrals
 ];
 
-ValidateOutputIntegralsForSequence[targets_, sequence_, eliminated_:{}] := (
+ValidateOutputIntegralsForSequence[
+    targets_, sequence_, eliminated_:{}, numerators_:{}] := (
   Message[ValidateOutputIntegralsForSequence::sequence,
     sequence, Missing["UnknownTargetLength"]];
   $Failed
 );
 
 familyDefinition[source_Association, dimension_, numericalPoint_List,
-    eliminatedPositions_List] := Association @ Join[
+    eliminatedPositions_List, numeratorPositions_List] := Association @ Join[
   {
     "LoopMomenta" -> source["LoopMomenta"],
     "ExternalMomenta" -> source["ExternalMomenta"],
@@ -312,17 +349,18 @@ familyDefinition[source_Association, dimension_, numericalPoint_List,
     "Replacements" -> source["Replacements"],
     "NumericalPoint" -> numericalPoint,
     "Dimension" -> dimension,
-    "EliminatedPositions" -> eliminatedPositions
+    "EliminatedPositions" -> eliminatedPositions,
+    "NumeratorPositions" -> numeratorPositions
   },
   Cases[
-    mathematicalOptionalKeys,
+    DeleteCases[mathematicalOptionalKeys, "NumeratorPositions"],
     key_ /; KeyExistsQ[source, key] :> key -> source[key]
   ]
 ];
 
 validateFamilySource[source_Association] := Module[
   {missing, loops, externals, propagators, replacements, n, key,
-   eliminatedPositions},
+   eliminatedPositions, numeratorPositions},
   missing = Select[requiredFamilyKeys, !KeyExistsQ[source, #] &];
   If[missing =!= {},
     Message[CreateFamily::missing, missing];
@@ -336,8 +374,7 @@ validateFamilySource[source_Association] := Module[
       Lookup[source, "MasterRules", {}] =!= {} ||
       AnyTrue[{
         "SetupFingerprint", "SetupFingerprintRecord",
-        "NumeratorPositions", "OriginalPropagators",
-        "OriginalNumPropagators"
+        "OriginalPropagators", "OriginalNumPropagators"
       }, KeyExistsQ[source, #] &],
     Message[CreateFamily::prepared];
     Return[$Failed, Module]
@@ -392,9 +429,16 @@ validateFamilySource[source_Association] := Module[
     Message[CreateFamily::eliminated, eliminatedPositions, n];
     Return[$Failed, Module]
   ];
+  numeratorPositions = Lookup[source, "NumeratorPositions", {}];
+  If[!validEliminatedPositionsQ[numeratorPositions, n] ||
+      Intersection[eliminatedPositions, numeratorPositions] =!= {},
+    Message[CreateFamily::numerators, numeratorPositions, n];
+    Return[$Failed, Module]
+  ];
   <|
     "NumPropagators" -> n,
-    "EliminatedPositions" -> Sort[eliminatedPositions]
+    "EliminatedPositions" -> Sort[eliminatedPositions],
+    "NumeratorPositions" -> Sort[numeratorPositions]
   |>
 ];
 
@@ -445,7 +489,7 @@ allRequestRecord[familyID_String] := Module[{identity},
 
 createFamily[input_Association, positionalTargets_, nameOption_,
     sequenceOption_, outputOption_] := Module[
-  {source, inputKind, validated, n, eliminatedPositions,
+  {source, inputKind, validated, n, eliminatedPositions, numeratorPositions,
    numericalPoint, dimensionSpec, dimension, definition, familyID, name,
    sequenceSpec,
    sequence, outputSpec, normalizedTargets, topology, requests,
@@ -462,6 +506,7 @@ createFamily[input_Association, positionalTargets_, nameOption_,
   If[validated === $Failed, Return[$Failed, Module]];
   n = validated["NumPropagators"];
   eliminatedPositions = validated["EliminatedPositions"];
+  numeratorPositions = validated["NumeratorPositions"];
 
   numericalPoint = Lookup[source, "NumericalPoint", {}];
   If[!validNumericalPointRuleListQ[numericalPoint],
@@ -494,7 +539,8 @@ createFamily[input_Association, positionalTargets_, nameOption_,
   ];
 
   definition = familyDefinition[
-    source, dimension, numericalPoint, eliminatedPositions];
+    source, dimension, numericalPoint, eliminatedPositions,
+    numeratorPositions];
   familyID = "ft-family-" <>
     stableDigest[{"FeynmanTrick.FamilyDefinition/v1", definition}];
 
@@ -512,7 +558,7 @@ createFamily[input_Association, positionalTargets_, nameOption_,
   sequenceSpec = resolveEmbedded[
     input, source, "CombinationSequence", sequenceOption];
   sequence = normalizeCombinationSequence[
-    sequenceSpec, n, eliminatedPositions];
+    sequenceSpec, n, eliminatedPositions, numeratorPositions];
   If[sequence === $Failed, Return[$Failed, Module]];
 
   outputSpec = If[positionalTargets =!= Automatic,
@@ -527,10 +573,10 @@ createFamily[input_Association, positionalTargets_, nameOption_,
     True, "Automatic"
   ];
   normalizedTargets = NormalizeOutputIntegrals[
-    outputSpec, n, eliminatedPositions];
+    outputSpec, n, eliminatedPositions, numeratorPositions];
   If[normalizedTargets === $Failed, Return[$Failed, Module]];
   normalizedTargets = ValidateOutputIntegralsForSequence[
-    normalizedTargets, sequence, eliminatedPositions];
+    normalizedTargets, sequence, eliminatedPositions, numeratorPositions];
   If[normalizedTargets === $Failed, Return[$Failed, Module]];
 
   topology = FeynmanTrick`FIREInterface`DefineTopology[
@@ -549,6 +595,7 @@ createFamily[input_Association, positionalTargets_, nameOption_,
       "Name" -> name,
       "NumPropagators" -> n,
       "EliminatedPositions" -> eliminatedPositions,
+      "NumeratorPositions" -> numeratorPositions,
       "NumericalPoint" -> numericalPoint,
       "Dimension" -> dimension
     |>
@@ -571,6 +618,7 @@ createFamily[input_Association, positionalTargets_, nameOption_,
     "TopTopology" -> topology,
     "NumPropagators" -> n,
     "EliminatedPositions" -> eliminatedPositions,
+    "NumeratorPositions" -> numeratorPositions,
     "NumericalPoint" -> numericalPoint,
     "Dimension" -> dimension,
     "CombinationSequence" -> sequence,

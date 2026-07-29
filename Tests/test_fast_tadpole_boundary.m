@@ -82,6 +82,19 @@ fallbackActual =
   FeynmanTrick`BoundaryConditions`EvaluateTadpoleBoundary[u, -f, 1, 2, order];
 assert["public evaluator preserves the branch-sensitive Series fallback",
   fallbackActual === fallbackExpected];
+fallbackLower =
+  FeynmanTrick`BoundaryConditions`EvaluateTadpoleBoundary[
+    u, -f, 1, 2, order, "DeltaPrescriptionSign" -> -1];
+assert["negative F lower rim conjugates the upper rim",
+  First[fallbackLower] === First[fallbackActual] &&
+    Max[Abs[N[
+      Last[fallbackLower] - Conjugate[Last[fallbackActual]], 80]]] <
+      10^-75,
+  Max[Abs[N[
+    Last[fallbackLower] - Conjugate[Last[fallbackActual]], 80]]]];
+assert["invalid tadpole prescription sign is rejected",
+  FeynmanTrick`BoundaryConditions`EvaluateTadpoleBoundary[
+    u, -f, 1, 2, order, "DeltaPrescriptionSign" -> 0] === $Failed];
 
 boxU = N[0.10041327902827258006, 300];
 boxF = N[0.00361394742846773332, 300];

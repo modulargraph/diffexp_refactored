@@ -1373,6 +1373,21 @@ void empty_residual_window_retry_metadata_smoke() {
         reported);
 }
 
+void valuation_zero_residual_window_stack_smoke() {
+  check("valuation-zero retry accounting combines the normal-frame and "
+        "negative-weight losses",
+        diffexp2::matching_detail::valuation_zero_residual_complete_max(
+            7, 6, -2) == 5 &&
+            diffexp2::matching_detail::valuation_zero_residual_complete_max(
+                8, 7, -2) == 6 &&
+            diffexp2::matching_detail::valuation_zero_residual_complete_max(
+                9, 8, -2) == 7);
+  check("valuation-zero retry accounting does not invent a loss for a "
+        "nonnegative right-hand-side valuation",
+        diffexp2::matching_detail::valuation_zero_residual_complete_max(
+            7, 6, 1) == 6);
+}
+
 void precomputed_physical_residual_certification_smoke() {
   ComplexBall::set_precision(256);
   const auto uncertain = real_ball_with_error(1, -20);
@@ -1852,6 +1867,7 @@ int main() {
   laurent_off_pivot_ambiguity_smoke();
   refined_acb_ambiguous_off_pivot_smoke();
   empty_residual_window_retry_metadata_smoke();
+  valuation_zero_residual_window_stack_smoke();
   precomputed_physical_residual_certification_smoke();
   complete_window_insufficient_digits_smoke();
   propagated_enclosure_clearance_smoke();

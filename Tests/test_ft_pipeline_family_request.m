@@ -45,6 +45,31 @@ allPlan = FeynmanTrick`PipelinePlan[family, All,
   "RequestDirectory" -> requestDirectory];
 registryPlan = FeynmanTrick`PipelinePlan["bubble"];
 
+numeratorFamily = FeynmanTrick`CreateFamily[<|
+  "Name" -> "declared_numerator_api_test",
+  "LoopMomenta" -> {Global`l},
+  "ExternalMomenta" -> {Global`p},
+  "Propagators" -> {
+    Global`l^2 + 1,
+    (Global`l + Global`p)^2 + 2,
+    (Global`l - Global`p)^2 + 3
+  },
+  "Replacements" -> {Global`p^2 -> -1},
+  "Dimension" -> 4 - 2 FeynmanTrick`FTeps,
+  "NumeratorPositions" -> {3},
+  "CombinationSequence" -> {{1, 2}}
+|>, {{1, 1, -1}}];
+numeratorPlan = FeynmanTrick`PipelinePlan[
+  numeratorFamily, "RequestDirectory" -> requestDirectory];
+wrongLengthAnchorPlan = FeynmanTrick`PipelinePlan[
+  family, orderedTargets,
+  "FixedParameterValues" -> {1/5, 3/10},
+  "RequestDirectory" -> requestDirectory];
+wrongLengthPrescriptionPlan = FeynmanTrick`PipelinePlan[
+  family, orderedTargets,
+  "LevelDeltaPrescriptionSigns" -> {1, -1},
+  "RequestDirectory" -> requestDirectory];
+
 assert["custom family plan is canonical and content addressed",
   AssociationQ[plan] && plan["InputKind"] === "Family" &&
     StringStartsQ[plan["RequestID"], "ft-request-"] &&
@@ -53,6 +78,17 @@ assert["custom family plan is canonical and content addressed",
     FileNameTake[plan["RequestFile"]] === plan["RequestID"] <> ".wxf"];
 assert["PipelinePlan remains process- and write-free",
   !FileExistsQ[plan["RequestFile"]]];
+assert["canonical declared-numerator family is production-plannable",
+  AssociationQ[numeratorPlan] &&
+    numeratorPlan["Request", "Family", "NumeratorPositions"] === {3} &&
+    numeratorPlan["Request", "Family", "CombinationSequence"] ===
+      {{1, 2}} &&
+    Lookup[numeratorPlan["OutputRequests"], "IndexVector"] ===
+      {{1, 1, -1}}];
+assert["custom-family anchor length is rejected before execution",
+  FailureQ[wrongLengthAnchorPlan]];
+assert["custom-family per-level prescription length is rejected before execution",
+  FailureQ[wrongLengthPrescriptionPlan]];
 assert["base plans clear inherited optional and custom-family mode variables",
   AssociationQ[registryPlan] &&
     Lookup[registryPlan["Environment"], {

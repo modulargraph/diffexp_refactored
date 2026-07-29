@@ -66,6 +66,51 @@ assert["planner normalizes the exact relative diagonal gauge",
     levelPlan["Gauge", "Record", "PoleFree"] === True,
   {plannerMatrixNormalizeCalls, plan}];
 
+(* A full triangular projector residue exercises the non-diagonal apparent
+   basis map, including its source-component coupling.  The exact physical
+   boundary is I=G.{1,2}; normalization must recover the constant transport
+   boundary, and observable rows must receive the same right gauge. *)
+apparentX = Global`xNativeApparent;
+apparentResidue = {{1, 1}, {0, 0}};
+apparentMatrix = apparentResidue/(apparentX - eps);
+apparentGauge = ft2RelativeEpsilonGauge[
+  apparentMatrix, eps, apparentX];
+apparentBoundary = ft2NormalizeEpsilonBasis[
+  apparentMatrix,
+  {{-1/2, -3, 0}, {2, 0, 0}}, {0, 0}, eps,
+  apparentGauge, apparentX, 1/2];
+apparentRequest = {
+  request[1, "direct", 0, 0, {9}]};
+apparentBatch = <|
+  "Schema" -> "FeynmanTrick.LevelIBPBatch/v1",
+  "Key" -> StringRepeat["c", 64],
+  "PayloadKey" -> StringRepeat["d", 64],
+  "KeyRecord" -> {"native-apparent-gauge-fixture"},
+  "UpperLevel" -> 1,
+  "MastersAbove" -> {{1, 0}, {0, 1}},
+  "BoundaryRequests" -> apparentRequest,
+  "CoefficientVectors" -> Association[{
+    {9} -> {1, 0}}]|>;
+apparentEntries = ft2PrepareBoundaryEntries[
+  1, apparentBatch, {0, 0}, apparentX, eps,
+  Function[value, value], apparentGauge];
+assert["projector moving pole uses one exact full-basis gauge",
+  AssociationQ[apparentGauge] &&
+    TrueQ[apparentGauge["CompositeApparent"]] &&
+    apparentGauge["Matrix"] === ConstantArray[0, {2, 2}] &&
+    TrueQ[PossibleZeroQ[
+      Det[apparentGauge["PhysicalFromRelative"]] -
+        (apparentX - eps)]],
+  apparentGauge];
+assert["composite apparent boundary and observable maps stay dual",
+  AssociationQ[apparentBoundary] &&
+    apparentBoundary["BoundaryValues"] ===
+      {{1, 0, 0}, {2, 0, 0}} &&
+    apparentBoundary["BoundaryPrefactors"] === {0, 0} &&
+    Lookup[apparentEntries, "CoefficientVector"] ===
+      {{apparentX - eps, -1 - eps + apparentX}},
+  {apparentBoundary, apparentEntries}];
+
 runtimeNormalizeCalls = 0;
 runtimeMatrix = ft2RuntimeLevelMatrix[
   ftData["Levels", 1], levelPlan,
@@ -191,16 +236,28 @@ AssociateTo[tamperedPlan, "Levels" -> tamperedLevels];
 assert["runtime plan data must exactly match its checkpoint record",
   !ft2NativeEpsilonPlanQ[tamperedPlan]];
 
-plusPrescriptions = Block[{deltaPrescriptionSign = 1},
-  levelDeltaPrescriptions[x, <|"SingularFactors" -> {}|>, {}]];
-minusPrescriptions = Block[{deltaPrescriptionSign = -1},
-  levelDeltaPrescriptions[x, <|"SingularFactors" -> {}|>, {}]];
+plusPrescriptions = Block[
+  {deltaPrescriptionSign = 1, levelDeltaPrescriptionSigns = {1}},
+  levelDeltaPrescriptions[1, x, <|"SingularFactors" -> {}|>, {}]];
+minusPrescriptions = Block[
+  {deltaPrescriptionSign = 1, levelDeltaPrescriptionSigns = {-1}},
+  levelDeltaPrescriptions[1, x, <|"SingularFactors" -> {}|>, {}]];
 assert["+1 and -1 delta rims propagate into distinct checkpoint identities",
   AllTrue[plusPrescriptions, Last[#] === 1 &] &&
   AllTrue[minusPrescriptions, Last[#] === -1 &] &&
   ft2CanonicalIdentity["ft2-delta-prescriptions-", plusPrescriptions] =!=
       ft2CanonicalIdentity["ft2-delta-prescriptions-", minusPrescriptions],
   {plusPrescriptions, minusPrescriptions}];
+orientedEndpointPrescriptions = Block[
+  {deltaPrescriptionSign = -1, levelDeltaPrescriptionSigns = {1}},
+  levelDeltaPrescriptions[1, x,
+    <|"SingularFactors" -> {x, 1 - x, 2 x - 1}|>, {}]];
+assert["per-level signs preserve the physical orientation of both endpoints",
+  Take[orientedEndpointPrescriptions, 2] === {{x, 1}, {1 - x, 1}} &&
+    Count[orientedEndpointPrescriptions,
+      {factor_, 1} /; TrueQ[
+        PossibleZeroQ[factor /. x -> 1/2]]] === 1,
+  orientedEndpointPrescriptions];
 
 profileTmp = CreateDirectory[FileNameJoin[{$TemporaryDirectory,
   "DiffExp2_matching_halo_profile_" <> ToString[$ProcessID]}]];

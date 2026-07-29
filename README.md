@@ -135,9 +135,12 @@ request-dependent, arbitrary families requiring deeper dots or numerators
 should use explicit targets while this beta policy is extended.
 `PipelinePlan[family, targets]` exposes the exact,
 content-addressed request without starting FIRE. `All` discovery rejects
-FIRE-added numerator slots; merge-position numerators, incomplete merge
-sequences, and currently unwired custom branch or kinematic-assumption fields
-fail before numerical transport rather than being ignored.
+undeclared FIRE-added numerator slots. Explicit families may instead declare
+known irreducible slots with `"NumeratorPositions" -> {...}`; those slots are
+excluded from the FT merge sequence and accept only nonpositive powers.
+Merge-position numerators, incomplete merge sequences, and currently unwired
+custom branch or kinematic-assumption fields fail before numerical transport
+rather than being ignored.
 
 The same public facade is available from the command line:
 
@@ -148,6 +151,10 @@ wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
 
 See [Feynman Trick](Docs/FeynmanTrick.md) for registry names, numerical
 settings, plan inspection, cache controls, and checkpoint resumption.
+The maintained
+[Henn double-pentagon boundary example](Examples/FeynmanTrick/README.md#henn-double-pentagon-boundary)
+uses the same interface to reconstruct and compare a published canonical
+boundary component, with an opt-in `--all` mode for all 108 components.
 
 ## Capabilities
 

@@ -417,11 +417,35 @@ assert["su10_empty_source",
   p10["EpsWindow"] === <|"Min" -> 0, "CompleteMax" -> 5|> &&
   AllTrue[Flatten[p10["Sectors"][[1]]["Coeffs"]], # === 0 &]];
 
-(* SU-13: degenerate cleared denominator (t - eps class) *)
-cs13 = catchDE2[Module[{csX = pc[mkSys[{{1/(x - eps)}}], mkChart[0, 1, "su13"]]},
+(* SU-13: a simple moving pole with projector residue is apparent and has
+   the exact gauge f=(t-eps)g.  A noninteger residue is not apparent and
+   must retain the loud finite-width refusal. *)
+cs13chart = catchDE2[
+  pc[mkSys[{{1/(x - eps)}}], mkChart[0, 1, "su13"]]];
+cs13 = If[FailureQ[cs13chart], cs13chart,
+  catchDE2[sc[cs13chart, req[0, 1, 3]]]];
+assert["su13_projector_moving_pole_exactly_desingularized",
+  !FailureQ[cs13] && cs13chart["Gauge"] === {{-eps + t}} &&
+  cs13chart["GaugeInverse"] === {{1/(-eps + t)}} &&
+  TrueQ[cs13chart["IndicialData", "Reduction",
+    "ApparentReduction", "Applied"]]];
+cs13NonApparent = catchDE2[Module[
+  {csX = pc[mkSys[{{eps/(x - eps)}}],
+      mkChart[0, 1, "su13_nonapparent"]]},
   sc[csX, req[0, 1, 3]]]];
-assert["su13_degenerate_denominator",
-  FailureQ[cs13] && (cs13["ID"] === "E3" || cs13["ID"] === "E2" || cs13["ID"] === "E1")];
+assert["su13_nonprojector_moving_pole_remains_loud",
+  FailureQ[cs13NonApparent] &&
+  MemberQ[{"E3", "E2", "E1"}, cs13NonApparent["ID"]]];
+su13FalseApparent =
+  DiffExp2`Indicial`EpsilonCoalescingApparentReduce[
+    {{1/(t - eps), 1}, {0, 0}}, t, eps,
+    <|"Name" -> "su13_false_apparent", "Center" -> 0,
+      "Variable" -> x|>];
+assert["su13_projector_residue_alone_cannot_hide_logarithmic_coupling",
+  AssociationQ[su13FalseApparent] &&
+  !TrueQ[su13FalseApparent["Applied"]] &&
+  Lookup[su13FalseApparent["RejectedFactors"], "Reason"] ===
+    {"candidate-pole-remains-after-gauge"}];
 
 (* SU-14 analogue: non-Fuchsian refusal happens in Indicial (E3/E4 there);
    PrepareChart surfaces it *)

@@ -13,11 +13,13 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/diffexp2-henn-data.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
 files=(
+  dlogBasisXB.txt
   XB_Atilde.txt
   XB_Boundary_values_X0.txt
   XB_Boundary_values_X1.txt
 )
 hashes=(
+  daf048c1b0b6e6462f12ae8f7c9a9033c8435024d903071c50766b81696a3d36
   3d997ab1eae2a6ca1e2489f3e733080b5b20950bc7440555b76230a5d2350c3d
   132611651f9c2fc5de983965bf170328ea0a54cef0f8cb4a3f65d87182c34a96
   7883537af39b181f84266934b9440df3f67a5eb8f67b576388d7aa29524d9b92

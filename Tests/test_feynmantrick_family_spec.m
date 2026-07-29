@@ -28,6 +28,9 @@ assert["raw family canonical schema",
   defaultFamily["Schema"] === "FeynmanTrick.FamilySpec/v1" &&
   defaultFamily["InputKind"] === "RawFamily" &&
   defaultFamily["NumPropagators"] === 3 &&
+  defaultFamily["NumeratorPositions"] === {} &&
+  defaultFamily["Definition", "NumeratorPositions"] === {} &&
+  defaultFamily["Topology", "NumeratorPositions"] === {} &&
   defaultFamily["NumericalPoint"] === {Global`s -> -1} &&
   defaultFamily["Definition", "NumericalPoint"] === {Global`s -> -1} &&
   defaultFamily["Dimension"] === 4 - 2 FeynmanTrick`FTeps &&
@@ -229,6 +232,38 @@ assert["nonzero eliminated target rejected",
 assert["explicit merge cannot target an eliminated position",
   badEliminatedSequence === $Failed];
 
+numeratorRaw = Join[raw, <|"NumeratorPositions" -> {3}|>];
+numeratorAutomatic = FeynmanTrick`CreateFamily[numeratorRaw];
+numeratorExplicit = FeynmanTrick`CreateFamily[
+  numeratorRaw, {{2, 0, -1}, {1, 1, 0}}];
+badPositiveNumeratorTarget = Quiet[FeynmanTrick`CreateFamily[
+  numeratorRaw, {1, 1, 1}],
+  FeynmanTrick`FamilySpec`NormalizeOutputIntegrals::numerator];
+badNumeratorSequence = Quiet[FeynmanTrick`CreateFamily[
+  numeratorRaw, {1, 1, 0},
+  "CombinationSequence" -> {{1, 3}}],
+  FeynmanTrick`FamilySpec`CreateFamily::pair];
+badOverlappingNumerator = Quiet[FeynmanTrick`CreateFamily[
+  Join[numeratorRaw, <|"EliminatedPositions" -> {3}|>]],
+  FeynmanTrick`FamilySpec`CreateFamily::numerators];
+assert["declared numerator positions are mathematical family metadata",
+  numeratorAutomatic["NumeratorPositions"] === {3} &&
+    numeratorAutomatic["Definition", "NumeratorPositions"] === {3} &&
+    numeratorAutomatic["Topology", "NumeratorPositions"] === {3} &&
+    numeratorAutomatic["FamilyID"] =!= defaultFamily["FamilyID"]];
+assert["automatic target and merge chain skip declared numerators",
+  numeratorAutomatic["OutputIntegrals"] === {{1, 1, 0}} &&
+    numeratorAutomatic["CombinationSequence"] === {{1, 2}}];
+assert["declared numerator powers may be zero or negative",
+  numeratorExplicit["OutputIntegrals"] ===
+    {{2, 0, -1}, {1, 1, 0}}];
+assert["positive declared-numerator power is rejected",
+  badPositiveNumeratorTarget === $Failed];
+assert["declared numerators cannot enter the merge sequence",
+  badNumeratorSequence === $Failed];
+assert["eliminated and numerator positions must be disjoint",
+  badOverlappingNumerator === $Failed];
+
 badMergedNumerator = Quiet[FeynmanTrick`CreateFamily[
   raw, {2, 0, -1}],
   FeynmanTrick`FamilySpec`ValidateOutputIntegralsForSequence::merge];
@@ -260,6 +295,12 @@ eliminatedIteration =
   FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
     eliminatedTopology, eliminatedAutomatic["CombinationSequence"], {},
     "OutputIntegrals" -> eliminatedExplicit["OutputIntegrals"]];
+numeratorIteration =
+  FeynmanTrick`FeynmanTrickIteration`BuildAllLevels[
+    FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
+      numeratorExplicit["Topology"],
+      numeratorExplicit["CombinationSequence"], {},
+      "OutputIntegrals" -> numeratorExplicit["OutputIntegrals"]]];
 badIterationEliminated = Quiet[
   FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
     eliminatedTopology, {{1, 3}}, {},
@@ -297,6 +338,13 @@ assert["DefineFTIteration preserves explicit L0 target order",
 assert["canonical eliminated targets forward to DefineFTIteration",
   eliminatedIteration["Levels", 0, "Masters"] ===
     {{2, 0, 1}, {0, 0, 3}}];
+assert["declared numerator contract survives every iteration level",
+  numeratorIteration["Levels", 0, "NumeratorPositions"] === {3} &&
+    numeratorIteration["Levels", 1, "NumeratorPositions"] === {3} &&
+    numeratorIteration["Levels", 1, "Topology", "NumeratorPositions"] ===
+      {3} &&
+    numeratorIteration["Levels", 0, "Masters"] ===
+      {{2, 0, -1}, {1, 1, 0}}];
 assert["DefineFTIteration rejects nonzero eliminated target",
   badIterationEliminated === $Failed];
 assert["DefineFTIteration rejects a merge through an eliminated position",

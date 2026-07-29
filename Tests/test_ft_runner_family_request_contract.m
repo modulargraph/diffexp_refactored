@@ -62,6 +62,35 @@ assert["execution-ready All request enters production validation exactly",
   AssociationQ[loadedAll] && SameQ[loadedAll, allRequest] &&
     loadedAll["ExecutionPolicy", "MasterDiscovery"] === "AtExecution"];
 
+numeratorFamily = FeynmanTrick`CreateFamily[<|
+  "Name" -> "runner_declared_numerator",
+  "LoopMomenta" -> {Global`l},
+  "ExternalMomenta" -> {Global`p},
+  "Propagators" -> {
+    Global`l^2 + 1,
+    (Global`l + Global`p)^2 + 2,
+    (Global`l - Global`p)^2 + 3
+  },
+  "Replacements" -> {Global`p^2 -> -1},
+  "Dimension" -> 4 - 2 FeynmanTrick`FTeps,
+  "NumeratorPositions" -> {3},
+  "CombinationSequence" -> {{1, 2}}
+|>, {{1, 1, -1}}];
+numeratorRequest =
+  FeynmanTrick`PipelineRequest`CreatePipelineRequest[numeratorFamily];
+numeratorFile = FeynmanTrick`PipelineRequest`PipelineRequestPath[
+  numeratorRequest, requestDirectory];
+FeynmanTrick`PipelineRequest`WritePipelineRequest[
+  numeratorRequest, numeratorFile];
+loadedNumerator = ft2ResolveFamilyRequest[
+  numeratorFile, numeratorRequest["RequestID"]];
+assert["production runner accepts a complete denominator ladder with declared numerators",
+  AssociationQ[loadedNumerator] &&
+    loadedNumerator["Family", "NumeratorPositions"] === {3} &&
+    loadedNumerator["Family", "CombinationSequence"] === {{1, 2}} &&
+    Lookup[loadedNumerator["OutputRequests"], "IndexVector"] ===
+      {{1, 1, -1}}];
+
 symbolicMassFamily = FeynmanTrick`CreateFamily[
   Join[rawFamily, <|
     "Propagators" -> {

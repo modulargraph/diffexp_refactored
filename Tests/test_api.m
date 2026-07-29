@@ -45,8 +45,20 @@ epsMovingOnlySys = DiffExp2`API`LoadSystem[<|
   "Matrix" -> {{1/(x + eps)}}, "Variable" -> x|>];
 epsMovingEndpoint = catchDE2[DiffExp2`API`TransportEndpoint[
   epsMovingOnlySys, {{1, 0, 0, 0}}, 1/2, 0]];
-assert["moving_matrix_pole_at_projected_chart_center_is_loud",
-  FailureQ[epsMovingEndpoint] && epsMovingEndpoint["ID"] === "E3"];
+epsMovingLimit = If[FailureQ[epsMovingEndpoint], epsMovingEndpoint,
+  catchDE2[DiffExp2`API`EndpointLimitValues[epsMovingEndpoint, {1}]]];
+assert["apparent_moving_matrix_pole_is_exactly_desingularized",
+  !FailureQ[epsMovingLimit] &&
+  eqN[esC[epsMovingLimit, 0], 0, 10^-30] &&
+  eqN[esC[epsMovingLimit, 1], 2, 10^-30] &&
+  eqN[esC[epsMovingLimit, 2], -4, 10^-29] &&
+  eqN[esC[epsMovingLimit, 3], 8, 10^-28]];
+epsMovingNonApparentSys = DiffExp2`API`LoadSystem[<|
+  "Matrix" -> {{eps/(x + eps)}}, "Variable" -> x|>];
+epsMovingNonApparent = catchDE2[DiffExp2`API`TransportEndpoint[
+  epsMovingNonApparentSys, {{1, 0, 0, 0}}, 1/2, 0]];
+assert["nonapparent_moving_matrix_pole_at_projected_center_is_loud",
+  FailureQ[epsMovingNonApparent] && epsMovingNonApparent["ID"] === "E3"];
 bvals = Transpose[Table[{SeriesCoefficient[(11/23)^eps, {eps, 0, k}]}, {k, 0, 3}]];
 li = catchDE2[DiffExp2`API`LineIntegral[sys, bvals, 11/23, {0, 1}, {1}]];
 assert["line_integral_x_to_eps",

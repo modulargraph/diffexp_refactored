@@ -21,9 +21,33 @@ assert["downstream publication digits remain independent of guarded producer dig
     ft2DownstreamPublicationDigits[
       1, <|1 -> 10, 2 -> 12|>] === matchDigits];
 assert["internal matching certification consumes at most one downstream safety guard",
-  ft2LevelMatchingCertificationDigits[12, 8] === 10 &&
-    ft2LevelMatchingCertificationDigits[14, 12] === 14 &&
-    ft2LevelMatchingCertificationDigits[8, 8] === 8];
+  ft2LevelMatchingCertificationDigits[3, 12, 8] === 10 &&
+    ft2LevelMatchingCertificationDigits[3, 14, 12] === 14 &&
+    ft2LevelMatchingCertificationDigits[3, 8, 8] === 8 &&
+    Block[{matchingCertificationMaximumDigits = 7},
+      ft2LevelMatchingCertificationDigits[3, 12, 8] === 7 &&
+        ft2LevelMatchingCertificationDigits[3, 8, 8] === 7] &&
+    Block[{matchingCertificationDigitsByLevel = <|3 -> 7|>},
+      ft2LevelMatchingCertificationDigits[3, 12, 8] === 7 &&
+        ft2LevelMatchingCertificationDigits[4, 12, 8] === 10]];
+assert["per-level certification retains its computation safety guard",
+  Block[{wp = 150, matchDigits = 8,
+      matchingCertificationSafetyDigits = 2},
+    ft2MatchingCertificationComputationDigits[
+      <|3 -> 7, 4 -> 8, 5 -> 12|>] ===
+      <|3 -> 9, 4 -> 10, 5 -> 14|>]];
+assert["per-level anchor lookup is exact and legacy scalar data remains readable",
+  ft2FixedParameterValues[<|
+      "NumLevels" -> 3, "FixedParamValues" -> {1/5, 2/5, 4/5}|>] ===
+      {1/5, 2/5, 4/5} &&
+    ft2LevelAnchor[<|
+      "NumLevels" -> 3, "FixedParamValues" -> {1/5, 2/5, 4/5}|>,
+      2] === 2/5 &&
+    ft2FixedParameterValues[<|
+      "NumLevels" -> 2, "FixedParamValue" -> 11/23|>] ===
+      {11/23, 11/23} &&
+    ft2FixedParameterValues[<|
+      "NumLevels" -> 2, "FixedParamValues" -> {1/5}|>] === $Failed];
 
 reservoirBackendFailure = <|
   "reason" -> "acb_match_residual_inconclusive",
@@ -180,6 +204,13 @@ assert["producer digit budget retains its safety margin up the ladder",
       <|3 -> matchDigits + 2, 4 -> matchDigits + 4|>,
       3, matchDigits + 4, 4] ===
         <|3 -> matchDigits + 4, 4 -> matchDigits + 6|>];
+assert["producer digit retry limit scales with the full ladder depth",
+  Block[{wp = 150, matchDigits = 20,
+      DiffExp2`Tolerances`$SafetyDigits = 2},
+    ft2MatchingProducerDigitLimit[7] === 36 &&
+      Max[Values@ft2RaiseMatchingProducerDigits[
+        <|4 -> 21, 5 -> 23, 6 -> 25, 7 -> 27|>,
+        4, 23, 7]] <= ft2MatchingProducerDigitLimit[7]]];
 assert["banana4 final producer seed carries one measured digit plus guards",
   ft2RaiseMatchingProducerDigits[
       <||>, 2, matchDigits + 1, 4] ===
@@ -224,14 +255,59 @@ assert[
         finalRetry[[2, "ProducerLevel"]] === 1],
   <|"fallback" -> terminalOutputRetry,
     "measured" -> measuredTerminalOutputRetry|>];
+terminalProgressBase = <|
+  "Scope" -> "final-paired-line", "Functional" -> 0,
+  "EpsilonPower" -> 1, "CombinedRadius2Exponent" -> -35|>;
+assert["terminal producer progress requires a later failure or tighter ball",
+  ft2NativeTerminalOutputProgressQ[
+      terminalProgressBase,
+      ReplacePart[terminalProgressBase,
+        "CombinedRadius2Exponent" -> -36]] &&
+    ft2NativeTerminalOutputProgressQ[
+      terminalProgressBase,
+      ReplacePart[terminalProgressBase, "EpsilonPower" -> 2]] &&
+    !ft2NativeTerminalOutputProgressQ[
+      terminalProgressBase, terminalProgressBase] &&
+    !ft2NativeTerminalOutputProgressQ[
+      terminalProgressBase,
+      ReplacePart[terminalProgressBase,
+        "CombinedRadius2Exponent" -> -34]]];
 
-assert["matching Taylor progress requires fewer inconclusive coefficients",
+assert["matching Taylor progress recognizes fewer inconclusive coefficients",
   ft2NativeMatchingClearanceProgressQ[
       <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
       <|"pass" -> 133, "fail" -> 0, "inconclusive" -> 119|>] &&
     !ft2NativeMatchingClearanceProgressQ[
       <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>,
       <|"pass" -> 113, "fail" -> 0, "inconclusive" -> 139|>]];
+
+assert[
+  "matching Taylor progress recognizes later handoffs and material midpoint improvement",
+  With[{
+      earlier = <|
+        "ResidualVerdicts" -> <|
+          "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+        "Arm" -> "upper", "Match" -> 22,
+        "PhysicalPoint" -> "557/590",
+        "MidpointResidualRatio" -> 5.4*^-8|>,
+      later = <|
+        "ResidualVerdicts" -> <|
+          "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+        "Arm" -> "upper", "Match" -> 23,
+        "PhysicalPoint" -> "284/295",
+        "MidpointResidualRatio" -> 3.1*^-8|>},
+    ft2NativeMatchingClearanceProgressQ[earlier, later] &&
+      ft2NativeMatchingClearanceProgressQ[
+        earlier,
+        Join[earlier, <|"MidpointResidualRatio" -> 2.7*^-8|>]] &&
+      !ft2NativeMatchingClearanceProgressQ[
+        earlier,
+        Join[earlier, <|"Match" -> 21,
+          "MidpointResidualRatio" -> 1.0*^-9|>]] &&
+      !ft2NativeMatchingClearanceProgressQ[
+        earlier,
+        Join[earlier, <|"MidpointResidualRatio" -> 5.37*^-8|>]]],
+  "later handoff and same-handoff 1% threshold"];
 
 matchingTaylorRetryCalls = {};
 matchingTaylorRetryResult = Block[{
@@ -253,6 +329,53 @@ assert["matching retry driver doubles only the failing level Taylor order",
     matchingTaylorRetryCalls ===
       {<||>, <|3 -> 2 expansionOrder|>},
   matchingTaylorRetryCalls];
+
+matchingTaylorPositionCalls = {};
+matchingTaylorPositionResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
+      Module[{currentOrder},
+        AppendTo[matchingTaylorPositionCalls, taylorOrders];
+        currentOrder = Lookup[taylorOrders, 3, expansionOrder];
+        Switch[Length[matchingTaylorPositionCalls],
+          1,
+            Failure["FeynmanTrickNativeMatchingTaylor", <|
+              "Level" -> 3, "AdditionalOrders" -> currentOrder,
+              "CurrentExpansionOrder" -> currentOrder,
+              "ResidualVerdicts" -> <|
+                "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+              "ProgressRecord" -> <|
+                "ResidualVerdicts" -> <|
+                  "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+                "Arm" -> "upper", "Match" -> 22,
+                "PhysicalPoint" -> "557/590",
+                "MidpointResidualRatio" -> 5.4*^-8|>,
+              "MatchingTaylorOrders" -> taylorOrders|>],
+          2,
+            Failure["FeynmanTrickNativeMatchingTaylor", <|
+              "Level" -> 3, "AdditionalOrders" -> currentOrder,
+              "CurrentExpansionOrder" -> currentOrder,
+              "ResidualVerdicts" -> <|
+                "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+              "ProgressRecord" -> <|
+                "ResidualVerdicts" -> <|
+                  "pass" -> 21, "fail" -> 0, "inconclusive" -> 21|>,
+                "Arm" -> "upper", "Match" -> 23,
+                "PhysicalPoint" -> "284/295",
+                "MidpointResidualRatio" -> 3.1*^-8|>,
+              "MatchingTaylorOrders" -> taylorOrders|>],
+          _, True]]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "matching-taylor-later-position-fixture"]];
+assert[
+  "matching retry continues to order 200 when order 100 fails at a later handoff",
+  matchingTaylorPositionResult === True &&
+    matchingTaylorPositionCalls ===
+      {<||>, <|3 -> 2 expansionOrder|>,
+        <|3 -> 4 expansionOrder|>},
+  matchingTaylorPositionCalls];
 
 matchingTaylorStallCalls = {};
 matchingTaylorStallResult = Block[{
@@ -301,40 +424,33 @@ assert[
       "scope"]] === "materialized-continuity-clearance",
   {continuityTaylorStallResult, continuityTaylorStallCalls}];
 
-producerFallbackCalls = {};
-producerFallbackResult = Block[{
+profileTaylorStallCalls = {};
+profileTaylorStallResult = Block[{
     runExample = Function[
       {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
         producerLosses},
-      AppendTo[producerFallbackCalls, {taylorOrders, levelDigits}];
-      If[Length[producerFallbackCalls] <= 2,
-        Failure["FeynmanTrickNativeMatchingTaylor", <|
-          "Level" -> 1, "AdditionalOrders" -> expansionOrder,
-          "CurrentExpansionOrder" ->
-            Lookup[taylorOrders, 1, expansionOrder],
-          "ResidualVerdicts" -> <|
-            "pass" -> 22, "fail" -> 0, "inconclusive" -> 20|>,
-          "MatchingTaylorOrders" -> taylorOrders,
-          "MatchingDigitsByLevel" -> levelDigits,
-          "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>|>],
-        True]],
-    ft2MatchingHaloProfileContractQ = Function[contract,
-      AssociationQ[contract] &&
-        Lookup[contract, "NumLevels", None] === 3],
+      AppendTo[profileTaylorStallCalls, {taylorOrders, levelDigits}];
+      Failure["FeynmanTrickNativeMatchingTaylor", <|
+        "Level" -> 1,
+        "AdditionalOrders" -> expansionOrder,
+        "CurrentExpansionOrder" ->
+          Lookup[taylorOrders, 1, expansionOrder],
+        "ResidualVerdicts" -> <|
+          "pass" -> 22, "fail" -> 0, "inconclusive" -> 20|>,
+        "MatchingTaylorOrders" -> taylorOrders,
+        "MatchingDigitsByLevel" -> levelDigits,
+        "MatchingHaloProfileContract" -> <|"NumLevels" -> 3|>|>]],
     DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
   ft2RunExampleWithMatchingRetries[
-    "matching-taylor-producer-fallback-fixture"]];
+    "matching-taylor-profile-stall-fixture"]];
 assert[
-  "nonimproving Taylor clearance tightens the upstream producer without changing the consumer target",
-  producerFallbackResult === True &&
-    producerFallbackCalls === {
-      {<||>, <||>},
-      {<|1 -> 2 expansionOrder|>, <||>},
-      {<|1 -> 2 expansionOrder|>,
-        <|2 -> matchDigits + DiffExp2`Tolerances`$SafetyDigits,
-          3 -> matchDigits +
-            2 DiffExp2`Tolerances`$SafetyDigits|>}},
-  producerFallbackCalls];
+  "unchanged Taylor residual never redirects a basis defect to the upstream producer",
+  FailureQ[profileTaylorStallResult] &&
+    profileTaylorStallResult[[1]] ===
+      "FeynmanTrickNativeMatchingTaylorStalled" &&
+    profileTaylorStallCalls === {
+      {<||>, <||>}, {<|1 -> 2 expansionOrder|>, <||>}},
+  {profileTaylorStallResult, profileTaylorStallCalls}];
 
 matchingProducerRetryCalls = {};
 matchingProducerRetryResult = Block[{
@@ -357,6 +473,34 @@ assert["matching retry driver tightens only the preceding producer level",
       {<||>, <|4 -> matchDigits +
         DiffExp2`Tolerances`$SafetyDigits|>},
   matchingProducerRetryCalls];
+
+stalledTerminalProducerCalls = {};
+stalledTerminalProducerResult = Block[{
+    runExample = Function[
+      {runName, familyRequest, epsilonHalos, taylorOrders, levelDigits,
+        producerLosses},
+      AppendTo[stalledTerminalProducerCalls, levelDigits];
+      Failure["FeynmanTrickNativeMatchingProducer", <|
+        "Level" -> 5, "ProducerLevel" -> 6,
+        "NumLevels" -> 7,
+        "CurrentMatchingDigits" ->
+          Lookup[levelDigits, 6, matchDigits],
+        "AdditionalOrders" -> 1,
+        "ProducerRetryKind" -> "terminal-output",
+        "ProgressRecord" -> terminalProgressBase,
+        "MatchingDigitsByLevel" -> levelDigits|>]],
+    DiffExp2`Solve`ClearSolveCaches = Function[{}, Null]},
+  ft2RunExampleWithMatchingRetries[
+    "stalled-terminal-producer-fixture"]];
+assert[
+  "unchanged terminal output stops after one producer accuracy probe",
+  FailureQ[stalledTerminalProducerResult] &&
+    stalledTerminalProducerResult[[1]] ===
+      "FeynmanTrickNativeMatchingProducerStalled" &&
+    stalledTerminalProducerCalls === {
+      <||>,
+      <|6 -> matchDigits + 1|>},
+  {stalledTerminalProducerResult, stalledTerminalProducerCalls}];
 
 producerReservoirRetryCalls = {};
 producerReservoirRetryResult = Block[{

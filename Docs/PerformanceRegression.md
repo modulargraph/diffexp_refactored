@@ -203,6 +203,53 @@ order-25 transport. Set `HENN_NONPLANAR_DEADLINE_SECONDS` or
 qualification. Ancillary data are hash-pinned and must be fetched before the
 gate; ordinary tests never access the network.
 
+## Feynman-trick Henn double-pentagon boundary gate
+
+The independent FT reconstruction of the same paper boundary is a separate
+opt-in gate:
+
+```bash
+Scripts/fetch_henn_nonplanar_data.sh
+DE2_RUN_HENN_FT_BOUNDARY=1 Scripts/run_release_tests.sh
+```
+
+Unlike the transport-only original example, this derives the selected
+canonical component from its scalar integrals with exact support-specific
+Feynman-trick families. The maintained default is component 1, a genuine
+four-level ladder. It applies `eps^4 Exp[2 eps EulerGamma]` and requires the
+maximum absolute error through epsilon order 4 to be below `1e-8`. FIRE
+preparation and ladder checkpoints are content-addressed and reused on later
+runs.
+The maintained profile starts at working precision 80, eight publication
+digits, Taylor order 25, and fifth-radius chart overlaps. A bounded retry may
+increase only the failing
+level's Taylor order when the failure advances along the contour or its local
+midpoint defect materially decreases.
+Rigorous retries are bounded, their producer-digit ceiling scales with the
+number of integration levels, and learned request-specific epsilon-width and
+producer-accuracy requirements are cached for later runs.
+
+After one successful run has populated the FIRE preparation and learned
+private matching profile, a fresh-checkpoint timing qualification can exercise
+the complete numerical ladder without accepting an old boundary:
+
+```bash
+checkpoint_dir=$(mktemp -d)
+HENN_FT_CHECKPOINT_DIR="$checkpoint_dir" \
+HENN_FT_DEADLINE_SECONDS=300 \
+DE2_RUN_HENN_FT_BOUNDARY=1 Scripts/run_release_tests.sh
+```
+
+The July 2026 development-machine baseline is 113.73 seconds inside the
+four-level runner and 138.84 seconds for the launcher plus paper oracle. The
+300-second ceiling is intentionally opt-in because a genuinely cold run may
+also need to prepare FIRE and learn its two private epsilon orders.
+
+Set `HENN_FT_COMPONENT=n` to select another canonical component, or
+`HENN_FT_ALL=1` to run all 108 components and 257 scalar integrals. Even the
+maintained component-1 gate remains opt-in because a cold run prepares FIRE
+data and is unsuitable for ordinary per-change testing.
+
 ## Original planar one-mass canonical pentagon gate
 
 The four canonical systems from the original DiffExp

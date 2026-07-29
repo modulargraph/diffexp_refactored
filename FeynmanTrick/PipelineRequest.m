@@ -42,7 +42,7 @@ exactExpressionQ[expr_] := FreeQ[Unevaluated[expr], _Real];
 
 $familyDefinitionKeys = {
   "LoopMomenta", "ExternalMomenta", "Propagators", "Replacements",
-  "NumericalPoint", "Dimension", "EliminatedPositions",
+  "NumericalPoint", "Dimension", "EliminatedPositions", "NumeratorPositions",
   "AnalyticPrescription", "Prescriptions", "KinematicAssumptions"
 };
 
@@ -51,11 +51,11 @@ canonicalFamilyIdentityQ[family_Association] := Module[
    expectedFamilyKeys},
   definition = Lookup[family, "Definition", None];
   topology = Lookup[family, "Topology", None];
-  requiredDefinitionKeys = Take[$familyDefinitionKeys, 7];
+  requiredDefinitionKeys = Take[$familyDefinitionKeys, 8];
   expectedFamilyKeys = {
     "Schema", "FamilyID", "FamilyIdentity", "InputKind", "Name",
     "Definition", "Topology", "TopTopology", "NumPropagators",
-    "EliminatedPositions", "NumericalPoint", "Dimension",
+    "EliminatedPositions", "NumeratorPositions", "NumericalPoint", "Dimension",
     "CombinationSequence", "OutputIntegralSource", "OutputIntegralMode",
     "OutputIntegrals", "L0OutputRequests"
   };
@@ -76,7 +76,7 @@ canonicalFamilyIdentityQ[family_Association] := Module[
     Lookup[topology, "Masters", {}] === {} &&
     Lookup[topology, "MasterRules", {}] === {} &&
     !AnyTrue[{
-      "SetupFingerprint", "SetupFingerprintRecord", "NumeratorPositions",
+      "SetupFingerprint", "SetupFingerprintRecord",
       "OriginalPropagators", "OriginalNumPropagators"},
       KeyExistsQ[topology, #] &] &&
     Lookup[family, "FamilyID", None] === expectedID &&
@@ -92,6 +92,8 @@ canonicalFamilyIdentityQ[family_Association] := Module[
     Lookup[family, "Dimension", None] === definition["Dimension"] &&
     Lookup[family, "EliminatedPositions", None] ===
       definition["EliminatedPositions"] &&
+    Lookup[family, "NumeratorPositions", None] ===
+      definition["NumeratorPositions"] &&
     (* Optional mathematical fields cannot be smuggled into only the topology:
        the exact Definition is the sole family-identity source. *)
     AllTrue[$familyDefinitionKeys,
@@ -100,11 +102,13 @@ canonicalFamilyIdentityQ[family_Association] := Module[
 ];
 
 canonicalCombinationSequenceQ[sequence_, n_Integer,
-    eliminated_List] := Module[{active, pair},
-  If[!ListQ[sequence] || Length[sequence] > Max[0, n - Length[eliminated] - 1] ||
+    eliminated_List, numerators_List:{}] := Module[{active, pair},
+  If[!ListQ[sequence] ||
+      Length[sequence] >
+        Max[0, n - Length[Union[eliminated, numerators]] - 1] ||
       !AllTrue[sequence, MatchQ[#, {_Integer, _Integer}] &],
     Return[False, Module]];
-  active = Complement[Range[n], eliminated];
+  active = Complement[Range[n], Join[eliminated, numerators]];
   Do[
     pair = sequence[[step]];
     If[pair[[1]] === pair[[2]] ||
@@ -146,7 +150,8 @@ allOutputRequestQ[request_, familyID_String] := Module[{expectedID},
 ];
 
 familyRequestShapeQ[family_] := Module[
-  {mode, outputs, requests, n, eliminated, sequence, validatedOutputs,
+  {mode, outputs, requests, n, eliminated, numerators, sequence,
+   validatedOutputs,
    replayed},
   If[!AssociationQ[family] ||
       Lookup[family, "Schema", None] =!= "FeynmanTrick.FamilySpec/v1" ||
@@ -158,10 +163,15 @@ familyRequestShapeQ[family_] := Module[
     Return[False, Module]];
   n = family["NumPropagators"];
   eliminated = family["EliminatedPositions"];
+  numerators = family["NumeratorPositions"];
   sequence = family["CombinationSequence"];
   If[!ListQ[eliminated] || !DuplicateFreeQ[eliminated] ||
       !AllTrue[eliminated, IntegerQ[#] && 1 <= # <= n &] ||
-      !canonicalCombinationSequenceQ[sequence, n, eliminated],
+      !ListQ[numerators] || !DuplicateFreeQ[numerators] ||
+      !AllTrue[numerators, IntegerQ[#] && 1 <= # <= n &] ||
+      Intersection[eliminated, numerators] =!= {} ||
+      !canonicalCombinationSequenceQ[
+        sequence, n, eliminated, numerators],
     Return[False, Module]];
   mode = Lookup[family, "OutputIntegralMode", None];
   outputs = Lookup[family, "OutputIntegrals", None];
@@ -175,9 +185,11 @@ familyRequestShapeQ[family_] := Module[
      reproduce byte-for-byte. *)
   replayed = Quiet[Check[
     FeynmanTrick`FamilySpec`CreateFamily[
-      family["Topology"], If[mode === "AllPendingDiscovery", All, outputs],
+      family["Topology"],
       "Name" -> family["Name"],
-      "CombinationSequence" -> sequence], $Failed]];
+      "CombinationSequence" -> sequence,
+      "OutputIntegrals" ->
+        If[mode === "AllPendingDiscovery", All, outputs]], $Failed]];
   If[!AssociationQ[replayed] ||
       KeyDrop[replayed, {"InputKind", "OutputIntegralSource"}] =!=
         KeyDrop[family, {"InputKind", "OutputIntegralSource"}],
@@ -186,11 +198,11 @@ familyRequestShapeQ[family_] := Module[
     "Explicit",
       validatedOutputs = Quiet[
         FeynmanTrick`FamilySpec`NormalizeOutputIntegrals[
-          outputs, n, eliminated]];
+          outputs, n, eliminated, numerators]];
       If[validatedOutputs =!= $Failed,
         validatedOutputs = Quiet[
           FeynmanTrick`FamilySpec`ValidateOutputIntegralsForSequence[
-            validatedOutputs, sequence, eliminated]]];
+            validatedOutputs, sequence, eliminated, numerators]]];
       validatedOutputs === outputs && ListQ[outputs] && outputs =!= {} &&
         Length[outputs] === Length[requests] &&
         AllTrue[outputs, ListQ[#] && Length[#] === n &&
@@ -283,7 +295,8 @@ createResolvedAllOutputSelection[request_Association, masters_] := Module[
       <|"ExpectedArity" -> n, "Masters" -> masters|>], Module]];
   normalized = Quiet[
     FeynmanTrick`FamilySpec`NormalizeOutputIntegrals[
-      masters, n, family["EliminatedPositions"]]];
+      masters, n, family["EliminatedPositions"],
+      family["NumeratorPositions"]]];
   If[normalized === $Failed,
     Return[requestFailure[
       "discovered masters violate the family's eliminated-position contract",
@@ -292,7 +305,7 @@ createResolvedAllOutputSelection[request_Association, masters_] := Module[
   validated = Quiet[
     FeynmanTrick`FamilySpec`ValidateOutputIntegralsForSequence[
       normalized, family["CombinationSequence"],
-      family["EliminatedPositions"]]];
+      family["EliminatedPositions"], family["NumeratorPositions"]]];
   If[validated === $Failed,
     Return[requestFailure[
       "discovered masters contain numerator powers at a Feynman-trick merge position",

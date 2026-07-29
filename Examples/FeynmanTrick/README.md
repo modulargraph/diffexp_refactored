@@ -16,6 +16,7 @@ directory.
 | box-bubble | ``sh Examples/FeynmanTrick/BoxBubble.sh`` | completed Euclidean ladder |
 | massive kite | ``sh Examples/FeynmanTrick/Kite.sh`` | completed Euclidean ladder |
 | unequal four-loop banana | ``sh Examples/FeynmanTrick/FourLoopUnequalBanana.sh`` | experimental; no source-controlled completed ladder result in this snapshot |
+| Henn double-pentagon boundary | ``sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh`` | opt-in FT reconstruction of a published canonical boundary component (`--all` for 108) |
 
 The numerical profiles are centralized in `RunExample.m`. Every profile:
 
@@ -66,3 +67,58 @@ separate prepared-data cache.
 The exact propagators and Euclidean points are centralized in
 `Scripts/FTExamples.m`, which the pipeline implementation loads. Their conventions and all
 controls are documented in [Feynman Trick](../../Docs/FeynmanTrick.md).
+
+## Henn double-pentagon boundary
+
+`HennDoublePentagonBoundary.sh` is an additional, deliberately heavier public
+family example. It independently reconstructs the canonical boundary at
+`X0={3,-1,1,1,-1}` from the scalar integrals in the ancillary dlog basis of
+Chicherina et al., [arXiv:1812.11160](https://arxiv.org/abs/1812.11160), and
+compares all five published coefficients through epsilon order 4. The
+maintained default is canonical component 1; `--all` requests the complete
+108-component boundary.
+
+Fetch the hash-pinned ancillary files once, inspect the exact support-specific
+plan or plans, and run the comparison:
+
+```sh
+Scripts/fetch_henn_nonplanar_data.sh
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --plan
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --all
+```
+
+The complete 108-component mode contains 257 distinct scalar integrals. Terms
+are split into exact subsector families by their active positive-power support
+and negative-power pattern. Zero-power lines therefore never enter the
+Feynman-parameter ladder. `D9,D10,D11` and each negative-power physical slot
+are declared as irreducible numerator positions without changing the
+published basis.
+
+Any individual canonical component can be selected explicitly:
+
+```sh
+sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --component 1
+```
+
+The launcher avoids nested Wolfram kernels: one invocation writes the exact
+runner manifest, a small Python driver executes its plans sequentially, and a
+final invocation performs the paper comparison. It prefers Mathematica's
+`/Applications/Wolfram.app` installation, falls back to Wolfram Engine, and
+honors an explicit `HENN_FT_WOLFRAMSCRIPT` path. Numerical controls are
+`HENN_FT_WORKING_PRECISION`, `HENN_FT_MATCH_DIGITS`,
+`HENN_FT_MATCHING_CERTIFICATION_DIGITS`,
+`HENN_FT_EXPANSION_ORDER`, `HENN_FT_BOUNDARY_EXTRA_ORDER`,
+`HENN_FT_DIVISION_ORDER`, `HENN_FT_CHECKPOINT_DIR`,
+`HENN_FT_DEADLINE_SECONDS`, and `DE2_CPP_THREADS`.
+The physical continuation is fixed by the example rather than exposed as a
+performance knob: the deepest Symanzik value is evaluated on the lower rim,
+and the level contours use `{+1,-1,...}` from level 1 upward. The default uses
+working precision 80, Taylor order 25, an eight-digit publication contract,
+and fifth-radius chart overlaps for the closely spaced post-singular geometry.
+It uses distinct exact anchors
+`{1/5,3/10,2/5,1/2,3/5,7/10,4/5}` because a repeated common anchor would put
+the second-level system directly on the diagonal singularity `x2=x1`.
+The runner propagates guarded accuracy through the full ladder and caches
+request-specific epsilon-width and producer-accuracy requirements discovered
+by the rigorous matching checks.

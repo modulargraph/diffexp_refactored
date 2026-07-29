@@ -101,11 +101,21 @@ test["exact topology and sequence changes invalidate prep identity",
     ftPrepKey["prep-contract", inputTopology, {{2, 1}}] =!= baseKey];
 
 oldFixedParameter = FeynmanTrick`Private`$FTConfig["FixedParameterValue"];
+oldFixedParameterValues =
+  FeynmanTrick`Private`$FTConfig["FixedParameterValues"];
 FeynmanTrick`SetFTOption["FixedParameterValue", 7/13];
 changedConfigKey = ftPrepKey["prep-contract", inputTopology, sequence];
 FeynmanTrick`SetFTOption["FixedParameterValue", oldFixedParameter];
 test["evaluated preparation configuration invalidates prep identity",
   changedConfigKey =!= baseKey, {baseKey, changedConfigKey}];
+
+FeynmanTrick`SetFTOption["FixedParameterValues", {1/5}];
+changedAnchorVectorKey = ftPrepKey["prep-contract", inputTopology, sequence];
+FeynmanTrick`SetFTOption[
+  "FixedParameterValues", oldFixedParameterValues];
+test["per-level anchor vector invalidates prep identity",
+  changedAnchorVectorKey =!= baseKey,
+  {baseKey, changedAnchorVectorKey}];
 
 runtimeA = Block[{
     FeynmanTrick`FIREInterface`Private`currentFIRERuntimeFingerprintRecord},

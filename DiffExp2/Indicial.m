@@ -6,6 +6,8 @@ BeginPackage["DiffExp2`Indicial`", {"DiffExp2`Tolerances`", "DiffExp2`Config`"}]
 ChartIndicial::usage = "ChartIndicial[A, t, eps, chartRef] classifies the chart-local system f' = A.f exactly: pole data, rank reduction, an epsilon-affine spectrum, Jordan chains, and resonance families. Returns IndicialData.";
 MatrixPoleData::usage = "MatrixPoleData[A, t] gives <|\"PoleOrder\" -> r, \"Coefficients\" -> <|-r -> A_-r, ..., -1 -> A_-1|>|> exactly.";
 FuchsianReduce::usage = "FuchsianReduce[A, t, eps, chartRef] reduces a pole order r >= 2 system to Fuchsian form by an exact Moser/shearing gauge transform. Returns ReductionData.";
+EpsilonCoalescingDenominatorQ::usage = "EpsilonCoalescingDenominatorQ[A, t, eps] is True when an exact matrix denominator has a moving t-pole which tends to the chart origin as eps -> 0.";
+EpsilonCoalescingApparentReduce::usage = "EpsilonCoalescingApparentReduce[A, t, eps, chartRef] removes only exactly certified simple coalescing apparent poles whose residue is a projector. It returns the reduced matrix and an exact two-sided gauge certificate; unsupported moving poles remain unchanged and are rejected later by the finite-width solver.";
 EpsDegenerateFamilies::usage = "EpsDegenerateFamilies[indicialData] selects the families whose eps -> 0 eigenvectors collide (EpsZeroDegeneracy > 0), for Transport's RecombineBasis.";
 
 Begin["`Private`"];
@@ -81,6 +83,126 @@ MatrixPoleData[A_?MatrixQ, t_Symbol] := Module[{r, heads},
   heads = If[r == 0, <||>,
     Association[Table[(-k) -> Map[laurentCoeff[#, t, -k] &, A, {2}], {k, r, 1, -1}]]];
   <|"PoleOrder" -> r, "Coefficients" -> heads|>];
+
+(* ---- exact removal of epsilon-coalescing apparent poles ------------- *)
+
+(* A projected epsilon-zero singularity can be an apparent pole of the
+   chosen master basis rather than a genuine multi-scale singularity.  The
+   finite-width local recurrence must not expand 1/(t-r(eps)) in t/eps:
+   that creates one new negative epsilon order per Taylor coefficient and,
+   for a non-apparent pole, can hide eps Log[eps] behavior.
+
+   There is, however, one exact and useful case which needs no such
+   expansion.  If a simple moving pole has residue R with R^2=R, then its
+   integer-one monodromy is trivial.  The rational gauge
+
+     f = T g,   T = I-R + (t-r) R,
+     T^-1 = I-R + R/(t-r)
+
+   removes the apparent direction.  Accept that step only after exact
+   projector, inverse, transformed-equation, and pole-removal identities.
+   Any unsupported moving factor is left untouched so the existing loud E3
+   remains the fail-closed behavior. *)
+
+epsilonCoalescingEntryQ[e_, t_Symbol, eps_Symbol] := Module[
+  {den = Denominator[Cancel[Together[e]]], atCenter},
+  If[FreeQ[den, t] || FreeQ[den, eps], Return[False, Module]];
+  atCenter = Cancel[Together[den /. t -> 0]];
+  !zeroQ[atCenter] && zeroQ[atCenter /. eps -> 0]];
+
+EpsilonCoalescingDenominatorQ[A_?MatrixQ, t_Symbol, eps_Symbol] :=
+  AnyTrue[Flatten[A], epsilonCoalescingEntryQ[#, t, eps] &];
+
+epsilonCoalescingFactors[A_?MatrixQ, t_Symbol, eps_Symbol] := Module[
+  {raw},
+  raw = Flatten[Map[Function[e, Module[
+      {den = Denominator[Cancel[Together[e]]], factors},
+      If[FreeQ[den, t] || FreeQ[den, eps], Return[{}, Module]];
+      factors = Rest[FactorList[den]];
+      First /@ Select[factors, Function[record, Module[
+        {factor = First[record], atCenter},
+        If[FreeQ[factor, t] || FreeQ[factor, eps] ||
+            Exponent[factor, t] =!= 1,
+          Return[False, Module]];
+        atCenter = Cancel[Together[factor /. t -> 0]];
+        !zeroQ[atCenter] && zeroQ[atCenter /. eps -> 0]]]]]], Flatten[A]]];
+  DeleteDuplicates[raw,
+    zeroQ[Cancel[Together[#1/#2]] - 1] ||
+      zeroQ[Cancel[Together[#1/#2]] + 1] &]];
+
+EpsilonCoalescingApparentReduce[A_?MatrixQ, t_Symbol, eps_Symbol,
+    chartRef_Association] := Module[
+  {d = Length[A], current, total, totalInv, factors, applied = {},
+   rejected = {}, id, factor, root, residue, step, stepInv, next,
+   poleStillPresentQ, equationResidual},
+  current = Map[Cancel[Together[#]] &, A, {2}];
+  id = IdentityMatrix[d];
+  total = id;
+  totalInv = id;
+  If[!EpsilonCoalescingDenominatorQ[current, t, eps],
+    Return[<|"Applied" -> False, "Matrix" -> current,
+      "Gauge" -> total, "GaugeInverse" -> totalInv,
+      "Factors" -> {}, "RejectedFactors" -> {}|>, Module]];
+  factors = epsilonCoalescingFactors[current, t, eps];
+  Do[
+    factor = candidate;
+    root = Cancel[Together[
+      -Coefficient[factor, t, 0]/Coefficient[factor, t, 1]]];
+    If[zeroQ[root] || !zeroQ[root /. eps -> 0],
+      AppendTo[rejected, <|"Factor" -> factor,
+        "Reason" -> "root-does-not-move-to-origin"|>];
+      Continue[]];
+    residue = Map[
+      Cancel[Together[Cancel[Together[(t - root)*#]] /. t -> root]] &,
+      current, {2}];
+    If[!MatrixQ[residue] ||
+        Dimensions[residue] =!= {d, d} || matZeroQ[residue] ||
+        !matZeroQ[residue . residue - residue],
+      AppendTo[rejected, <|"Factor" -> factor,
+        "Reason" -> "residue-is-not-a-nonzero-projector"|>];
+      Continue[]];
+    step = Map[Cancel[Together[#]] &,
+      id - residue + (t - root)*residue, {2}];
+    stepInv = Map[Cancel[Together[#]] &,
+      id - residue + residue/(t - root), {2}];
+    If[!matZeroQ[step . stepInv - id] ||
+        !matZeroQ[stepInv . step - id],
+      AppendTo[rejected, <|"Factor" -> factor,
+        "Reason" -> "projector-gauge-inverse-check-failed"|>];
+      Continue[]];
+    next = Map[Cancel[Together[#]] &,
+      stepInv . (current . step - D[step, t]), {2}];
+    If[!MatrixQ[next] ||
+        Dimensions[next] =!= {d, d},
+      AppendTo[rejected, <|"Factor" -> factor,
+        "Reason" -> "gauge-transformation-failed"|>];
+      Continue[]];
+    equationResidual = Map[Cancel[Together[#]] &,
+      step . next + D[step, t] - current . step, {2}];
+    poleStillPresentQ = AnyTrue[Flatten[next], Function[e,
+      Module[{den = Denominator[Cancel[Together[e]]]},
+        zeroQ[Cancel[Together[den /. t -> root]]]]]];
+    If[!matZeroQ[equationResidual] || poleStillPresentQ,
+      AppendTo[rejected, <|"Factor" -> factor,
+        "Reason" -> If[poleStillPresentQ,
+          "candidate-pole-remains-after-gauge",
+          "transformed-equation-identity-failed"]|>];
+      Continue[]];
+    total = Map[Cancel[Together[#]] &, total . step, {2}];
+    totalInv = Map[Cancel[Together[#]] &, stepInv . totalInv, {2}];
+    current = next;
+    AppendTo[applied, <|"Factor" -> factor, "Root" -> root,
+      "ResidueRank" -> MatrixRank[residue],
+      "ResidueTrace" -> Cancel[Together[Tr[residue]]]|>],
+    {candidate, factors}];
+  If[!matZeroQ[total . totalInv - id] ||
+      !matZeroQ[totalInv . total - id],
+    err["E6", chartRef, <|
+      "Stage" -> "EpsilonCoalescingApparentGauge",
+      "Detail" -> "composed apparent gauge is not an exact two-sided inverse"|>]];
+  <|"Applied" -> (applied =!= {}), "Matrix" -> current,
+    "Gauge" -> total, "GaugeInverse" -> totalInv,
+    "Factors" -> applied, "RejectedFactors" -> rejected|>];
 
 (* ---- FuchsianReduce: exact Moser/shearing rank reduction ---- *)
 

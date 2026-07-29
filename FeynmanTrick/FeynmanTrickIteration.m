@@ -68,7 +68,8 @@ Options[DefineFTIteration] = {"OutputIntegrals" -> Automatic};
 
 DefineFTIteration[topology_Association, combinationSeq_List,
     numericalPoint_List:{}, OptionsPattern[]] :=
-Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
+Module[{ftData, nLevels, eliminatedPositions, numeratorPositions,
+        outputIntegrals, fixedParameterSetting, fixedParameterValues},
   If[!FeynmanTrick`FIREInterface`Private`validFIRENumericalPointQ[
         numericalPoint] ||
       Intersection[First /@ numericalPoint,
@@ -76,11 +77,25 @@ Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
     Print["Error: numericalPoint must assign finite exact non-momentum symbols."];
     Return[$Failed, Module]];
   nLevels = Length[combinationSeq];
+  fixedParameterSetting = Lookup[
+    FeynmanTrick`Private`$FTConfig, "FixedParameterValues", Automatic];
+  fixedParameterValues = If[fixedParameterSetting === Automatic,
+    ConstantArray[
+      FeynmanTrick`Private`$FTConfig["FixedParameterValue"], nLevels],
+    fixedParameterSetting];
+  If[!ListQ[fixedParameterValues] ||
+      Length[fixedParameterValues] =!= nLevels ||
+      !AllTrue[fixedParameterValues,
+        (IntegerQ[#] || Head[#] === Rational) && 0 < # < 1 &],
+    Print["Error: FixedParameterValues must provide one exact rational ",
+      "strictly between 0 and 1 for every integration level."];
+    Return[$Failed, Module]];
   eliminatedPositions = Lookup[topology, "EliminatedPositions", {}];
+  numeratorPositions = Lookup[topology, "NumeratorPositions", {}];
   outputIntegrals =
     FeynmanTrick`FamilySpec`NormalizeOutputIntegrals[
       OptionValue["OutputIntegrals"], topology["NumPropagators"],
-      eliminatedPositions
+      eliminatedPositions, numeratorPositions
     ];
   If[outputIntegrals === $Failed, Return[$Failed, Module]];
   If[outputIntegrals === All,
@@ -89,7 +104,8 @@ Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
   ];
   outputIntegrals =
     FeynmanTrick`FamilySpec`ValidateOutputIntegralsForSequence[
-      outputIntegrals, combinationSeq, eliminatedPositions];
+      outputIntegrals, combinationSeq, eliminatedPositions,
+      numeratorPositions];
   If[outputIntegrals === $Failed, Return[$Failed, Module]];
 
   ftData = <|
@@ -98,6 +114,7 @@ Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
     "NumericalPoint" -> numericalPoint,
     "NumLevels" -> nLevels,
     "FixedParamValue" -> FeynmanTrick`Private`$FTConfig["FixedParameterValue"],
+    "FixedParamValues" -> fixedParameterValues,
     "Levels" -> <|
       0 -> <|
         "Topology" -> topology,
@@ -105,6 +122,7 @@ Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
         "FeynmanParameter" -> None,
         "FixedParams" -> {},
         "EliminatedPositions" -> eliminatedPositions,
+        "NumeratorPositions" -> numeratorPositions,
         "Masters" -> outputIntegrals,
         "DiffMatrix" -> {},
         "Computed" -> False
@@ -128,7 +146,7 @@ Module[{ftData, nLevels, eliminatedPositions, outputIntegrals},
 (* At level k (with combination {i, j}):                         *)
 (* - Position i gets replaced by xx*D_i + (1-xx)*D_j            *)
 (* - Position j stays unchanged (sub-sector)                     *)
-(* - Previous Feynman parameters fixed to 11/23                  *)
+(* - Previous Feynman parameters fixed to their level anchors    *)
 (* - Kinematics fixed to numerical point                         *)
 (* ============================================================ *)
 
@@ -136,7 +154,7 @@ BuildLevel[ftData_Association, level_Integer] :=
 Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
         param, fixedVal, prevParam, numericalPoint, newTopology,
         prevFixedParams, fixRules, name, result, newReplacements,
-        prevEliminated, eliminatedPositions},
+        prevEliminated, eliminatedPositions, numeratorPositions},
 
   If[level < 1 || level > ftData["NumLevels"],
     Print["Error: level must be between 1 and ", ftData["NumLevels"]];
@@ -159,7 +177,8 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
   (* Each level gets a unique Feynman parameter symbol: xx1, xx2, xx3, ... *)
   (* This is essential: the paper uses x_1, x_2, ..., x_{n-1} for each combination step *)
   param = Symbol["xx" <> ToString[level]];
-  fixedVal = ftData["FixedParamValue"];
+  fixedVal = If[level === 1, None,
+    ftData["FixedParamValues"][[level - 1]]];
   numericalPoint = ftData["NumericalPoint"];
 
   (* Build the combined propagator *)
@@ -204,6 +223,9 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     newReplacements
   ];
   newTopology["EliminatedPositions"] = eliminatedPositions;
+  numeratorPositions = Lookup[
+    ftData["TopTopology"], "NumeratorPositions", {}];
+  newTopology["NumeratorPositions"] = numeratorPositions;
 
   (* Update ftData *)
   result = ftData;
@@ -214,6 +236,7 @@ Module[{prevLevel, combo, prevProps, newProps, newProp, i, j,
     "FixedParams" -> prevFixedParams,
     "CombinedPositions" -> {i, j},
     "EliminatedPositions" -> eliminatedPositions,
+    "NumeratorPositions" -> numeratorPositions,
     "Masters" -> {},
     "DiffMatrix" -> {},
     "Computed" -> False

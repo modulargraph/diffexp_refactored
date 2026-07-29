@@ -22,11 +22,14 @@ assert[label_String, condition_, detail_:None] := If[TrueQ[condition],
 name = "native-resume-fixture";
 prepKey = 271828;
 z = Global`zNativeResume;
+fixtureAnchor = 11/23;
 mastersHere = {{2, 0}};
 mastersBelow = {{1, 1}};
 levelData = <|"Masters" -> mastersHere, "FeynmanParameter" -> z,
   "CombinedPositions" -> {1, 2}, "DiffMatrix" -> {{0}}|>;
-data = <|"NumLevels" -> 1, "Levels" -> <|
+data = <|"NumLevels" -> 1,
+  "FixedParamValue" -> fixtureAnchor,
+  "FixedParamValues" -> {fixtureAnchor}, "Levels" -> <|
   0 -> <|"Masters" -> mastersBelow|>, 1 -> levelData|>|>;
 requests = FeynmanTrick`LevelReduction`BoundaryRequestRecords[
   mastersBelow, levelData["CombinedPositions"]];
@@ -137,7 +140,7 @@ nativePayload = <|"Kind" -> "NativeTransport", "Example" -> name,
   "MastersHere" -> mastersHere, "MastersBelow" -> mastersBelow,
   "Requests" -> requests,
   "Reductions" -> Association[requests[[1, "NeededVec"]] -> 1],
-  "ExtraSingularFactors" -> {}, "Anchor" -> anchor,
+  "ExtraSingularFactors" -> {}, "Anchor" -> fixtureAnchor,
   "WorkingPrecision" -> wp, "DivisionOrder" -> divisionOrder,
   "RadiusOfConvergence" -> radiusOfConvergence,
   "ValueTransportMode" -> valueTransportMode,
@@ -177,7 +180,7 @@ saveLadderCheckpoint[boundaryFile, <|"Kind" -> "Boundary",
   "Example" -> name, "Level" -> 1, "PrepKey" -> prepKey,
   "BoundaryValues" -> {Take[First[boundaryValues], requiredRaw + 1]},
   "BoundaryPrefactors" -> {0}, "MastersHere" -> mastersHere,
-  "Anchor" -> anchor, "WorkingPrecision" -> wp,
+  "Anchor" -> fixtureAnchor, "WorkingPrecision" -> wp,
   "RecurrenceBackend" -> "Cpp", "DeltaPrescriptionSign" ->
     deltaPrescriptionSign, "EpsilonOrder" -> epsOrder,
   "BoundaryExtraOrder" -> boundaryExtraOrder,

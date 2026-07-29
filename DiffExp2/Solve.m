@@ -307,7 +307,8 @@ PrepareChart[sys_Association, chart_Association] := Module[
 prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
   {eps = DiffExp2`Config`CanonicalEps[], t, x0, beta, A, Achart, idata, d,
    cols, V, VInv, fams, detV, colIdx, blockEpsShifts,
-   integrationSequence, thetaOriginal, regularOriginal},
+   integrationSequence, thetaOriginal, regularOriginal, apparent,
+   baseReduction, composedGauge, composedGaugeInverse},
   t = chart["ChartVar"]; x0 = chart["Center"]; beta = Lookup[chart, "Scale", 1];
   A = sys["Matrix"];
   Achart = Map[Cancel[Together[#]] &,
@@ -339,7 +340,9 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
        classification.  Each diagonal block below receives its own complete
        PrepareChart, including any rank reduction and spectral frame. *)
     regularOriginal = AllTrue[Flatten[Achart],
-      With[{v = tVal[#, t]}, v === Infinity || TrueQ[v >= 0]] &];
+      With[{v = tVal[#, t]}, v === Infinity || TrueQ[v >= 0]] &] &&
+      !TrueQ[DiffExp2`Indicial`EpsilonCoalescingDenominatorQ[
+        Achart, t, eps]];
     Return[<|"ChartVar" -> t, "Center" -> x0,
       "ChartMap" -> <|"Center" -> x0, "Scale" -> beta|>,
       "Radius" -> Lookup[chart, "LocalRadius", chart["Radius"]],
@@ -352,9 +355,41 @@ prepareChartCore[sys_Association, chart_Association, sysClearKey_] := Module[
         "Dimension" -> d, "SCCSkeleton" -> True|>,
       "SCCSkeleton" -> True,
       "ChartSystemKind" -> "SCCEnvelope"|>, Module]];
-  idata = DiffExp2`Indicial`ChartIndicial[Achart, t, eps,
+  apparent = DiffExp2`Indicial`EpsilonCoalescingApparentReduce[
+    Achart, t, eps,
     <|"Name" -> Lookup[chart, "Name", "chart@" <> ToString[x0, InputForm]],
       "Center" -> x0, "Variable" -> sys["Variable"]|>];
+  idata = DiffExp2`Indicial`ChartIndicial[apparent["Matrix"], t, eps,
+    <|"Name" -> Lookup[chart, "Name", "chart@" <> ToString[x0, InputForm]],
+      "Center" -> x0, "Variable" -> sys["Variable"]|>];
+  If[TrueQ[apparent["Applied"]],
+    baseReduction = idata["Reduction"];
+    composedGauge = Map[Cancel[Together[#]] &,
+      apparent["Gauge"] . baseReduction["Gauge"], {2}];
+    composedGaugeInverse = Map[Cancel[Together[#]] &,
+      baseReduction["GaugeInverse"] . apparent["GaugeInverse"], {2}];
+    If[!AllTrue[Flatten[Map[Cancel[Together[#]] &,
+          composedGauge . composedGaugeInverse -
+            IdentityMatrix[Length[Achart]], {2}]], # === 0 &] ||
+        !AllTrue[Flatten[Map[Cancel[Together[#]] &,
+          composedGaugeInverse . composedGauge -
+            IdentityMatrix[Length[Achart]], {2}]], # === 0 &],
+      err["E6", chart, <|
+        "Stage" -> "EpsilonCoalescingApparentGaugeComposition",
+        "Detail" -> "composed chart gauge is not an exact two-sided inverse"|>]];
+    baseReduction = Join[baseReduction, <|
+      "Gauge" -> composedGauge,
+      "GaugeInverse" -> composedGaugeInverse,
+      "GaugeInverseCertified" -> True,
+      "GaugeInverseCertificateSchema" ->
+        "diffexp2-indicial-exact-gauge-inverse-v1",
+      "ApparentReduction" -> KeyDrop[apparent, {
+        "Matrix", "Gauge", "GaugeInverse"}],
+      "ReductionMethod" -> StringRiffle[
+        DeleteCases[{
+          "EpsilonCoalescingProjectorGauge",
+          Lookup[baseReduction, "ReductionMethod", None]}, None], "+"]|>];
+    idata = Join[idata, <|"Reduction" -> baseReduction|>]];
   d = idata["Dimension"];
   cols = {}; fams = {}; colIdx = 0; blockEpsShifts = {};
   Do[Module[{members, roots = {}, colRange0 = colIdx + 1, collisions = {}},

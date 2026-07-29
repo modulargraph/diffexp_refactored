@@ -71,6 +71,12 @@ exactRealAlgebraicQ[value_] := Module[{canonical},
     TrueQ[Quiet[Check[Element[canonical, Algebraics], False]]] &&
     exactAlgebraicTruthQ[Im[canonical] == 0]];
 
+exactAlgebraicMax[left_, right_] := Which[
+  exactAlgebraicTruthQ[left >= right], RootReduce[left],
+  exactAlgebraicTruthQ[right > left], RootReduce[right],
+  True, $Failed
+];
+
 nativeInwardScaleFloor[scale_] := Module[{canonical, floor},
   canonical = Quiet[Check[RootReduce[scale], $Failed]];
   If[canonical === $Failed || !exactRealAlgebraicQ[canonical] ||
@@ -574,17 +580,26 @@ normalizeSharedAnchor[lower_Association, upper_Association] := Module[
       !AllTrue[{lowerAnchor["Radius"], upperAnchor["Radius"]},
         exactAlgebraicTruthQ[# > 0] &] ||
       !AllTrue[{lowerAnchor["MatchRadius"],
-          upperAnchor["MatchRadius"], roc}, exactRationalQ],
+          upperAnchor["MatchRadius"]}, exactRealAlgebraicQ] ||
+      !AllTrue[{lowerAnchor["MatchRadius"],
+          upperAnchor["MatchRadius"]},
+        exactAlgebraicTruthQ[# > 0] &] ||
+      !exactRationalQ[roc] || !TrueQ[roc > 0],
     err["E6", <|"LowerAnchor" -> lowerAnchor,
       "UpperAnchor" -> upperAnchor,
-      "Detail" -> "shared-anchor normalization requires positive exact real algebraic radii and rational match/scale data"|>]];
+      "Detail" -> "shared-anchor normalization requires positive exact real algebraic physical and match radii with a positive rational radius-of-convergence normalization"|>]];
   (* SegmentLine caps anchor geometry by each arm length.  The larger of the
      two conservative caps is still no larger than the true singularity
      radius and gives one chart capable of serving both arms. *)
-  commonRadius = Max[lowerAnchor["Radius"], upperAnchor["Radius"]];
-  commonMatchRadius = Max[lowerAnchor["MatchRadius"],
-    upperAnchor["MatchRadius"]];
-  scale = Together[commonMatchRadius/roc];
+  commonRadius = exactAlgebraicMax[
+    lowerAnchor["Radius"], upperAnchor["Radius"]];
+  commonMatchRadius = exactAlgebraicMax[
+    lowerAnchor["MatchRadius"], upperAnchor["MatchRadius"]];
+  If[commonRadius === $Failed || commonMatchRadius === $Failed,
+    err["E6", <|"LowerAnchor" -> lowerAnchor,
+      "UpperAnchor" -> upperAnchor,
+      "Detail" -> "shared-anchor exact algebraic radii could not be ordered"|>]];
+  scale = RootReduce[commonMatchRadius/roc];
   normalization = <|
     "Schema" -> "diffexp2-native-shared-anchor-normalization-v1",
     "IncomingLowerPhysicalRadius" -> lowerAnchor["Radius"],
@@ -763,7 +778,7 @@ NativeRegularIndependentArmPlansSupportedQ[lower_Association,
         Lookup[upperAnchor, "Center", None]] ||
       !SameQ[Lookup[lowerAnchor, "Prescriptions", {}],
         Lookup[upperAnchor, "Prescriptions", {}]] ||
-      !exactRationalQ[roc] ||
+      !exactRationalQ[roc] || !TrueQ[roc > 0] ||
       !AllTrue[{Lookup[lowerAnchor, "Radius", None],
           Lookup[upperAnchor, "Radius", None]},
         exactRealAlgebraicQ] ||
@@ -771,7 +786,11 @@ NativeRegularIndependentArmPlansSupportedQ[lower_Association,
           Lookup[upperAnchor, "Radius", None]},
         exactAlgebraicTruthQ[# > 0] &] ||
       !AllTrue[{Lookup[lowerAnchor, "MatchRadius", None],
-          Lookup[upperAnchor, "MatchRadius", None]}, exactRationalQ],
+          Lookup[upperAnchor, "MatchRadius", None]},
+        exactRealAlgebraicQ] ||
+      !AllTrue[{Lookup[lowerAnchor, "MatchRadius", None],
+          Lookup[upperAnchor, "MatchRadius", None]},
+        exactAlgebraicTruthQ[# > 0] &],
     Return[False, Module]];
   charts = Join[lower["Charts"], upper["Charts"]];
   If[!AllTrue[charts, AssociationQ[#] &&
@@ -779,10 +798,13 @@ NativeRegularIndependentArmPlansSupportedQ[lower_Association,
     Return[False, Module]];
   If[!AllTrue[charts, nativeScaleBridgePrerequisiteQ],
     Return[False, Module]];
-  commonRadius = Max[lowerAnchor["Radius"], upperAnchor["Radius"]];
-  commonMatchRadius = Max[lowerAnchor["MatchRadius"],
-    upperAnchor["MatchRadius"]];
-  commonScale = Together[commonMatchRadius/roc];
+  commonRadius = exactAlgebraicMax[
+    lowerAnchor["Radius"], upperAnchor["Radius"]];
+  commonMatchRadius = exactAlgebraicMax[
+    lowerAnchor["MatchRadius"], upperAnchor["MatchRadius"]];
+  If[commonRadius === $Failed || commonMatchRadius === $Failed,
+    Return[False, Module]];
+  commonScale = RootReduce[commonMatchRadius/roc];
   commonAnchor = Join[lowerAnchor, <|"Radius" -> commonRadius,
     "MatchRadius" -> commonMatchRadius, "Scale" -> commonScale,
     "LocalRadius" -> Together[commonRadius/commonScale]|>];

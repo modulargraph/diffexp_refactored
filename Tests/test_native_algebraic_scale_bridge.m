@@ -211,6 +211,39 @@ sharedEligibleQ = TrueQ[
   DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
     sharedLowerPlan, sharedUpperPlan]];
 
+(* The anchor itself may have an algebraic normalization scale.  This is the
+   shape emitted when a regular anchor is capped by an algebraic
+   singularity distance: normalization must preserve the exact chart first,
+   and the existing contained-rational scale bridge then supplies C++. *)
+algebraicSharedRadius = RootReduce[Sqrt[2]];
+algebraicSharedAnchor = <|
+  "Center" -> 0, "Singular" -> False,
+  "Radius" -> algebraicSharedRadius,
+  "MatchRadius" -> algebraicSharedRadius,
+  "Scale" -> algebraicSharedRadius, "LocalRadius" -> 1,
+  "ChartVar" -> Global`t, "UseSCCSkeleton" -> True,
+  "Name" -> "algebraic-shared-anchor", "Prescriptions" -> {}|>;
+algebraicSharedLowerPlan = Join[sharedLowerPlan, <|
+  "To" -> -1/2, "Charts" -> {algebraicSharedAnchor}|>];
+algebraicSharedUpperPlan = Join[sharedUpperPlan, <|
+  "To" -> 1/2, "Charts" -> {algebraicSharedAnchor}|>];
+algebraicSharedNormalized = catchDE2[
+  DiffExp2`NativeTransport`Private`normalizeSharedAnchor[
+    algebraicSharedLowerPlan, algebraicSharedUpperPlan]];
+algebraicSharedNormalizationQ =
+  ListQ[algebraicSharedNormalized] &&
+  Length[algebraicSharedNormalized] === 2 &&
+  Module[{lower = First[algebraicSharedNormalized]["Charts"][[1]],
+      upper = Last[algebraicSharedNormalized]["Charts"][[1]]},
+    lower === upper &&
+      lower["Radius"] === algebraicSharedRadius &&
+      lower["MatchRadius"] === algebraicSharedRadius &&
+      lower["Scale"] === algebraicSharedRadius &&
+      lower["LocalRadius"] === 1];
+algebraicSharedEligibleQ = TrueQ[
+  DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
+    algebraicSharedLowerPlan, algebraicSharedUpperPlan]];
+
 (* Ordinary handoff ownership is asymmetric: the producer only has to remain
    inside its certified half-radius envelope, while the receiver owns the
    canonical -1/k point.  This exact algebraic chain is therefore valid even
@@ -487,7 +520,9 @@ loudStatusQ = FailureQ[loudFailure] &&
 
 ok = exactFloorQ && eligibleQ && singularScopeQ &&
   inexactRadiusBridgeQ && exactRadiusBridgeQ &&
-  sharedNormalizationQ && sharedEligibleQ && asymmetricAcceptedQ &&
+  sharedNormalizationQ && sharedEligibleQ &&
+  algebraicSharedNormalizationQ && algebraicSharedEligibleQ &&
+  asymmetricAcceptedQ &&
   projectionBridgeQ &&
   TrueQ[rationalResult["OK"]] &&
   TrueQ[acbResult["OK"]] && TrueQ[sharedAnchorResult["OK"]] &&
@@ -501,6 +536,8 @@ If[TrueQ[ok],
     "ExactRadiusBridge" -> exactRadiusBridgeQ,
     "SharedNormalization" -> sharedNormalizationQ,
     "SharedEligible" -> sharedEligibleQ,
+    "AlgebraicSharedNormalization" -> algebraicSharedNormalizationQ,
+    "AlgebraicSharedEligible" -> algebraicSharedEligibleQ,
     "AsymmetricAccepted" -> asymmetricAcceptedQ,
     "Rational" -> rationalResult,
     "Acb" -> acbResult, "SharedAnchor" -> sharedAnchorResult,

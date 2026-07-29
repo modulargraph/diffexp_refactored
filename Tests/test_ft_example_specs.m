@@ -21,6 +21,23 @@ bananaUnequalFT = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
 banana4UnequalFT = FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
   FTExampleTopology["banana4_unequal", "spec"],
   FTExampleSequence["banana4_unequal"], {}];
+anchorVectorFT = Block[{
+    FeynmanTrick`Private`$FTConfig = Join[
+      FeynmanTrick`Private`$FTConfig,
+      <|"FixedParameterValues" -> {1/5, 3/10, 2/5}|>]},
+  Fold[
+    FeynmanTrick`FeynmanTrickIteration`BuildLevel[#1, #2] &,
+    FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
+      FTExampleTopology["banana_unequal", "anchor-vector-spec"],
+      FTExampleSequence["banana_unequal"], {}],
+    Range[3]]];
+invalidAnchorVectorFT = Block[{
+    FeynmanTrick`Private`$FTConfig = Join[
+      FeynmanTrick`Private`$FTConfig,
+      <|"FixedParameterValues" -> {1/5, 3/10}|>]},
+  FeynmanTrick`FeynmanTrickIteration`DefineFTIteration[
+    FTExampleTopology["banana_unequal", "invalid-anchor-vector-spec"],
+    FTExampleSequence["banana_unequal"], {}]];
 
 assert["ft_examples_extended_names",
   ContainsAll[FTExampleNames[],
@@ -63,6 +80,14 @@ assert["ft_banana4_unequal_euclidean_definition",
       banana4Unequal["Propagators"]) === {2, 3/2, 4/3, 5/4, 1}];
 assert["ft_banana4_unequal_selects_scalar_top_integral",
   banana4UnequalFT["Levels"][0]["Masters"] === {{1, 1, 1, 1, 1}}];
+assert["ft_level_specific_anchors_fix_each_preceding_parameter",
+  anchorVectorFT["FixedParamValues"] === {1/5, 3/10, 2/5} &&
+    anchorVectorFT["Levels"][1]["FixedParams"] === {} &&
+    anchorVectorFT["Levels"][2]["FixedParams"] ===
+      {Global`xx1 -> 1/5} &&
+    anchorVectorFT["Levels"][3]["FixedParams"] ===
+      {Global`xx1 -> 1/5, Global`xx2 -> 3/10} &&
+    invalidAnchorVectorFT === $Failed];
 assert["ft_massive_pentagon_strictly_euclidean_definition",
   Length[pentagonMassive["LoopMomenta"]] === 1 &&
   Length[pentagonMassive["ExternalMomenta"]] === 4 &&

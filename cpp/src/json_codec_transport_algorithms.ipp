@@ -3358,6 +3358,8 @@ StoredLineIntegral integrate_transport_stored_row_tile(
   double replay_ms = 0.0;
   double factorized_ms = 0.0;
   bool factorized_eligible = false;
+  std::string factorized_reason =
+      factorize_ordinary_row ? "not-attempted" : "disabled";
   try {
     result = integrate_prepared_scalar_row_stored(
         matrix, source->solution(), projected_complete,
@@ -3372,13 +3374,22 @@ StoredLineIntegral integrate_transport_stored_row_tile(
       // stored prefix.  Unsupported/large cases keep the direct result.
       constexpr std::size_t kMaximumOperatorColumns = 256;
       const auto& equation = source->physical_equation();
-      if (factorize_ordinary_row && equation &&
+      const bool column_count_fits =
           source->solution().epsilon.width() <=
-              std::numeric_limits<std::size_t>::max() /
-                  source->solution().dimension &&
-          source->solution().epsilon.width() *
-                  source->solution().dimension <=
-              kMaximumOperatorColumns) {
+          std::numeric_limits<std::size_t>::max() /
+              source->solution().dimension;
+      const auto column_count = column_count_fits
+          ? source->solution().epsilon.width() *
+                source->solution().dimension
+          : std::numeric_limits<std::size_t>::max();
+      if (factorize_ordinary_row && !equation)
+        factorized_reason = "missing-physical-equation";
+      else if (factorize_ordinary_row && !column_count_fits)
+        factorized_reason = "operator-column-count-overflow";
+      else if (factorize_ordinary_row &&
+               column_count > kMaximumOperatorColumns)
+        factorized_reason = "operator-column-cap";
+      else if (factorize_ordinary_row) {
         const auto replay_started = std::chrono::steady_clock::now();
         const auto replay =
             prepare_physical_regular_homogeneous_tail_model(
@@ -3395,6 +3406,8 @@ StoredLineIntegral integrate_transport_stored_row_tile(
                   options, result, kMaximumOperatorColumns);
           factorized_ms = elapsed_milliseconds(factorized_started);
           factorized_eligible = factorized.eligible;
+          factorized_reason = factorized.eligible
+              ? "eligible" : factorized.reason;
           if (factorized.eligible) {
             if (factorized.integral.value.dimension !=
                     result.value.dimension ||
@@ -3444,8 +3457,23 @@ StoredLineIntegral integrate_transport_stored_row_tile(
                   << '\n';
             result = std::move(factorized.integral);
           }
+        } else {
+          factorized_reason =
+              std::string("physical-prefix-replay-") +
+              tail_majorant_status_name(replay.status);
         }
       }
+      if (factorize_ordinary_row && !factorized_eligible &&
+          (std::getenv(
+               "DE2_DIAGNOSTIC_FACTORIZED_ORDINARY_ROW") != nullptr ||
+           std::getenv("DE2_DIAGNOSTIC_TERMINAL_STATE") != nullptr))
+        std::cerr
+            << "factorized-ordinary-stored-row-ineligible"
+            << " arm=" << arm_name
+            << " tile=" << tile_index
+            << " source_local=" << source->handle()
+            << " reason=" << factorized_reason
+            << '\n';
     }
   } catch (const NativeIntegrationError& error) {
     std::ostringstream detail;
@@ -3485,7 +3513,8 @@ StoredLineIntegral integrate_transport_stored_row_tile(
            << " replay_ms=" << replay_ms
            << " factorized_ms=" << factorized_ms
            << " factorized_eligible="
-           << (factorized_eligible ? "true" : "false");
+           << (factorized_eligible ? "true" : "false")
+           << " factorized_reason=" << factorized_reason;
     emit_transport_contraction_timing(timing.str());
   }
 

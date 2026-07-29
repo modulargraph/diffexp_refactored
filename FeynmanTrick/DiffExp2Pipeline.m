@@ -62,16 +62,41 @@ parseDeltaPrescriptionSign[name_String, text_String] := Module[
     failure["environment delta-prescription sign must be +1 or -1",
       <|"Name" -> name, "Value" -> text|>]]];
 
+parseLevelDeltaPrescriptionSigns[name_String, text_String] := Module[
+  {parts, values},
+  If[StringTrim[text] === "", Return[Automatic, Module]];
+  parts = StringTrim /@ StringSplit[text, ","];
+  values = parseDeltaPrescriptionSign[name, #] & /@ parts;
+  If[AnyTrue[values, FailureQ],
+    First[Select[values, FailureQ]], values]
+];
+
 parseHalos[text_String] := Module[{parts, values},
   parts = StringTrim /@ StringSplit[text, ","];
   If[parts === {""}, Return[{}, Module]];
   values = Map[parseInteger["FT_LEVEL_EPS_HALOS", #, 0] &, parts];
   If[AnyTrue[values, FailureQ], First[Select[values, FailureQ]], values]];
 
+parseFixedParameterValues[text_String] := Module[{parts, values},
+  If[StringTrim[text] === "", Return[Automatic, Module]];
+  parts = StringTrim /@ StringSplit[text, ","];
+  values = Map[
+    parsePositiveRational["FT_FIXED_PARAMETER_VALUES", #] &, parts];
+  If[AnyTrue[values, FailureQ],
+    Return[First[Select[values, FailureQ]], Module]];
+  If[!AllTrue[values, 0 < # < 1 &],
+    Return[failure[
+      "FT_FIXED_PARAMETER_VALUES entries must lie strictly between 0 and 1",
+      <|"Value" -> text|>], Module]];
+  values
+];
+
 RunnerSettingsFromEnvironment[] := Module[
   {backend, threads, wp, matchDigits, epsOrder, expansionOrder, boundaryExtraOrder,
    divisionOrder, requestedStepDivisionOrder, radius, halos, stop, singular,
-   deltaPrescriptionSign, batch, rebuild, migrateLegacyPrep, allowStale,
+   fixedParameterValues,
+   deltaPrescriptionSign, levelDeltaPrescriptionSigns,
+   batch, rebuild, migrateLegacyPrep, allowStale,
    saveNativeTransportCheckpoint, valueTransport, nativeValueHopExecution,
    fireTimeout, firePath, fireBackend, fireCalc, fireModularWorkers,
    fireUseMultiprime, firePrimeLimit, fireKeepModularTables,
@@ -135,6 +160,9 @@ RunnerSettingsFromEnvironment[] := Module[
     deltaPrescriptionSign = parseDeltaPrescriptionSign[
       "FT_DELTA_PRESCRIPTION_SIGN",
       envOrDefault["FT_DELTA_PRESCRIPTION_SIGN", "1"]],
+    levelDeltaPrescriptionSigns = parseLevelDeltaPrescriptionSigns[
+      "FT_LEVEL_DELTA_PRESCRIPTION_SIGNS",
+      envOrDefault["FT_LEVEL_DELTA_PRESCRIPTION_SIGNS", ""]],
     batch = parseFlag["FT_CPP_BATCH_ENDPOINT_ARMS",
       envOrDefault["FT_CPP_BATCH_ENDPOINT_ARMS", "1"]],
     rebuild = parseFlag["FT_REBUILD_PREP",
@@ -156,7 +184,9 @@ RunnerSettingsFromEnvironment[] := Module[
     nativeValueHopExecution = parseFlag[
       "DE2_NATIVE_VALUE_HOP_EXECUTION",
       envOrDefault["DE2_NATIVE_VALUE_HOP_EXECUTION", "1"]],
-    halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]]
+    halos = parseHalos[envOrDefault["FT_LEVEL_EPS_HALOS", "0"]],
+    fixedParameterValues = parseFixedParameterValues[
+      envOrDefault["FT_FIXED_PARAMETER_VALUES", ""]]
   };
   If[AnyTrue[values, FailureQ], Return[First[Select[values, FailureQ]], Module]];
   If[matchDigits > Floor[wp/2],
@@ -216,9 +246,11 @@ RunnerSettingsFromEnvironment[] := Module[
     (* The classic planner couples placement and +/-1/k matching. *)
     "StepDivisionOrder" -> divisionOrder,
     "RadiusOfConvergence" -> radius, "LevelEpsilonHalos" -> halos,
+    "FixedParameterValues" -> fixedParameterValues,
     "StopAfterBoundaryLevel" -> stop,
     "SingularMatchPrecondition" -> singular,
     "DeltaPrescriptionSign" -> deltaPrescriptionSign,
+    "LevelDeltaPrescriptionSigns" -> levelDeltaPrescriptionSigns,
     "BatchEndpointArms" -> (batch && backend === "Cpp"),
     "PrepCacheRoot" -> prepRoot, "ForcePrepRebuild" -> rebuild,
     "MigrateLegacyPreparation" -> migrateLegacyPrep,
@@ -236,6 +268,7 @@ Options[PipelinePlan] = {
   "EpsilonOrder" -> 0,
   "BoundaryExtraOrder" -> 4,
   "LevelEpsilonHalos" -> {0},
+  "FixedParameterValues" -> Automatic,
   "DivisionOrder" -> 3,
   "RadiusOfConvergence" -> 1,
   "RecurrenceBackend" -> "Cpp",
@@ -245,6 +278,7 @@ Options[PipelinePlan] = {
   "BatchEndpointArms" -> True,
   "SingularMatchPrecondition" -> False,
   "DeltaPrescriptionSign" -> 1,
+  "LevelDeltaPrescriptionSigns" -> Automatic,
   "PreparedCacheDirectory" -> Automatic,
   "FIREPath" -> Automatic,
   "FIREBackend" -> "Modular",
@@ -304,12 +338,22 @@ validatePlanOptions[settings_Association] := Module[{checks},
     IntegerQ[settings["BoundaryExtraOrder"]] && settings["BoundaryExtraOrder"] >= 0,
     ListQ[settings["LevelEpsilonHalos"]] &&
       AllTrue[settings["LevelEpsilonHalos"], IntegerQ[#] && # >= 0 &],
+    (settings["FixedParameterValues"] === Automatic ||
+      (ListQ[settings["FixedParameterValues"]] &&
+        settings["FixedParameterValues"] =!= {} &&
+        AllTrue[settings["FixedParameterValues"],
+          (IntegerQ[#] || Head[#] === Rational) && 0 < # < 1 &])),
     IntegerQ[settings["DivisionOrder"]] && settings["DivisionOrder"] >= 2,
     (IntegerQ[settings["RadiusOfConvergence"]] ||
       Head[settings["RadiusOfConvergence"]] === Rational) &&
       settings["RadiusOfConvergence"] > 0,
     MemberQ[{"Cpp", "Wolfram"}, settings["RecurrenceBackend"]],
     MemberQ[{-1, 1}, settings["DeltaPrescriptionSign"]],
+    (settings["LevelDeltaPrescriptionSigns"] === Automatic ||
+      (ListQ[settings["LevelDeltaPrescriptionSigns"]] &&
+        settings["LevelDeltaPrescriptionSigns"] =!= {} &&
+        AllTrue[settings["LevelDeltaPrescriptionSigns"],
+          MemberQ[{-1, 1}, #] &])),
     IntegerQ[settings["CppThreads"]] && settings["CppThreads"] >= 1,
     And @@ (boolQ[settings[#]] & /@ {
       "ValueTransport", "NativeValueHopExecution", "BatchEndpointArms",
@@ -411,6 +455,7 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "EpsilonOrder" -> OptionValue["EpsilonOrder"],
     "BoundaryExtraOrder" -> OptionValue["BoundaryExtraOrder"],
     "LevelEpsilonHalos" -> OptionValue["LevelEpsilonHalos"],
+    "FixedParameterValues" -> OptionValue["FixedParameterValues"],
     "DivisionOrder" -> OptionValue["DivisionOrder"],
     "RadiusOfConvergence" -> OptionValue["RadiusOfConvergence"],
     "RecurrenceBackend" -> OptionValue["RecurrenceBackend"],
@@ -420,6 +465,8 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "BatchEndpointArms" -> OptionValue["BatchEndpointArms"],
     "SingularMatchPrecondition" -> OptionValue["SingularMatchPrecondition"],
     "DeltaPrescriptionSign" -> OptionValue["DeltaPrescriptionSign"],
+    "LevelDeltaPrescriptionSigns" ->
+      OptionValue["LevelDeltaPrescriptionSigns"],
     "RebuildPreparation" -> OptionValue["RebuildPreparation"],
     "MigrateLegacyPreparation" ->
       OptionValue["MigrateLegacyPreparation"],
@@ -475,6 +522,10 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
       boolString[settings["SingularMatchPrecondition"]],
     "FT_DELTA_PRESCRIPTION_SIGN" ->
       inputString[settings["DeltaPrescriptionSign"]],
+    "FT_LEVEL_DELTA_PRESCRIPTION_SIGNS" -> If[
+      settings["LevelDeltaPrescriptionSigns"] === Automatic, "",
+      StringRiffle[
+        inputString /@ settings["LevelDeltaPrescriptionSigns"], ","]],
     "FT_CPP_BATCH_ENDPOINT_ARMS" ->
       boolString[settings["BatchEndpointArms"]],
     "FT_WORKING_PRECISION" -> inputString[settings["WorkingPrecision"]],
@@ -484,6 +535,10 @@ buildPipelinePlan[example_String, registryQ_, OptionsPattern[PipelinePlan]] := M
     "FT_BOUNDARY_EXTRA_ORDER" -> inputString[settings["BoundaryExtraOrder"]],
     "FT_LEVEL_EPS_HALOS" -> StringRiffle[
       inputString /@ settings["LevelEpsilonHalos"], ","],
+    "FT_FIXED_PARAMETER_VALUES" -> If[
+      settings["FixedParameterValues"] === Automatic, "",
+      StringRiffle[
+        inputString /@ settings["FixedParameterValues"], ","]],
     "FT_DIVISION_ORDER" -> inputString[settings["DivisionOrder"]],
     "FT_STEP_DIVISION_ORDER" -> inputString[settings["DivisionOrder"]],
     "FT_RADIUS_OF_CONVERGENCE" ->
@@ -538,7 +593,8 @@ PipelinePlan[example_String, opts:OptionsPattern[]] :=
 familyPipelinePlan[family_Association, targets_,
     opts:OptionsPattern[PipelinePlan]] := Module[
   {canonical, request, requestDirectoryOption, requestDirectory,
-   requestFile, executionName, plan, runnerSupport, policy, activeCount},
+   requestFile, executionName, plan, runnerSupport, policy,
+   activeDenominatorCount},
   canonical = If[targets === Automatic,
     FeynmanTrick`FamilySpec`CreateFamily[family],
     FeynmanTrick`FamilySpec`CreateFamily[family, targets]];
@@ -550,14 +606,17 @@ familyPipelinePlan[family_Association, targets_,
     Return[failure[
       "custom analytic-prescription and kinematic-assumption fields are not yet wired into the production runner and cannot be ignored safely",
       <|"FamilyID" -> canonical["FamilyID"]|>], Module]];
-  activeCount = canonical["NumPropagators"] -
-    Length[canonical["EliminatedPositions"]];
-  If[activeCount <= 1 ||
-      Length[canonical["CombinationSequence"]] =!= activeCount - 1,
+  activeDenominatorCount = canonical["NumPropagators"] -
+    Length[Union[canonical["EliminatedPositions"],
+      canonical["NumeratorPositions"]]];
+  If[activeDenominatorCount <= 1 ||
+      Length[canonical["CombinationSequence"]] =!=
+        activeDenominatorCount - 1,
     Return[failure[
-      "the production ladder requires a complete nonempty combination sequence ending in one active propagator",
+      "the production ladder requires a complete nonempty combination sequence ending in one active denominator",
       <|"FamilyID" -> canonical["FamilyID"],
-        "ActivePropagators" -> activeCount,
+        "ActiveDenominators" -> activeDenominatorCount,
+        "NumeratorPositions" -> canonical["NumeratorPositions"],
         "CombinationSequence" -> canonical["CombinationSequence"]|>],
       Module]];
   request = FeynmanTrick`PipelineRequest`CreatePipelineRequest[canonical];
@@ -580,6 +639,24 @@ familyPipelinePlan[family_Association, targets_,
   executionName = "family_" <> StringTake[request["RequestID"], -16];
   plan = buildPipelinePlan[executionName, False, opts];
   If[FailureQ[plan], Return[plan, Module]];
+  If[ListQ[plan["Settings", "FixedParameterValues"]] &&
+      Length[plan["Settings", "FixedParameterValues"]] =!=
+        Length[canonical["CombinationSequence"]],
+    Return[failure[
+      "\"FixedParameterValues\" must provide one anchor per integration level",
+      <|"ExpectedLength" -> Length[canonical["CombinationSequence"]],
+        "ActualLength" ->
+          Length[plan["Settings", "FixedParameterValues"]],
+        "FamilyID" -> canonical["FamilyID"]|>], Module]];
+  If[ListQ[plan["Settings", "LevelDeltaPrescriptionSigns"]] &&
+      Length[plan["Settings", "LevelDeltaPrescriptionSigns"]] =!=
+        Length[canonical["CombinationSequence"]],
+    Return[failure[
+      "\"LevelDeltaPrescriptionSigns\" must provide one sign per integration level",
+      <|"ExpectedLength" -> Length[canonical["CombinationSequence"]],
+        "ActualLength" ->
+          Length[plan["Settings", "LevelDeltaPrescriptionSigns"]],
+        "FamilyID" -> canonical["FamilyID"]|>], Module]];
   runnerSupport = Which[
     OptionValue["Runner"] === Automatic,
       "BuiltInRequestAwareRunner",

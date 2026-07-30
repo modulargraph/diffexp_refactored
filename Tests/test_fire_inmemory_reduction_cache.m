@@ -15,10 +15,11 @@ assert[label_String, condition_] := If[TrueQ[condition],
   failed++; Print["  FAIL: ", label]];
 
 Module[{dir, topology, unverifiedTopology, otherTopology, verifiedTopology,
-        relocatedTopology,
+        relocatedTopology, alternateBasisTopology,
         changedSetupTopology, oldCache, oldReductionCacheOption,
         oldDimensionVariable, cachedHitResult, callsBeforeCachedHit,
-        blockedResult, callsBeforeBlockedMiss,
+        blockedResult, callsBeforeBlockedMiss, knownBasisTopology,
+        knownBasisResult, callsBeforeKnownBasis,
         runCalls = 0, fireRequests = {}, results, first, second, key1, key2,
         unverifiedKey, otherKey, verifiedKey, relocatedKey, changedSetupKey},
   dir = FileNameJoin[{$TemporaryDirectory,
@@ -124,8 +125,30 @@ Module[{dir, topology, unverifiedTopology, otherTopology, verifiedTopology,
       changedSetupTopology, {1, 0}];
   assert["verified setup content survives transient relocation",
     verifiedKey === relocatedKey];
+  alternateBasisTopology = verifiedTopology;
+  alternateBasisTopology["Masters"] = {{1, 0}};
+  assert["selected master basis is part of the reduction cache contract",
+    verifiedKey =!=
+      FeynmanTrick`FIREInterface`Private`reductionCacheKey[
+        alternateBasisTopology, {1, 0}]];
   assert["verified setup restriction change invalidates reduction cache",
     relocatedKey =!= changedSetupKey];
+
+  FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
+  knownBasisTopology = topology;
+  knownBasisTopology["Masters"] = {{1, 0}};
+  callsBeforeKnownBasis = runCalls;
+  knownBasisResult = Block[{
+      FeynmanTrick`FIREInterface`Private`runFIRE6},
+    FeynmanTrick`FIREInterface`Private`runFIRE6[___] := (runCalls++; 0);
+    FeynmanTrick`FIREInterface`ReduceIntegralsDetailed[
+      knownBasisTopology, {{1}, {1, 0}}]
+  ];
+  assert["known master requests are exact identities without a FIRE launch",
+    AssociationQ[knownBasisResult] &&
+      runCalls === callsBeforeKnownBasis &&
+      knownBasisResult["Reductions"][{1}] === Global`G[1, {1, 0}] &&
+      knownBasisResult["Reductions"][{1, 0}] === Global`G[1, {1, 0}]];
 
   FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
   FeynmanTrick`FIREInterface`Private`cacheReduction[

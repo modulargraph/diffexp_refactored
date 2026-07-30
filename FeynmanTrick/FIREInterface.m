@@ -206,7 +206,7 @@ normalizeIntegralIndex[topology_Association, integral_List] := Module[
 normalizeIntegralIndices[topology_Association, integrals_List] :=
   normalizeIntegralIndex[topology, #] & /@ integrals;
 
-$reductionCacheSchema = "FeynmanTrick.ReductionCache/v3";
+$reductionCacheSchema = "FeynmanTrick.ReductionCache/v4";
 $fireSetupFingerprintSchema = "FeynmanTrick.FIRESetup/v2";
 
 fileSHA256[path_String] := If[FileExistsQ[path],
@@ -418,6 +418,7 @@ preparedRunnerRuntimeHashes[topologies_List, operation_String] := Module[
 reductionCacheKey[topology_Association, fireIntegral_List] := {
   $reductionCacheSchema,
   reductionSetupFingerprintRecord[topology],
+  Lookup[topology, "Masters", {}],
   fireIntegral
 };
 
@@ -871,6 +872,7 @@ Module[{exitCode, result, logFile, timeoutSeconds, runDir, inputFiles,
   inputFiles = DeleteDuplicates[Join[
     {manifest["ConfigPath"],
       FileNameJoin[{dir, manifest["IntegralsFile"]}]},
+    FileNameJoin[{dir, #}] & /@ Lookup[manifest, "MasterFiles", {}],
     FileNameJoin[{dir, #}] & /@ Lookup[manifest["Problems"], "StartFile"]
   ]];
   sourceHashes = AssociationThread[FileNameTake /@ inputFiles,
@@ -1282,7 +1284,8 @@ Module[{content, threads, fthreads, problemLines, allVars, path},
 (* Write single-problem config (for backwards compatibility) *)
 writeSingleProblemConfig[topology_Association, dir_String, configName_String,
                          integralsFile_String:"", outputFile_String:""] :=
-Module[{vars, content, threads, fthreads, intFile, outFile, name, pn, path},
+Module[{vars, content, threads, fthreads, intFile, outFile, name, pn, path,
+        masters, mastersFile, mastersLine, mastersContent},
   name = topology["Name"];
   pn = topology["ProblemNumber"];
   threads = FeynmanTrick`Private`$FTConfig["Threads"];
@@ -1293,6 +1296,23 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name, pn, path},
 
   intFile = If[integralsFile === "", name <> ".m", integralsFile];
   outFile = If[outputFile === "", name <> ".tables", outputFile];
+  masters = Lookup[topology, "Masters", {}];
+  If[!ListQ[masters] ||
+      !AllTrue[masters,
+        ListQ[#] && Length[#] === topology["NumPropagators"] &&
+          AllTrue[#, IntegerQ] &],
+    Return[$Failed, Module]];
+  mastersFile = If[masters === {}, "",
+    FileBaseName[configName] <> ".preferred"];
+  mastersLine = If[masters === {}, "",
+    "#preferred         " <> mastersFile <> "\n"];
+  If[masters =!= {},
+    mastersContent = ToString[
+      ({pn, #} & /@ masters), InputForm] <> "\n";
+    If[Export[FileNameJoin[{dir, mastersFile}], mastersContent, "Text"] ===
+        $Failed,
+      Return[$Failed, Module]]
+  ];
 
   content = StringJoin[
     "#threads           ", ToString[threads], "\n",
@@ -1300,6 +1320,7 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name, pn, path},
     "#variables         ", StringRiffle[SymbolName /@ vars, ","], "\n",
     "#start\n",
     "#problem           ", ToString[pn], " ", name, ".start\n",
+    mastersLine,
     "#integrals         ", intFile, "\n",
     "#output            ", outFile, "\n"
   ];
@@ -1308,7 +1329,9 @@ Module[{vars, content, threads, fthreads, intFile, outFile, name, pn, path},
   If[Export[path, content, "Text"] === $Failed,
     $Failed,
     <|"Path" -> path, "OrderedVariables" -> vars,
-      "OutputFile" -> outFile, "IntegralsFile" -> intFile|>]
+      "OutputFile" -> outFile, "IntegralsFile" -> intFile,
+      "MasterFile" -> If[mastersFile === "", Missing["NotUsed"],
+        mastersFile]|>]
 ];
 
 fireInvocationStem[prefix_String, kind_String, identity_] :=
@@ -1539,6 +1562,16 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   cacheEnabled = TrueQ[
     Lookup[FeynmanTrick`Private`$FTConfig, "ReductionCache", True]
   ];
+  knownMasters = Lookup[topology, "Masters", {}];
+  (* A prepared master basis is already an exact set of identity reductions.
+     Seed those identities before looking for misses so a boundary-observable
+     batch never asks FIRE to rediscover its own transported masters. *)
+  If[cacheEnabled && knownMasters =!= {},
+    Scan[
+      cacheReduction[
+        topology, #, Global`G[1, #], knownMasters] &,
+      DeleteDuplicates[knownMasters]]
+  ];
   cacheEntries = (cachedReduction[topology, #] &) /@ fireIntegrals;
   missingPositions = If[cacheEnabled,
     Flatten[Position[cacheEntries, _Missing, {1}]],
@@ -1601,6 +1634,7 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   ];
   runStem = fireInvocationStem[name, "reduce", {
     Lookup[topology, "SetupFingerprint", Missing["Absent"]],
+    Lookup[topology, "Masters", {}],
     missingFireIntegrals}];
   intFile = runStem <> ".m";
   If[Export[FileNameJoin[{dir, intFile}], intContent, "Text"] === $Failed,
@@ -1643,7 +1677,6 @@ Module[{dir, name, fireBin, intFile, tablesFile, rules, intContent, result,
   masters = Cases[parsedTable["Masters"],
     {pn, indices_List} :> indices
   ];
-  knownMasters = Lookup[topology, "Masters", {}];
   If[knownMasters =!= {} && !SubsetQ[knownMasters, masters],
     Print["Error: FIRE 7 reduction reported a master outside the prepared basis."];
     Return[$Failed, Module]];

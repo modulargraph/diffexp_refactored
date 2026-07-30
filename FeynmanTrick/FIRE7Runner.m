@@ -93,7 +93,8 @@ lineValue[lines_List, key_String] := Module[{prefix, line},
 
 ParseConfig[dir_String, stem_String] := Module[
   {path, text, lines, variablesText, variables, output, integrals,
-   problemLines, problems, words, configLeaf, inputLeaves},
+   problemLines, problems, masterLines, preferredLines, masterFiles,
+   preferredFiles, words, configLeaf, inputLeaves},
   path = configPath[dir, stem];
   If[path === $Failed || !nonemptyFileQ[path],
     Return[failure["FIRE config is missing or empty",
@@ -130,8 +131,36 @@ ParseConfig[dir_String, stem_String] := Module[
   If[!DuplicateFreeQ[Lookup[problems, "ProblemNumber"]],
     Return[failure["FIRE config has duplicate problem numbers",
       <|"ConfigPath" -> path|>], Module]];
+  masterLines = Select[lines, Function[item,
+    With[{w = StringSplit[StringTrim[item], Whitespace]},
+      Length[w] >= 1 && First[w] === "#masters"]]];
+  masterFiles = Map[Function[line,
+    words = StringSplit[StringTrim[line], Whitespace];
+    words = If[Length[words] === 2,
+      StringCases[words[[2]],
+        RegularExpression["^\\|[0-9]+-[0-9]+\\|(.+)$"] :> "$1"],
+      {}];
+    If[Length[words] =!= 1 || !safeLeafNameQ[First[words]],
+      Return[failure["malformed #masters line",
+        <|"ConfigPath" -> path, "Line" -> line|>], Module]];
+    First[words]], masterLines];
+  If[FailureQ[masterFiles], Return[masterFiles, Module]];
+  preferredLines = Select[lines, Function[item,
+    With[{w = StringSplit[StringTrim[item], Whitespace]},
+      Length[w] >= 1 && First[w] === "#preferred"]]];
+  preferredFiles = Map[Function[line,
+    words = StringSplit[StringTrim[line], Whitespace];
+    If[Length[words] =!= 2 || !safeLeafNameQ[words[[2]]],
+      Return[failure["malformed #preferred line",
+        <|"ConfigPath" -> path, "Line" -> line|>], Module]];
+    words[[2]]], preferredLines];
+  If[FailureQ[preferredFiles], Return[preferredFiles, Module]];
+  masterFiles = Join[masterFiles, preferredFiles];
+  If[!DuplicateFreeQ[masterFiles],
+    Return[failure["FIRE config has duplicate master files",
+      <|"ConfigPath" -> path, "MasterFiles" -> masterFiles|>], Module]];
   configLeaf = FileNameTake[path];
-  inputLeaves = Join[{configLeaf, integrals},
+  inputLeaves = Join[{configLeaf, integrals}, masterFiles,
     Lookup[problems, "StartFile"]];
   If[!AllTrue[Join[{output}, inputLeaves], safeLeafNameQ],
     Return[failure["generated FIRE inputs must use safe leaf filenames",
@@ -154,6 +183,7 @@ ParseConfig[dir_String, stem_String] := Module[
     "Variables" -> variables,
     "OutputFile" -> output,
     "IntegralsFile" -> integrals,
+    "MasterFiles" -> masterFiles,
     "Problems" -> problems
   |>
 ];
@@ -202,6 +232,7 @@ resolvedMPIExecutable[settings_Association] := Module[{configured},
 
 inputPaths[dir_String, manifest_Association] := Join[
   {manifest["ConfigPath"], FileNameJoin[{dir, manifest["IntegralsFile"]}]},
+  FileNameJoin[{dir, #}] & /@ Lookup[manifest, "MasterFiles", {}],
   FileNameJoin[{dir, #}] & /@ Lookup[manifest["Problems"], "StartFile"]
 ];
 

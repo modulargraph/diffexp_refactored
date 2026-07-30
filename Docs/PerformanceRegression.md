@@ -214,12 +214,13 @@ DE2_RUN_HENN_FT_BOUNDARY=1 Scripts/run_release_tests.sh
 ```
 
 Unlike the transport-only original example, this derives the selected
-canonical component from its scalar integrals with exact support-specific
-Feynman-trick families. The maintained default is component 1, a genuine
-four-level ladder. It applies `eps^4 Exp[2 eps EulerGamma]` and requires the
-maximum absolute error through epsilon order 4 to be below `1e-8`. FIRE
-preparation and ladder checkpoints are content-addressed and reused on later
-runs.
+canonical component from its scalar integrals. One universal family transports
+the complete 108-master L0 basis through one seven-level ladder; one exact
+FIRE reduction, scheduled in resumable sector batches, reduces all selected
+scalar observables onto that basis. It applies
+`eps^4 Exp[2 eps EulerGamma]` and requires the maximum absolute error through
+epsilon order 4 to be below `1e-8`. FIRE preparation, master discovery, and
+ladder checkpoints are content-addressed and reused on later runs.
 The maintained profile starts at working precision 80, eight publication
 digits, Taylor order 25, and fifth-radius chart overlaps. A bounded retry may
 increase only the failing
@@ -240,10 +241,11 @@ HENN_FT_DEADLINE_SECONDS=300 \
 DE2_RUN_HENN_FT_BOUNDARY=1 Scripts/run_release_tests.sh
 ```
 
-The July 2026 development-machine baseline is 113.73 seconds inside the
-four-level runner and 138.84 seconds for the launcher plus paper oracle. The
-300-second ceiling is intentionally opt-in because a genuinely cold run may
-also need to prepare FIRE and learn its two private epsilon orders.
+The historical component-1 support-specific baseline was 113.73 seconds
+inside its four-level runner and 138.84 seconds for the launcher plus paper
+oracle. It is retained only as provenance and is not a ceiling for the new
+shared 108-master calculation. Record a new warm-cache timing baseline only
+after the universal ladder has completed and passed the paper oracle.
 
 Set `HENN_FT_COMPONENT=n` to select another canonical component, or
 `HENN_FT_ALL=1` to run all 108 components and 257 scalar integrals. Even the

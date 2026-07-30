@@ -62,6 +62,7 @@ expectedManifest = <|
   "Variables" -> {"x", "m", "d"},
   "OutputFile" -> "contract.tables",
   "IntegralsFile" -> "contract.m",
+  "MasterFiles" -> {},
   "Problems" -> {
     <|"ProblemNumber" -> 11, "StartFile" -> "alpha.start"|>,
     <|"ProblemNumber" -> 12, "StartFile" -> "beta.start"|>
@@ -69,6 +70,44 @@ expectedManifest = <|
 |>;
 assert["ParseConfig preserves the exact d-last manifest",
   manifest === expectedManifest];
+Export[FileNameJoin[{configDir, "contract-masters.config"}], StringJoin[
+  "#threads 1\n",
+  "#fthreads 1\n",
+  "#variables x,m,d\n",
+  "#start\n",
+  "#problem 11 alpha.start\n",
+  "#preferred contract.preferred\n",
+  "#integrals contract.m\n",
+  "#output contract-masters.tables\n"], "Text"];
+Export[FileNameJoin[{configDir, "contract.preferred"}],
+  "{{11,{1,0}},{11,{0,1}}}\n", "Text"];
+masterManifest = FeynmanTrick`FIRE7Runner`ParseConfig[
+  configDir, "contract-masters"];
+assert["ParseConfig carries explicit master files as exact job inputs",
+  AssociationQ[masterManifest] &&
+    masterManifest["MasterFiles"] === {"contract.preferred"} &&
+    MemberQ[
+      FeynmanTrick`FIRE7Runner`Private`inputPaths[
+        configDir, masterManifest],
+      FileNameJoin[{configDir, "contract.preferred"}]]];
+writerTopology = <|
+  "Name" -> "alpha",
+  "ProblemNumber" -> 11,
+  "NumPropagators" -> 2,
+  "Variables" -> {Global`x, Global`m},
+  "Masters" -> {{1, 0}, {0, 1}}|>;
+writerResult =
+  FeynmanTrick`FIREInterface`Private`writeSingleProblemConfig[
+    writerTopology, configDir, "writer.config",
+    "contract.m", "writer.tables"];
+writerManifest = FeynmanTrick`FIRE7Runner`ParseConfig[
+  configDir, "writer"];
+assert["single-problem reductions publish the selected basis as preferred",
+  AssociationQ[writerResult] &&
+    AssociationQ[writerManifest] &&
+    writerManifest["MasterFiles"] === {"writer.preferred"} &&
+    Get[FileNameJoin[{configDir, "writer.preferred"}]] ===
+      {{11, {1, 0}}, {11, {0, 1}}}];
 Export[FileNameJoin[{configDir, "unsafe.config"}], StringJoin[
   "#variables x,a/../../victim,d\n#start\n",
   "#problem 11 alpha.start\n#integrals contract.m\n",

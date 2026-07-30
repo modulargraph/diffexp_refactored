@@ -154,11 +154,12 @@ The extra
 [`HennDoublePentagonBoundary.sh`](../Examples/FeynmanTrick/HennDoublePentagonBoundary.sh)
 example reconstructs rather than imports the `X0={3,-1,1,1,-1}` boundary for
 the canonical nonplanar double-pentagon basis of Chicherina et al.,
-[arXiv:1812.11160](https://arxiv.org/abs/1812.11160). The maintained default
-computes component 1 through a four-level FT ladder, applies the paper
-normalization `eps^4 Exp[2 eps EulerGamma]`, and compares orders 0 through 4.
-`--all` expands the same procedure to the full 108-component, 257-scalar
-boundary.
+[arXiv:1812.11160](https://arxiv.org/abs/1812.11160). One universal
+eight-denominator family discovers the complete 108-master L0 basis and
+transports it through a single seven-level FT ladder. The maintained default
+compares component 1 after that shared calculation; `--all` forms the full
+108-component, 257-scalar boundary. Both apply the paper normalization
+`eps^4 Exp[2 eps EulerGamma]` and compare orders 0 through 4.
 
 ```sh
 Scripts/fetch_henn_nonplanar_data.sh
@@ -167,12 +168,13 @@ sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh
 sh Examples/FeynmanTrick/HennDoublePentagonBoundary.sh --all
 ```
 
-The scalar targets split into exact families according to both their active
-denominator support and negative-power numerator pattern. Zero-power lines
-are absent from the scalar identity instead of being introduced and then
-removed through a singular endpoint limit. The three ISP slots are declared
-numerators in every family. The launcher executes a manifest sequentially so
-it needs only one Wolfram license seat at a time. Its exact anchor profile
+The 257 scalar targets are observables, not independent recursion roots. One
+exact L0 reduction, scheduled in resumable sector batches, reduces them onto
+the transported 108-master basis.
+Subsector masters are propagated by the recursion's typed integration,
+endpoint-limit, and direct cases. Only the three genuine ISP slots are
+declared numerators. The launcher executes one manifest run and needs only one
+Wolfram license seat. Its exact anchor profile
 `{1/5,3/10,2/5,1/2,3/5,7/10,4/5}` avoids diagonal singular starts while
 leaving every endpoint contour on the real unit interval.
 

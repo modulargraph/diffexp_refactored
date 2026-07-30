@@ -11,9 +11,10 @@
    linear combinations are formed. The paper's final normalization is
    eps^4 Exp[2 eps EulerGamma].
 
-   The maintained default computes canonical component 1, which exercises a
-   genuine four-level two-loop Feynman-trick ladder and is compared through
-   epsilon^4.  --all requests the complete 108-component reconstruction.
+   One seven-level two-loop Feynman-trick ladder transports the complete
+   108-master L0 basis.  The selected canonical component or all 108
+   components are then reconstructed by one exact L0 FIRE reduction and
+   compared through epsilon^4.
 
    Usage:
 
@@ -204,68 +205,49 @@ familyDefinition = <|
   "Dimension" -> 4 - 2 FeynmanTrick`FTeps
 |>;
 
-(* D1,...,D8 are physical propagators in the top sector, but a negative
-   power of an absent line acts as an irreducible numerator in a subsector.
-   A zero-power line must not be introduced into the Feynman-trick ladder and
-   later removed through a singular endpoint limit: its beta exponent is
-   exactly zero, so it is absent from the scalar identity.  Group the scalar
-   terms by both numerator pattern and positive denominator support.  Each
-   exact family request then merges precisely the lines occurring in its
-   targets. *)
-negativeDenominatorPositions[index_List] :=
-  Flatten@Position[Take[index, 8], _?(# < 0 &)];
-activeDenominatorPositions[index_List] :=
-  Flatten@Position[Take[index, 8], _?(# > 0 &)];
-groupPatterns = DeleteDuplicates[
-  (<|
-      "NumeratorPattern" -> negativeDenominatorPositions[#],
-      "ActiveDenominators" -> activeDenominatorPositions[#]
-    |> &) /@ scalarTargets
-];
-targetGroups = Map[
-  Function[pattern, Join[pattern, <|
-    "Targets" -> Select[
-      scalarTargets,
-      negativeDenominatorPositions[#] === pattern["NumeratorPattern"] &&
-        activeDenominatorPositions[#] ===
-          pattern["ActiveDenominators"] &]
-  |>]],
-  groupPatterns
-];
-
-familyForGroup[group_Association] := Module[
-  {pattern, activeDenominators, anchor, suffix},
-  pattern = group["NumeratorPattern"];
-  activeDenominators = group["ActiveDenominators"];
-  anchor = First[activeDenominators];
-  suffix = If[pattern === {}, "none",
-    StringRiffle[ToString /@ pattern, "_"]];
-  Join[familyDefinition, <|
-    "Name" -> "henn_double_pentagon_x0_n" <> suffix <> "_s" <>
-      StringRiffle[ToString /@ activeDenominators, "_"],
-    "EliminatedPositions" ->
-      Complement[Range[8], Join[activeDenominators, pattern]],
-    "NumeratorPositions" -> Join[pattern, {9, 10, 11}],
-    "CombinationSequence" ->
-      ({anchor, #} & /@ Rest[activeDenominators])
-  |>]
-];
+(* One complete denominator family owns every subsector.  The Feynman-trick
+   recursion transports the complete FIRE master vector at each level; it
+   must not be repeated for every scalar term in the canonical definitions.
+   D9,D10,D11 are the genuine irreducible-numerator slots.  Negative powers
+   of D1,...,D8 are ordinary subsector numerators and are reduced onto the L0
+   master basis after that basis has been discovered. *)
+universalFamily = Join[familyDefinition, <|
+  "Name" -> "henn_double_pentagon_x0",
+  "EliminatedPositions" -> {},
+  "NumeratorPositions" -> {9, 10, 11},
+  "CombinationSequence" -> ({1, #} & /@ Range[2, 8])
+|>];
 
 workingPrecision = positiveIntegerEnvironment[
   "HENN_FT_WORKING_PRECISION", 80];
 (* The maintained paper comparison is an eight-digit gate.  The runner
-   independently propagates guarded producer accuracy through each
-   support-specific ladder and caches the exact per-level profile learned for
+   independently propagates guarded producer accuracy through the shared
+   master-basis ladder and caches the exact per-level profile learned for
    that request. *)
 matchingDigits = positiveIntegerEnvironment["HENN_FT_MATCH_DIGITS", 8];
 matchingCertificationDigits = positiveIntegerEnvironment[
   "HENN_FT_MATCHING_CERTIFICATION_DIGITS", 6];
 expansionOrder = positiveIntegerEnvironment[
   "HENN_FT_EXPANSION_ORDER", 25];
+masterEpsilonOrder = positiveIntegerEnvironment[
+  "HENN_FT_MASTER_EPSILON_ORDER", 8];
 boundaryExtraOrder = positiveIntegerEnvironment[
   "HENN_FT_BOUNDARY_EXTRA_ORDER", 4];
 divisionOrder = positiveIntegerEnvironment[
   "HENN_FT_DIVISION_ORDER", 5];
+fireTimeoutSeconds = positiveIntegerEnvironment[
+  "HENN_FT_FIRE_TIMEOUT_SECONDS", 1800];
+l0ReductionBatchSize = positiveIntegerEnvironment[
+  "HENN_FT_L0_REDUCTION_BATCH_SIZE", 4];
+l0FireThreads = positiveIntegerEnvironment[
+  "HENN_FT_L0_FIRE_THREADS", Min[8, Max[1, $ProcessorCount]]];
+l0FireBackend = environmentOrDefault[
+  "HENN_FT_L0_FIRE_BACKEND", "Classical"];
+If[!MemberQ[{"Classical", "Modular"}, l0FireBackend],
+  Print["HENN_FT_L0_FIRE_BACKEND must be Classical or Modular; received ",
+    InputForm[l0FireBackend]];
+  Exit[2]
+];
 fixedParameterValues = {
   1/5, 3/10, 2/5, 1/2, 3/5, 7/10, 4/5};
 cppThreads = positiveIntegerEnvironment[
@@ -284,9 +266,9 @@ checkpointRoot = ExpandFileName[environmentOrDefault[
 firePath = environmentOrDefault["FT_FIRE_PATH", ""];
 wolframScript = environmentOrDefault["HENN_FT_WOLFRAMSCRIPT", ""];
 
-pipelineOptionsForGroup[group_Association] := Module[
+pipelineOptions[] := Module[
   {levelCount, levelDeltaPrescriptionSigns},
-  levelCount = Length[group["ActiveDenominators"]] - 1;
+  levelCount = Length[universalFamily["CombinationSequence"]];
   levelDeltaPrescriptionSigns = Join[
     If[levelCount >= 1, {1}, {}],
     ConstantArray[-1, Max[0, levelCount - 1]]];
@@ -294,7 +276,11 @@ pipelineOptionsForGroup[group_Association] := Module[
   "WorkingPrecision" -> workingPrecision,
   "MatchingDigits" -> matchingDigits,
   "ExpansionOrder" -> expansionOrder,
-  "EpsilonOrder" -> 0,
+  (* L0 scalar observables are reconstructed from exact FIRE reductions after
+     the single master-basis ladder.  Retain positive master orders so poles
+     in those reduction coefficients cannot consume the requested raw
+     epsilon^0 target coefficient. *)
+  "EpsilonOrder" -> masterEpsilonOrder,
   "BoundaryExtraOrder" -> boundaryExtraOrder,
   (* Public halos request additional published coefficients.  This boundary
      needs only epsilon^0 after its known two-loop pole normalization; native
@@ -325,12 +311,7 @@ pipelineOptionsForGroup[group_Association] := Module[
   "PreparedCacheDirectory" -> FileNameJoin[{cacheRoot, "fire"}],
   "CheckpointDirectory" ->
     FileNameJoin[{checkpointRoot,
-      "henn-double-pentagon-x0-" <> selectionSlug <> "-n" <>
-        If[group["NumeratorPattern"] === {}, "none",
-          StringRiffle[
-            ToString /@ group["NumeratorPattern"], "_"]] <> "-s" <>
-        StringRiffle[
-          ToString /@ group["ActiveDenominators"], "_"]}],
+      "henn-double-pentagon-x0-master-basis"}],
   (* Full Acb state propagation and endpoint publication remain at eight
      digits.  The measured level-3 chart-to-chart consistency diagnostic has
      a stable 1.7*10^-7 midpoint floor, so only that internal diagnostic is
@@ -345,45 +326,35 @@ pipelineOptionsForGroup[group_Association] := Module[
   }
 ];
 
-plans = Map[
-  Function[group,
-    Module[{options = pipelineOptionsForGroup[group]},
-      If[firePath =!= "",
-        options = Append[options, "FIREPath" -> firePath]];
-      If[wolframScript =!= "",
-        options = Append[options, "WolframScript" -> wolframScript]];
-      FeynmanTrick`PipelinePlan[
-        familyForGroup[group], group["Targets"],
-        Sequence @@ options]
-    ]
-  ],
-  targetGroups
-];
-If[AnyTrue[plans, FailureQ],
+pipelineOptionList = pipelineOptions[];
+If[firePath =!= "",
+  pipelineOptionList = Append[pipelineOptionList, "FIREPath" -> firePath]];
+If[wolframScript =!= "",
+  pipelineOptionList =
+    Append[pipelineOptionList, "WolframScript" -> wolframScript]];
+plan = FeynmanTrick`PipelinePlan[
+  universalFamily, All, Sequence @@ pipelineOptionList];
+If[FailureQ[plan],
   Print["Could not construct Henn double-pentagon FT plan: ",
-    InputForm[Select[plans, FailureQ]]];
+    InputForm[plan]];
   Exit[2]
 ];
+plans = {plan};
 
 Print["HENN_FT_BOUNDARY components=", Length[componentSelection],
   " scalarTargets=", Length[scalarTargets],
   " numeratorTargets=", Count[scalarTargets, _?(Min[#] < 0 &)],
-  " familyGroups=", Length[targetGroups],
+  " familyGroups=1",
+  " masterSelection=All",
   " prescriptionSign=", deltaPrescriptionSign];
 
 If[planOnly,
-  MapThread[
-    Function[{group, groupPlan},
-      Print["HENN_FT_PLAN numeratorPattern=",
-        group["NumeratorPattern"],
-        " activeDenominators=", group["ActiveDenominators"],
-        " targets=", Length[group["Targets"]]];
-      Print[InputForm[KeyTake[groupPlan, {
-        "FamilyName", "FamilyID", "RequestID", "Settings",
-        "PreparedCacheDirectory", "CheckpointDirectory"}]]]
-    ],
-    {targetGroups, plans}
-  ];
+  Print["HENN_FT_PLAN universalDenominators=", Range[8],
+    " scalarObservables=", Length[scalarTargets],
+    " recursionLevels=", Length[universalFamily["CombinationSequence"]]];
+  Print[InputForm[KeyTake[plan, {
+    "FamilyName", "FamilyID", "RequestID", "OutputRequests", "Settings",
+    "PreparedCacheDirectory", "CheckpointDirectory"}]]];
   Exit[0]
 ];
 
@@ -411,8 +382,7 @@ If[executionMode === "WriteManifest",
         "Environment" -> groupPlan["Environment"],
         "LogFile" -> FileNameJoin[{manifestDirectory,
           "henn-ft-run-" <> ToString[First[ordinal]] <> ".log"}],
-        "ExpectedMasters" ->
-          Lookup[groupPlan["OutputRequests"], "IndexVector"]
+        "OutputMode" -> groupPlan["Request", "OutputMode"]
       |>
     ],
     plans
@@ -439,7 +409,8 @@ If[executionMode === "CompareManifest",
   parsedOutputs = Map[
     Function[run,
       Module[{logFile, lines, stepwiseLines, finalLines, stepwiseRows,
-          finalRows, rows, expected},
+          finalRows, resolutionLines, resolutionRows, resolution,
+          rows, expected},
         logFile = Lookup[run, "LogFile", ""];
         If[!FileExistsQ[logFile],
           Print["Missing Henn FT runner log: ", logFile];
@@ -449,6 +420,8 @@ If[executionMode === "CompareManifest",
         stepwiseLines = Select[
           lines, StringStartsQ[#, "STEPWISE "] &];
         finalLines = Select[lines, StringStartsQ[#, "FINAL "] &];
+        resolutionLines = Select[
+          lines, StringStartsQ[#, "OUTPUT_RESOLUTION "] &];
         stepwiseRows = Quiet@Check[
           ImportString[StringDrop[#, StringLength["STEPWISE "]],
             "RawJSON"] & /@ stepwiseLines,
@@ -459,12 +432,25 @@ If[executionMode === "CompareManifest",
             "RawJSON"] & /@ finalLines,
           $Failed
         ];
+        resolutionRows = Quiet@Check[
+          ImportString[
+            StringDrop[#, StringLength["OUTPUT_RESOLUTION "]],
+            "RawJSON"] & /@ resolutionLines,
+          $Failed
+        ];
         rows = If[ListQ[stepwiseRows],
           Select[stepwiseRows, Lookup[#, "Level", None] === 0 &],
           $Failed
         ];
-        expected = Lookup[run, "ExpectedMasters", {}];
-        If[rows === $Failed || finalRows === $Failed ||
+        If[!ListQ[resolutionRows] || Length[resolutionRows] =!= 1,
+          Print["Missing or ambiguous Henn FT All-master resolution: ",
+            logFile];
+          Exit[1]
+        ];
+        resolution = First[resolutionRows];
+        expected = Lookup[resolution, "Masters", $Failed];
+        If[!ListQ[expected] || expected === {} ||
+            rows === $Failed || finalRows === $Failed ||
             Length[rows] =!= Length[expected] ||
             Length[finalRows] =!= Length[expected] ||
             Lookup[rows, "Master"] =!= expected ||
@@ -500,17 +486,275 @@ outputSeries[row_Association, variable_] := Total[
   (#[[2]] // jsonNumber) variable^#[[1]] & /@ row["Coefficients"]];
 targetKey[index_List] := ToString[index, InputForm];
 
-rawSeries = AssociationThread[
+masterIntegrals = Lookup[allOutputs, "Master", $Failed];
+If[!ListQ[masterIntegrals] || masterIntegrals === {} ||
+    !DuplicateFreeQ[masterIntegrals],
+  Print["FT result did not publish a unique nonempty L0 master basis"];
+  Exit[1]
+];
+masterSeries = AssociationThread[
   targetKey /@ Lookup[allOutputs, "Master"],
   outputSeries[#, Global`hennEps] & /@ allOutputs
 ];
 
-missingOutputs = Select[
-  scalarTargets, !KeyExistsQ[rawSeries, targetKey[#]] &];
-If[missingOutputs =!= {},
-  Print["FT result omitted requested Henn scalar integrals: ",
-    missingOutputs];
+(* Reduce all canonical scalar terms onto the one transported L0 master
+   basis.  This is one sector-scheduled exact FIRE reduction, not another
+   Feynman-trick ladder. *)
+prepareScalarReductions[masters_List] := Module[
+  {family, topology, setupTopology, detailed, reductions, reportedMasters,
+   coefficientRows, residuals, reductionDirectory, cacheDirectory,
+   targetBatches, support, complexity, batchContract, batchKey, batchFile,
+   batchPayload, batchResults, loadBatch, saveBatch, validBatchQ},
+  family = FeynmanTrick`CreateFamily[universalFamily, All];
+  If[!AssociationQ[family],
+    Return[Failure["HennL0Reduction", <|
+      "Detail" -> "could not canonicalize the universal Henn family"|>],
+      Module]
+  ];
+  topology = family["Topology"];
+  topology["Name"] = "henn_double_pentagon_x0_l0_observables_" <>
+    ToLowerCase[l0FireBackend];
+  reductionDirectory = FileNameJoin[{
+    cacheRoot, "fire", "henn-double-pentagon-x0-l0-observables-" <>
+      ToLowerCase[l0FireBackend]}];
+  cacheDirectory = FileNameJoin[{
+    cacheRoot, "fire", "henn-double-pentagon-x0-l0-reductions"}];
+  FeynmanTrick`SetFTOption[
+    "DimensionExpression", universalFamily["Dimension"]];
+  FeynmanTrick`SetFTOption["WorkDirectory", reductionDirectory];
+  FeynmanTrick`SetFTOption["FIRETimeoutSeconds", fireTimeoutSeconds];
+  FeynmanTrick`SetFTOption["FIREBackend", l0FireBackend];
+  FeynmanTrick`SetFTOption["Threads", l0FireThreads];
+  FeynmanTrick`SetFTOption["FThreads", l0FireThreads];
+  If[firePath =!= "",
+    FeynmanTrick`SetFTOption["FIREPath", firePath]];
+  setupTopology =
+    FeynmanTrick`FIREInterface`SetupFIRE[topology, reductionDirectory];
+  If[!AssociationQ[setupTopology],
+    Return[Failure["HennL0Reduction", <|
+      "Detail" -> "FIRE setup failed for the universal L0 family"|>],
+      Module]
+  ];
+  If[setupTopology["NumPropagators"] =!= Length[First[scalarTargets]] ||
+      setupTopology["NumeratorPositions"] =!= {9, 10, 11},
+    Return[Failure["HennL0Reduction", <|
+      "Detail" ->
+        "FIRE changed the Henn L0 arity or irreducible-numerator contract",
+      "NumPropagators" -> setupTopology["NumPropagators"],
+      "NumeratorPositions" -> setupTopology["NumeratorPositions"]|>],
+      Module]
+  ];
+  (* Pin the exact basis already discovered and numerically transported by
+     the single ladder.  Otherwise FIRE starts a fresh master-selection
+     problem for each observable batch. *)
+  setupTopology["Masters"] = masters;
+  If[!DirectoryQ[cacheDirectory],
+    CreateDirectory[cacheDirectory, CreateIntermediateDirectories -> True]];
+  support[index_List] :=
+    Flatten@Position[Take[index, 8], _?(# > 0 &)];
+  complexity[index_List] := Total[Abs[Min[index, 0]]];
+  (* One monolithic 257-target modular reconstruction exceeded both the disk
+     and time guards.  Keep the exact FIRE scheduling resumable by L0 sector.
+     Lower sectors use small batches, but all top-sector numerators must share
+     one invocation: splitting them would repeat the same expensive descent
+     through every lower sector for each observable. *)
+  targetBatches = Flatten[
+    (Partition[
+        SortBy[#, complexity],
+        UpTo[If[Length[support[First[#]]] === 8,
+          Length[#], l0ReductionBatchSize]]] &) /@
+      SortBy[GatherBy[scalarTargets, support],
+        {Max[complexity /@ #] &, Length}],
+    1
+  ];
+  validBatchQ[payload_, contract_] :=
+    AssociationQ[payload] &&
+      Lookup[payload, "Schema", None] ===
+        "DiffExp2.HennL0ReductionBatch/v1" &&
+      Lookup[payload, "Contract", None] === contract &&
+      AssociationQ[Lookup[payload, "Reductions", None]] &&
+      Sort[Keys[payload["Reductions"]]] ===
+        Sort[contract["Targets"]] &&
+      ListQ[Lookup[payload, "Masters", None]] &&
+      Complement[payload["Masters"], masters] === {};
+  loadBatch[file_, contract_] := Module[{payload},
+    If[!FileExistsQ[file], Return[$Failed, Module]];
+    payload = Quiet@Check[Import[file, "WXF"], $Failed];
+    If[validBatchQ[payload, contract], payload, $Failed]
+  ];
+  saveBatch[file_, payload_, contract_] := Module[
+    {temporary, written, reloaded},
+    If[!validBatchQ[payload, contract], Return[$Failed, Module]];
+    temporary = file <> ".tmp-" <> ToString[$ProcessID];
+    If[FileExistsQ[temporary], Quiet[DeleteFile[temporary]]];
+    written = Quiet@Check[Export[temporary, payload, "WXF"], $Failed];
+    If[written === $Failed || !FileExistsQ[temporary],
+      Return[$Failed, Module]];
+    reloaded = Quiet@Check[Import[temporary, "WXF"], $Failed];
+    If[!validBatchQ[reloaded, contract],
+      Quiet[DeleteFile[temporary]];
+      Return[$Failed, Module]
+    ];
+    If[!Quiet@Check[
+        RenameFile[temporary, file, OverwriteTarget -> True]; True, False],
+      If[FileExistsQ[temporary], Quiet[DeleteFile[temporary]]];
+      Return[$Failed, Module]
+    ];
+    file
+  ];
+  batchResults = Catch[
+    MapIndexed[
+      Function[{targets, ordinal},
+      batchContract = <|
+        "Schema" -> "DiffExp2.HennL0ReductionBatchContract/v1",
+        "FamilyID" -> family["FamilyID"],
+        "SetupFingerprintRecord" -> setupTopology["SetupFingerprintRecord"],
+        "Backend" -> l0FireBackend,
+        "TransportedMasters" -> masters,
+        "Targets" -> targets|>;
+      batchKey = IntegerString[Hash[batchContract, "SHA256"], 16, 64];
+      batchFile = FileNameJoin[{cacheDirectory,
+        "batch-" <> batchKey <> ".wxf"}];
+      batchPayload = loadBatch[batchFile, batchContract];
+      If[AssociationQ[batchPayload],
+        Print["HENN_FT_L0_REDUCTION CACHE HIT batch=", First[ordinal],
+          "/", Length[targetBatches], " targets=", Length[targets]],
+        Print["HENN_FT_L0_REDUCTION CACHE MISS batch=", First[ordinal],
+          "/", Length[targetBatches], " targets=", Length[targets],
+          " support=", support[First[targets]]];
+        detailed = FeynmanTrick`FIREInterface`ReduceIntegralsDetailed[
+          setupTopology, targets];
+        If[!AssociationQ[detailed],
+          Throw[Failure["HennL0Reduction", <|
+            "Detail" -> "FIRE failed to reduce an L0 observable batch",
+            "Batch" -> First[ordinal], "Targets" -> targets|>],
+            "HennL0ReductionAbort"]
+        ];
+        batchPayload = <|
+          "Schema" -> "DiffExp2.HennL0ReductionBatch/v1",
+          "Contract" -> batchContract,
+          "Reductions" -> detailed["Reductions"],
+          "Masters" -> DeleteDuplicates[detailed["Masters"]]|>;
+        If[saveBatch[batchFile, batchPayload, batchContract] === $Failed,
+          Throw[Failure["HennL0Reduction", <|
+            "Detail" -> "could not publish an exact L0 reduction batch",
+            "Batch" -> First[ordinal], "File" -> batchFile|>],
+            "HennL0ReductionAbort"]
+        ]
+      ];
+      batchPayload
+      ],
+      targetBatches
+    ],
+    "HennL0ReductionAbort"
+  ];
+  If[FailureQ[batchResults], Return[batchResults, Module]];
+  reductions = Join @@ Lookup[batchResults, "Reductions"];
+  reportedMasters =
+    DeleteDuplicates[Join @@ Lookup[batchResults, "Masters"]];
+  If[Sort[Keys[reductions]] =!= Sort[scalarTargets],
+    Return[Failure["HennL0Reduction", <|
+      "Detail" -> "batched L0 reductions did not cover every scalar target",
+      "MissingTargets" -> Complement[scalarTargets, Keys[reductions]]|>],
+      Module]
+  ];
+  If[Complement[reportedMasters, masters] =!= {},
+    Return[Failure["HennL0Reduction", <|
+      "Detail" ->
+        "observable reduction reported a master outside the transported basis",
+      "UnexpectedMasters" -> Complement[reportedMasters, masters]|>],
+      Module]
+  ];
+  coefficientRows = AssociationMap[
+    Function[target,
+      Table[
+        Together[Coefficient[
+          reductions[target], Global`G[1, masters[[j]]]]],
+        {j, Length[masters]}]
+    ],
+    scalarTargets
+  ];
+  residuals = AssociationMap[
+    Function[target, Together[
+      reductions[target] -
+        Sum[
+          coefficientRows[target][[j]]*
+            Global`G[1, masters[[j]]],
+          {j, Length[masters]}]
+    ]],
+    scalarTargets
+  ];
+  If[AnyTrue[Values[residuals], !TrueQ[PossibleZeroQ[#]] &],
+    Return[Failure["HennL0Reduction", <|
+      "Detail" ->
+        "observable reduction was not linear in the transported master basis",
+      "Residuals" ->
+        Select[residuals, !TrueQ[PossibleZeroQ[#]] &]|>],
+      Module]
+  ];
+  coefficientRows
+];
+
+reductionCoefficients = prepareScalarReductions[masterIntegrals];
+If[FailureQ[reductionCoefficients],
+  Print["HENN_FT_L0_REDUCTION FAIL ", InputForm[reductionCoefficients]];
   Exit[1]
+];
+
+rationalMinimumPower[coefficient_] := Module[{expanded, minimum},
+  If[TrueQ[PossibleZeroQ[coefficient]], Return[Infinity, Module]];
+  expanded = Quiet@Check[
+    Series[
+      coefficient /.
+        Global`d -> 4 - 2 Global`hennEps /.
+        FeynmanTrick`FTeps -> Global`hennEps,
+      {Global`hennEps, 0, 0}],
+    $Failed
+  ];
+  If[expanded === $Failed, Return[$Failed, Module]];
+  minimum = If[Head[expanded] === SeriesData,
+    expanded[[4]]/expanded[[6]], 0];
+  If[IntegerQ[minimum], minimum, $Failed]
+];
+reductionMinimumPowers =
+  rationalMinimumPower /@ Flatten[Values[reductionCoefficients]];
+If[MemberQ[reductionMinimumPowers, $Failed],
+  Print["Could not determine the epsilon pole depth of the L0 reductions"];
+  Exit[1]
+];
+finiteReductionMinimumPowers =
+  DeleteCases[reductionMinimumPowers, Infinity];
+requiredMasterEpsilonOrder = If[finiteReductionMinimumPowers === {},
+  0, Max[0, -Min[finiteReductionMinimumPowers]]];
+If[requiredMasterEpsilonOrder > masterEpsilonOrder,
+  Print["HENN_FT_MASTER_EPSILON_ORDER=", masterEpsilonOrder,
+    " is insufficient for the exact L0 reduction; rerun with at least ",
+    requiredMasterEpsilonOrder];
+  Exit[1]
+];
+Print["HENN_FT_L0_REDUCTION masters=", Length[masterIntegrals],
+  " observables=", Length[scalarTargets],
+  " requiredMasterEpsilonOrder=", requiredMasterEpsilonOrder];
+
+epsilonReductionCoefficients = AssociationMap[
+  Function[row,
+    Together[# /. Global`d -> 4 - 2 Global`hennEps /.
+        FeynmanTrick`FTeps -> Global`hennEps] & /@ row],
+  reductionCoefficients
+];
+rawSeries = AssociationThread[
+  targetKey /@ scalarTargets,
+  Map[
+    Function[target,
+      Series[
+        Sum[
+          epsilonReductionCoefficients[target][[j]]*
+            masterSeries[targetKey[masterIntegrals[[j]]]],
+          {j, Length[masterIntegrals]}],
+        {Global`hennEps, 0, 0}]
+    ],
+    scalarTargets
+  ]
 ];
 
 rawRule = Global`XB[a__] :> Module[{index = {a}},
@@ -524,7 +768,7 @@ computedSeries = Map[
   canonicalRaw
 ];
 computedBoundary = Table[
-  SeriesCoefficient[series, order],
+  Coefficient[Normal[series], Global`hennEps, order],
   {series, computedSeries}, {order, 0, 4}
 ];
 seriesMinimumPower[series_SeriesData] := series[[4]]/series[[6]];

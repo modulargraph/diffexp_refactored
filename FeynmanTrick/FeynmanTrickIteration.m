@@ -342,6 +342,7 @@ Module[{setupTopo, masters = {}, detailed, decomp, shiftedIntegrals,
   If[masters === {},
     masters = paddedSeedMasters;
   ];
+  setupTopo["Masters"] = masters;
 
   decomp = FeynmanTrick`PropagatorAlgebra`FeynmanTrickDecomposition[
     setupTopo["NumPropagators"], combinedPositions[[1]],
@@ -361,6 +362,7 @@ Module[{setupTopo, masters = {}, detailed, decomp, shiftedIntegrals,
     If[newMasters === {}, Break[]];
 
     masters = DeleteDuplicates[Join[masters, newMasters]];
+    setupTopo["Masters"] = masters;
     iter++;
   ];
 

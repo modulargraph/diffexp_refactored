@@ -52,6 +52,8 @@ CreateFamily::eliminated =
   "EliminatedPositions `1` must be a duplicate-free list of integer positions between 1 and `2`.";
 CreateFamily::numerators =
   "NumeratorPositions `1` must be a duplicate-free list of integer positions between 1 and `2`, disjoint from EliminatedPositions.";
+CreateFamily::probes =
+  "BasisProbeIntegrals `1` must be one exact integer index vector or a nonempty list of such vectors compatible with this family's eliminated and numerator positions.";
 CreateFamily::sequence =
   "CombinationSequence `1` must be Automatic or a list of distinct active-position pairs.";
 CreateFamily::pair =
@@ -96,6 +98,7 @@ requiredFamilyKeys = {
 
 mathematicalOptionalKeys = {
   "NumeratorPositions",
+  "BasisProbeIntegrals",
   "AnalyticPrescription", "Prescriptions", "KinematicAssumptions"
 };
 
@@ -360,7 +363,7 @@ familyDefinition[source_Association, dimension_, numericalPoint_List,
 
 validateFamilySource[source_Association] := Module[
   {missing, loops, externals, propagators, replacements, n, key,
-   eliminatedPositions, numeratorPositions},
+   eliminatedPositions, numeratorPositions, basisProbeIntegrals},
   missing = Select[requiredFamilyKeys, !KeyExistsQ[source, #] &];
   If[missing =!= {},
     Message[CreateFamily::missing, missing];
@@ -435,10 +438,34 @@ validateFamilySource[source_Association] := Module[
     Message[CreateFamily::numerators, numeratorPositions, n];
     Return[$Failed, Module]
   ];
+  basisProbeIntegrals = If[KeyExistsQ[source, "BasisProbeIntegrals"],
+    If[source["BasisProbeIntegrals"] === Automatic ||
+        source["BasisProbeIntegrals"] === All ||
+        source["BasisProbeIntegrals"] === {},
+      Message[CreateFamily::probes, source["BasisProbeIntegrals"]];
+      Return[$Failed, Module]
+    ];
+    Quiet[
+      NormalizeOutputIntegrals[
+        source["BasisProbeIntegrals"], n, eliminatedPositions,
+        numeratorPositions],
+      NormalizeOutputIntegrals::shape
+    ],
+    Missing["Absent"]
+  ];
+  If[basisProbeIntegrals === $Failed ||
+      basisProbeIntegrals === All,
+    Message[CreateFamily::probes,
+      Lookup[source, "BasisProbeIntegrals", Missing["Absent"]]];
+    Return[$Failed, Module]
+  ];
+  If[ListQ[basisProbeIntegrals],
+    basisProbeIntegrals = DeleteDuplicates[basisProbeIntegrals]];
   <|
     "NumPropagators" -> n,
     "EliminatedPositions" -> Sort[eliminatedPositions],
-    "NumeratorPositions" -> Sort[numeratorPositions]
+    "NumeratorPositions" -> Sort[numeratorPositions],
+    "BasisProbeIntegrals" -> basisProbeIntegrals
   |>
 ];
 
@@ -490,7 +517,8 @@ allRequestRecord[familyID_String] := Module[{identity},
 createFamily[input_Association, positionalTargets_, nameOption_,
     sequenceOption_, outputOption_] := Module[
   {source, inputKind, validated, n, eliminatedPositions, numeratorPositions,
-   numericalPoint, dimensionSpec, dimension, definition, familyID, name,
+   basisProbeIntegrals, numericalPoint, dimensionSpec, dimension, definition,
+   familyID, name,
    sequenceSpec,
    sequence, outputSpec, normalizedTargets, topology, requests,
    outputSource},
@@ -507,6 +535,11 @@ createFamily[input_Association, positionalTargets_, nameOption_,
   n = validated["NumPropagators"];
   eliminatedPositions = validated["EliminatedPositions"];
   numeratorPositions = validated["NumeratorPositions"];
+  basisProbeIntegrals = validated["BasisProbeIntegrals"];
+  source = If[ListQ[basisProbeIntegrals],
+    Join[source, <|"BasisProbeIntegrals" -> basisProbeIntegrals|>],
+    KeyDrop[source, "BasisProbeIntegrals"]
+  ];
 
   numericalPoint = Lookup[source, "NumericalPoint", {}];
   If[!validNumericalPointRuleListQ[numericalPoint],

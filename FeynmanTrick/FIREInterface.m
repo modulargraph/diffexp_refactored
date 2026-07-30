@@ -143,7 +143,8 @@ Module[{nP, eliminated, numerators, inactive, active},
    complexity shell while keeping numerator growth linear (rather than
    enumerating 2^n spurious positive-numerator sectors). *)
 basisSeedIntegrals[topology_Association] := Module[
-  {corners, nP, eliminated, numerators, denominatorPositions},
+  {corners, nP, eliminated, numerators, denominatorPositions,
+   automaticSeeds, explicitProbes},
   corners = basisSectors[topology];
   If[corners === {}, Return[{}, Module]];
   nP = topology["NumPropagators"];
@@ -152,13 +153,29 @@ basisSeedIntegrals[topology_Association] := Module[
     Select[Lookup[topology, "NumeratorPositions", {}],
       IntegerQ[#] && 1 <= # <= nP &], eliminated];
   denominatorPositions = Complement[Range[nP], Join[eliminated, numerators]];
-  DeleteDuplicates[Flatten[Map[Function[corner,
+  automaticSeeds = Flatten[Map[Function[corner,
     Join[
       {corner},
       (ReplacePart[corner, # -> 2] & /@
         Select[denominatorPositions, corner[[#]] === 1 &]),
       (ReplacePart[corner, # -> -1] & /@ numerators)
-    ]], corners], 1]]
+    ]], corners], 1];
+  (* Some observable spans expose masters beyond FIRE's corner and first-shell
+     scan (for example a rank-two dot).  Canonical FamilySpec inputs may bind
+     exact observable probes to the family identity, so discovery is complete
+     for that declared span without globally expanding every family's shell. *)
+  explicitProbes = Select[
+    Lookup[topology, "BasisProbeIntegrals", {}],
+    Function[probe,
+      ListQ[probe] && Length[probe] === nP &&
+        AllTrue[probe, IntegerQ] &&
+        AllTrue[eliminated,
+          Function[position, probe[[position]] === 0]] &&
+        AllTrue[numerators,
+          Function[position, probe[[position]] <= 0]]
+    ]
+  ];
+  DeleteDuplicates[Join[automaticSeeds, explicitProbes]]
 ];
 
 coefficientMatrixForPropagators[props_List, squares_List] :=

@@ -160,6 +160,12 @@ selectionSlug = If[
   "c" <> StringRiffle[ToString /@ componentSelection, "_"]];
 scalarTargets = DeleteDuplicates[
   Cases[selectedBasis, Global`XB[a__] :> {a}, Infinity]];
+(* Basis discovery must span every observable the universal 108-component
+   family promises, independent of a particular --component selection.
+   FIRE's generic corner/first-shell scan misses one rank-two dotted master
+   needed by this span. *)
+basisProbeTargets = DeleteDuplicates[
+  Cases[canonicalBasis, Global`XB[a__] :> {a}, Infinity]];
 
 {k1, k2, p1, p2, p3, p4} =
   {Global`k1, Global`k2, Global`p1, Global`p2, Global`p3, Global`p4};
@@ -215,6 +221,7 @@ universalFamily = Join[familyDefinition, <|
   "Name" -> "henn_double_pentagon_x0",
   "EliminatedPositions" -> {},
   "NumeratorPositions" -> {9, 10, 11},
+  "BasisProbeIntegrals" -> basisProbeTargets,
   "CombinationSequence" -> ({1, #} & /@ Range[2, 8])
 |>];
 
@@ -308,6 +315,7 @@ pipelineOptions[] := Module[
   "BatchEndpointArms" -> True,
   "DeltaPrescriptionSign" -> deltaPrescriptionSign,
   "LevelDeltaPrescriptionSigns" -> levelDeltaPrescriptionSigns,
+  "FIRETimeoutSeconds" -> fireTimeoutSeconds,
   "PreparedCacheDirectory" -> FileNameJoin[{cacheRoot, "fire"}],
   "CheckpointDirectory" ->
     FileNameJoin[{checkpointRoot,
@@ -343,6 +351,7 @@ plans = {plan};
 
 Print["HENN_FT_BOUNDARY components=", Length[componentSelection],
   " scalarTargets=", Length[scalarTargets],
+  " basisProbes=", Length[basisProbeTargets],
   " numeratorTargets=", Count[scalarTargets, _?(Min[#] < 0 &)],
   " familyGroups=1",
   " masterSelection=All",

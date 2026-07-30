@@ -43,6 +43,7 @@ exactExpressionQ[expr_] := FreeQ[Unevaluated[expr], _Real];
 $familyDefinitionKeys = {
   "LoopMomenta", "ExternalMomenta", "Propagators", "Replacements",
   "NumericalPoint", "Dimension", "EliminatedPositions", "NumeratorPositions",
+  "BasisProbeIntegrals",
   "AnalyticPrescription", "Prescriptions", "KinematicAssumptions"
 };
 

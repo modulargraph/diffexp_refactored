@@ -503,7 +503,12 @@ assert["basis master validation binds each problem's requested index arity",
 sectorTopology = <|
   "NumPropagators" -> 5,
   "EliminatedPositions" -> {2, 2, 0, 99},
-  "NumeratorPositions" -> {4, 4, -1}
+  "NumeratorPositions" -> {4, 4, -1},
+  "BasisProbeIntegrals" -> {
+    {3, 0, 1, -2, 1},
+    {3, 0, 1, -2, 1},
+    {1, 1, 1, 0, 1},
+    {1, 0, 1, 1, 1}}
 |>;
 sectors = FeynmanTrick`FIREInterface`Private`basisSectors[sectorTopology];
 sectorSeeds =
@@ -522,11 +527,12 @@ assert["basis sectors enumerate only active denominator corners",
     AllTrue[sectors, #[[2]] === 0 && #[[4]] === 0 &] &&
     FreeQ[sectors, ConstantArray[0, 5]]];
 assert["basis discovery adds one-dot and one-ISP first-shell probes",
-  Length[sectorSeeds] === 26 && SubsetQ[sectorSeeds, sectors] &&
+  Length[sectorSeeds] === 27 && SubsetQ[sectorSeeds, sectors] &&
     MemberQ[sectorSeeds, {2, 0, 1, 0, 1}] &&
     MemberQ[sectorSeeds, {1, 0, 2, 0, 1}] &&
     MemberQ[sectorSeeds, {1, 0, 1, 0, 2}] &&
     MemberQ[sectorSeeds, {1, 0, 1, -1, 1}] &&
+    MemberQ[sectorSeeds, {3, 0, 1, -2, 1}] &&
     AllTrue[sectorSeeds, #[[2]] === 0 && #[[4]] <= 0 &]];
 assert["basis-sector pruning returns no request when every slot is inactive",
   FeynmanTrick`FIREInterface`Private`basisSectors[<|

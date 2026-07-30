@@ -110,6 +110,32 @@ assert["All remains an explicit deferred discovery request",
   allFamily["L0OutputRequests"][[1, "IndexVector"]] === All &&
   allFamily["L0OutputRequests"][[1, "Resolved"]] === False];
 
+probeRaw = Join[raw, <|
+  "NumeratorPositions" -> {3},
+  "BasisProbeIntegrals" -> {
+    {1, 1, 0}, {1, 1, -1}, {3, 1, 0}, {1, 1, -1}}
+|>];
+probeFamily = FeynmanTrick`CreateFamily[probeRaw, All];
+probeFamilyChanged = FeynmanTrick`CreateFamily[
+  Join[probeRaw, <|"BasisProbeIntegrals" -> {{1, 1, 0}}|>], All];
+badProbeLength = Quiet[FeynmanTrick`CreateFamily[
+  Join[raw, <|"BasisProbeIntegrals" -> {{1, 1}}|>]],
+  {FeynmanTrick`FamilySpec`CreateFamily::probes,
+   FeynmanTrick`FamilySpec`NormalizeOutputIntegrals::length}];
+badProbeNumerator = Quiet[FeynmanTrick`CreateFamily[
+  Join[probeRaw, <|"BasisProbeIntegrals" -> {{1, 1, 1}}|>]],
+  {FeynmanTrick`FamilySpec`CreateFamily::probes,
+   FeynmanTrick`FamilySpec`NormalizeOutputIntegrals::numerator}];
+assert["basis probes are exact canonical family metadata",
+  AssociationQ[probeFamily] &&
+    probeFamily["Definition", "BasisProbeIntegrals"] ===
+      {{1, 1, 0}, {1, 1, -1}, {3, 1, 0}} &&
+    probeFamily["Topology", "BasisProbeIntegrals"] ===
+      probeFamily["Definition", "BasisProbeIntegrals"] &&
+    probeFamily["FamilyID"] =!= probeFamilyChanged["FamilyID"]];
+assert["malformed or incompatible basis probes are rejected",
+  badProbeLength === $Failed && badProbeNumerator === $Failed];
+
 topology = FeynmanTrick`FIREInterface`DefineTopology[
   "existing", raw["LoopMomenta"], raw["ExternalMomenta"],
   raw["Propagators"], raw["Replacements"]];

@@ -1333,7 +1333,7 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
   {systemKey = cs["SystemClearKey"], key, cached, global, x,
    t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
    affineContentInvariantQ, den, denCoeffs, denContent, num, dD, dN,
-   dExpr, NhatExpr, activePairEntries, centerPower,
+   dExpr, NhatExpr, coefficientLists, activePairEntries, centerPower,
    phaseQ, phaseTime, phase},
   key = {systemKey, center, beta, t};
   cached = If[KeyExistsQ[$chartClearedCache, key],
@@ -1406,8 +1406,23 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
   dD = Exponent[den, t];
   dN = Max[0, Max[Exponent[#, t] & /@ Flatten[num]]];
   dExpr = Table[Cancel[Together[Coefficient[den, t, j]]], {j, 0, dD}];
+  (* num is already an entrywise-canonical polynomial matrix from the exact
+     global clearing and affine substitution above.  Asking Coefficient for
+     every {Taylor lag,row,column} independently makes Wolfram re-expand the
+     same polynomial and run thousands of unrelated rational GCDs.  This was
+     the dominant Henn level-3 anchor cost (hours for a 23-by-23 system).
+     Extract every entry once and index its exact coefficient list.  Unlike
+     the spectral legacy path there is no subsequent matrix product here, so
+     the coefficients need no second Together/Cancel canonicalization. *)
+  If[!AllTrue[Flatten[num], PolynomialQ[#, t] &],
+    err["E5", cs, <|
+      "Detail" ->
+        "affine globally cleared numerator is not polynomial in the chart variable"|>]];
+  coefficientLists = Map[CoefficientList[#, t] &, num, {2}];
+  phase["coefficient-lists"];
   NhatExpr = Table[
-    Map[Cancel[Together[#]] &, Map[Coefficient[#, t, j] &, num, {2}], {2}],
+    Map[If[j + 1 <= Length[#], #[[j + 1]], 0] &,
+      coefficientLists, {2}],
     {j, 0, dN}];
   phase["coefficients"];
   cached = <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,

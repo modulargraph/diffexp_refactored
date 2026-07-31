@@ -57,6 +57,9 @@ assert["planner_exact_roots_and_real_subset",
   Length[bananaSings["All"]] === 12 &&
   Length[bananaSings["Real"]] === 4 &&
   FreeQ[bananaSings["All"], _?InexactNumberQ]];
+assert["planner_singularity_atlas_has_bound_reuse_identity",
+  bananaSings["Schema"] === "DiffExp2.SingularityAtlas/v1" &&
+  IntegerQ[bananaSings["SourceIdentity"]]];
 assert["planner_complex_projection_plus_minus_im_parity",
   Length[gotProjected] === Length[refProjected] === 12 &&
   Max[Abs[gotProjected - N[refProjected, 90]]] < 10^-70 &&
@@ -131,6 +134,22 @@ assert["planner_unequal_banana_geometry_regression",
     DiffExp2`Transport`ValidatePlan[bananaPlan], "DiffExp2Error"]]];
 assert["planner_unequal_banana_total_fast",
   planTime < 5];
+bananaAtlasRediscovered = False;
+bananaReusedPlan = Block[{
+    DiffExp2`Transport`FindSingularities = Function[system,
+      bananaAtlasRediscovered = True; $Failed]},
+  DiffExp2`Transport`SegmentLine[
+    bananaSys, {0, 1}, "SingularityAtlas" -> bananaSings]];
+assert["planner_reused_singularity_atlas_preserves_exact_plan",
+  bananaReusedPlan === bananaPlan && !bananaAtlasRediscovered];
+mismatchedAtlasResult = Catch[
+  DiffExp2`Transport`SegmentLine[
+    Append[bananaSys, "ExtraSingularFactors" -> {x - 7}], {0, 1},
+    "SingularityAtlas" -> bananaSings],
+  "DiffExp2Error"];
+assert["planner_rejects_singularity_atlas_from_another_system",
+  FailureQ[mismatchedAtlasResult] &&
+  mismatchedAtlasResult["ID"] === "E2"];
 
 SetEnvironment["DE2_VALUE_TRANSPORT" -> "0"];
 classicPlan = DiffExp2`Transport`SegmentLine[

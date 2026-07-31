@@ -3806,9 +3806,12 @@ ft2DirectBoundaryValue[entry_Association, currentBCs_List,
   out];
 
 (* Overridable seams for the focused definitions-only structural test. *)
-ft2NativeSegmentLine[sys_, path_] :=
+ft2NativeFindSingularities[sys_] :=
+  DiffExp2`Transport`FindSingularities[sys];
+ft2NativeSegmentLine[sys_, path_, singularityAtlas_:Automatic] :=
   DiffExp2`Transport`SegmentLine[
-    sys, path, "ValueTailContract" -> "NativeCertified"];
+    sys, path, "ValueTailContract" -> "NativeCertified",
+    "SingularityAtlas" -> singularityAtlas];
 ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
     integrandRequiredMaxima_, physicalVar_, targetMax_,
     requiredTargetMax_, threads_,
@@ -3899,7 +3902,8 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    integrationHalo = ledger["IntegrationHalo"], directRequiredTop =
      ledger["DeliverableCompleteMax"], provenZeroEntries, activeEntries,
    directEntries, nonDirectEntries, nativeEntries, directValues = <||>,
-   nativeValues = <||>, zeroValues = <||>, transportSystem, lowerPlan,
+   nativeValues = <||>, zeroValues = <||>, transportSystem,
+   singularityAtlas, lowerPlan,
    upperPlan, paddedBoundary, observables, atlas = None, batch = None,
    exported = None, exportedResults = {}, exportedValues,
    cleanupResult = None, result,
@@ -4048,13 +4052,23 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     transportSystem = Join[sys, <|"ExtraSingularFactors" ->
       Select[extraSingularFactors, !FreeQ[#, physicalVar] &]|>];
     If[checkpointMode =!= "Restore",
+      ft2NativeStageTiming["singularity-atlas-start"];
+      singularityAtlas = catch2[
+        ft2NativeFindSingularities[transportSystem]];
+      ft2NativeStageTiming["singularity-atlas-done roots=",
+        If[AssociationQ[singularityAtlas],
+          Length[Lookup[singularityAtlas, "All", {}]], "failure"]];
+      If[FailureQ[singularityAtlas],
+        Return[singularityAtlas, Module]];
       ft2NativeStageTiming["lower-plan-start"];
       lowerPlan = catch2[
-        ft2NativeSegmentLine[transportSystem, {anchor, 0}]];
+        ft2NativeSegmentLine[
+          transportSystem, {anchor, 0}, singularityAtlas]];
       ft2NativeStageTiming["lower-plan-done"];
       ft2NativeStageTiming["upper-plan-start"];
       upperPlan = catch2[
-        ft2NativeSegmentLine[transportSystem, {anchor, 1}]];
+        ft2NativeSegmentLine[
+          transportSystem, {anchor, 1}, singularityAtlas]];
       ft2NativeStageTiming["upper-plan-done"];
       If[FailureQ[lowerPlan] || FailureQ[upperPlan],
         Return[First[Select[{lowerPlan, upperPlan}, FailureQ]], Module]];
@@ -4706,7 +4720,8 @@ runExample[name_String, familyRequest_:None,
      levelEpsilonGauge,
      needInt, needLo, needHi,
      transportCheckpointFile, saveTransportProgress, completedArms,
-     transportSys = None, planLo = None, planHi = None, armReq,
+     transportSys = None, singularityAtlas = None,
+     planLo = None, planHi = None, armReq,
      loPlanCharts, hiPlanCharts, armRounds, armBatchResult,
      armUniqueCharts, armCacheCapacity, levelIBPBatch, rawExtraFacs,
      epsilonBasis, epsilonBasisRecord, nativeEntries = None,
@@ -5117,10 +5132,17 @@ runExample[name_String, familyRequest_:None,
         !AssociationQ[trHiCache],
       transportSys = Join[sys, <|"ExtraSingularFactors" ->
         Select[extraFacs, !FreeQ[#, var] &]|>];
+      singularityAtlas = catch2[
+        DiffExp2`Transport`FindSingularities[transportSys]];
+      If[FailureQ[singularityAtlas],
+        Print["TRANSPORT SINGULARITY ATLAS FAIL ", singularityAtlas];
+        Throw[$Failed, "FT2Abort"]];
       planLo = catch2[DiffExp2`Transport`SegmentLine[
-        transportSys, {anchor, 0}]];
+        transportSys, {anchor, 0},
+        "SingularityAtlas" -> singularityAtlas]];
       planHi = catch2[DiffExp2`Transport`SegmentLine[
-        transportSys, {anchor, 1}]];
+        transportSys, {anchor, 1},
+        "SingularityAtlas" -> singularityAtlas]];
       If[FailureQ[planLo] || FailureQ[planHi],
         Print["TRANSPORT PLAN FAIL ", {planLo, planHi}];
         Throw[$Failed, "FT2Abort"]];

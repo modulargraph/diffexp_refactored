@@ -175,21 +175,31 @@ lineIntegralDispatchDecision[sys_Association, cvec_List, from_, {lo_, hi_},
     !AllTrue[cvec, nativeExactRationalFunctionQ[#, sys["Variable"]] &],
       legacy["IntegrandOutsideExactRationalNativeProtocol"],
     True,
-      lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
-      upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}];
+      {lower, upper} = pairedLinePlans[sys, from, {lo, hi}];
       If[TrueQ[
           DiffExp2`NativeTransport`NativeRegularIndependentArmPlansSupportedQ[
             lower, upper]],
         <|"Mode" -> "PersistentNative", "LowerPlan" -> lower,
           "UpperPlan" -> upper|>,
-        legacy["ArmPlansOutsideRegularRationalNativeProtocol"]]]];
+        Join[legacy["ArmPlansOutsideRegularRationalNativeProtocol"],
+          <|"LowerPlan" -> lower, "UpperPlan" -> upper|>]]]];
+
+pairedLinePlans[sys_Association, from_, {lo_, hi_}] := Module[
+  {singularityAtlas},
+  singularityAtlas = DiffExp2`Transport`FindSingularities[sys];
+  {
+    DiffExp2`Transport`SegmentLine[sys, {from, lo},
+      "SingularityAtlas" -> singularityAtlas],
+    DiffExp2`Transport`SegmentLine[sys, {from, hi},
+      "SingularityAtlas" -> singularityAtlas]
+  }];
 
 Options[LineIntegral] = {"ExtraSingularFactors" -> {},
   "PrecomputedCharts" -> None};
 LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
     OptionsPattern[]] := Module[
   {sys2, var = sys["Variable"], res, tiles, total = None,
-   planLo, planHi, keptAll, dispatch, native},
+   planLo, planHi, keptAll, dispatch, native, singularityAtlas},
   If[Length[cvec] =!= Length[sys["Matrix"]],
     err["E9", <|"Detail" -> "line-integral coefficient vector has the wrong dimension",
       "Coefficients" -> Length[cvec], "SystemSize" -> Length[sys["Matrix"]]|>]];
@@ -213,12 +223,21 @@ LineIntegral[sys_Association, bvals_, from_, {lo_, hi_}, cvec_List,
   If[keptAll === None,
   (* transport BOTH ways from the anchor to cover [lo, hi] *)
   keptAll = {};
+  planLo = Lookup[dispatch, "LowerPlan", None];
+  planHi = Lookup[dispatch, "UpperPlan", None];
+  If[(TrueQ[lo < from] && !AssociationQ[planLo]) ||
+      (TrueQ[hi > from] && !AssociationQ[planHi]),
+    singularityAtlas = DiffExp2`Transport`FindSingularities[sys2]];
   If[TrueQ[lo < from],
-    planLo = DiffExp2`Transport`SegmentLine[sys2, {from, lo}];
+    If[!AssociationQ[planLo],
+      planLo = DiffExp2`Transport`SegmentLine[sys2, {from, lo},
+        "SingularityAtlas" -> singularityAtlas]];
     res = DiffExp2`Transport`TransportLine[sys2, bvals, planLo];
     keptAll = Join[keptAll, res["Charts"]]];
   If[TrueQ[hi > from],
-    planHi = DiffExp2`Transport`SegmentLine[sys2, {from, hi}];
+    If[!AssociationQ[planHi],
+      planHi = DiffExp2`Transport`SegmentLine[sys2, {from, hi},
+        "SingularityAtlas" -> singularityAtlas]];
     res = DiffExp2`Transport`TransportLine[sys2, bvals, planHi];
     keptAll = Join[keptAll, res["Charts"]]]];
   If[keptAll === {},

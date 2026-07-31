@@ -8,10 +8,10 @@ BeginPackage["DiffExp2`Transport`",
   {"DiffExp2`Tolerances`", "DiffExp2`Config`", "DiffExp2`EpsSeries`",
    "DiffExp2`SectorSeries`", "DiffExp2`Indicial`", "DiffExp2`Solve`"}];
 
-FindSingularities::usage = "FindSingularities[sys] gives <|\"All\", \"Real\", \"Factors\"|>: exact deduplicated roots of the matrix singular factors plus per-call ExtraSingularFactors.";
+FindSingularities::usage = "FindSingularities[sys] gives a validated singularity atlas containing exact deduplicated roots of the matrix singular factors plus per-call ExtraSingularFactors.  The atlas may be reused by SegmentLine through its SingularityAtlas option.";
 EpsilonZeroSingularFactors::usage = "EpsilonZeroSingularFactors[factors, x] gives the exact planner/prescription alphabet obtained from each factor's first nonzero epsilon coefficient after removing its overall epsilon valuation. Epsilon-independent factors are preserved verbatim. This changes line geometry only; a matrix pole that degenerates onto a chart center can still be rejected by the local solver.";
 ChartRadius::usage = "ChartRadius[center, allSingularities] gives the exact/numeric complex-plane distance to the nearest OTHER singularity.";
-SegmentLine::usage = "SegmentLine[sys, {from, to}] gives the SegmentPlan: charts, radii, match points, digit budget.";
+SegmentLine::usage = "SegmentLine[sys, {from, to}] gives the SegmentPlan: charts, radii, match points, digit budget.  Set \"SingularityAtlas\" to a FindSingularities[sys] result when planning several arms of the same system.";
 TransportLine::usage = "TransportLine[sys, boundary, plan] runs the marching loop and returns the TransportResult.";
 ValidatePlan::usage = "ValidatePlan[plan] statically audits the chart chain: every incoming match point (the shared chartMatchPoint formula) must lie inside both adjacent physical disks and their affine 1/k/half-radius envelopes; singular handoffs must approach from the correct side. Loud E8 on violation; returns the plan.";
 MatchWeights::usage = "MatchWeights[basisValues, incoming, label] solves the eps-graded (Laurent) weight system with loud residual asserts.";
@@ -452,6 +452,38 @@ projectComplexRoots[all_List, real_List] := Module[{data, projected},
   Sort[exactDeduplicatePoints[DeleteDuplicates[projected]],
     pointOrderSign[#1, #2, 70] < 0 &]];
 
+$singularityAtlasSchema = "DiffExp2.SingularityAtlas/v1";
+
+singularityAtlasSourceIdentity[sys_Association] := Hash[
+  {sys["Variable"],
+   Lookup[sys, "SingularFactorsExact",
+     Lookup[sys, "SingularFactors", {}]],
+   Lookup[sys, "ExtraSingularFactors", {}],
+   DiffExp2`Config`EpsSymbols[], DiffExp2`Config`CanonicalEps[]},
+  "SHA256"];
+
+validSingularityAtlasQ[sys_Association, atlas_] :=
+  AssociationQ[atlas] &&
+  Lookup[atlas, "Schema", None] === $singularityAtlasSchema &&
+  Lookup[atlas, "SourceIdentity", None] ===
+    singularityAtlasSourceIdentity[sys] &&
+  ListQ[Lookup[atlas, "All", None]] &&
+  ListQ[Lookup[atlas, "Real", None]] &&
+  ListQ[Lookup[atlas, "Projected", None]] &&
+  AssociationQ[Lookup[atlas, "Factors", None]];
+
+validatedSingularityAtlas[sys_Association, atlas_] := If[
+  validSingularityAtlasQ[sys, atlas], atlas,
+  err["E2", <|
+    "Detail" ->
+      "SingularityAtlas must be an unmodified FindSingularities result for the identical variable and singular-factor source",
+    "ExpectedSchema" -> $singularityAtlasSchema,
+    "ExpectedSourceIdentity" -> singularityAtlasSourceIdentity[sys],
+    "ReceivedSchema" -> If[AssociationQ[atlas],
+      Lookup[atlas, "Schema", None], None],
+    "ReceivedSourceIdentity" -> If[AssociationQ[atlas],
+      Lookup[atlas, "SourceIdentity", None], None]|>]];
+
 FindSingularities[sys_Association] := Module[
   {var = sys["Variable"], exactFactors, facs, extra, all, roots, real},
   exactFactors = Lookup[sys, "SingularFactorsExact",
@@ -465,7 +497,9 @@ FindSingularities[sys_Association] := Module[
     exactDeduplicatePoints[Flatten[Last /@ roots]]];
   real = plannerProfile["ClassifyRealRoots",
     Select[all, zeroQ[Im[RootReduce[#]]] &]];
-  <|"All" -> all,
+  <|"Schema" -> $singularityAtlasSchema,
+    "SourceIdentity" -> singularityAtlasSourceIdentity[sys],
+    "All" -> all,
     "Real" -> real,
     "Projected" -> plannerProfile["ProjectComplexRoots",
       projectComplexRoots[all, real]],
@@ -726,19 +760,24 @@ DigitBudget[ag_, nseg_Integer] := Module[{wp = cfg["WorkingPrecision"], dn, cd},
 (* ---- 2.3 segmentation ---- *)
 
 Options[SegmentLine] = {
-  "ValueTailContract" -> "LegacyStructural"};
+  "ValueTailContract" -> "LegacyStructural",
+  "SingularityAtlas" -> Automatic};
 
 SegmentLine[sys_Association, {from_, to_}, OptionsPattern[]] := Module[
   {sings, real, projected, dir, k = cfg["DivisionOrder"], charts,
    cur, interior, endpointSingular, all, guard = 0, lineCap, prevRad,
    prevMatchRad, var = sys["Variable"],
-   valueTailContract = OptionValue["ValueTailContract"]},
+   valueTailContract = OptionValue["ValueTailContract"],
+   singularityAtlas = OptionValue["SingularityAtlas"]},
   If[!MemberQ[{"LegacyStructural", "NativeCertified"},
       valueTailContract],
     err["E2", <|"ValueTailContract" -> valueTailContract,
       "Detail" ->
         "ValueTailContract must be LegacyStructural or NativeCertified"|>]];
-  sings = plannerProfile["FindSingularities", FindSingularities[sys]];
+  sings = If[singularityAtlas === Automatic,
+    plannerProfile["FindSingularities", FindSingularities[sys]],
+    plannerProfile["ValidateSingularityAtlas",
+      validatedSingularityAtlas[sys, singularityAtlas]]];
   all = sings["All"]; real = sings["Real"];
   dir = Sign[to - from];
   If[dir === 0, err["E1", <|"From" -> from, "To" -> to, "Detail" -> "empty line"|>]];

@@ -3844,7 +3844,7 @@ Options[NativeRegularLineIntegral] = {"Threads" -> Automatic,
 NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
     cvec_List, OptionsPattern[]] := Module[
   {lower, upper, atlas, run = None, digits, value, result, retain, output,
-   armPlans = OptionValue["ArmPlans"]},
+   armPlans = OptionValue["ArmPlans"], singularityAtlas},
   retain = OptionValue["RetainNativeState"];
   If[!BooleanQ[retain],
     err["E8", <|"RetainNativeState" -> retain,
@@ -3853,8 +3853,11 @@ NativeRegularLineIntegral[sys_Association, boundary_, from_, {lo_, hi_},
     err["E8", <|"Range" -> {lo, hi}, "Anchor" -> from,
       "Detail" -> "explicit native independent-arm line integral requires an interior anchor"|>]];
   If[armPlans === Automatic,
-    lower = DiffExp2`Transport`SegmentLine[sys, {from, lo}];
-    upper = DiffExp2`Transport`SegmentLine[sys, {from, hi}],
+    singularityAtlas = DiffExp2`Transport`FindSingularities[sys];
+    lower = DiffExp2`Transport`SegmentLine[sys, {from, lo},
+      "SingularityAtlas" -> singularityAtlas];
+    upper = DiffExp2`Transport`SegmentLine[sys, {from, hi},
+      "SingularityAtlas" -> singularityAtlas],
     If[!MatchQ[armPlans, {_Association, _Association}],
       err["E8", <|"ArmPlans" -> armPlans,
         "Detail" -> "ArmPlans must be Automatic or an exact {lowerPlan,upperPlan} pair"|>]];

@@ -735,7 +735,8 @@ assert["Cpp handoff retains the common certified raw edge and records its width"
     StringContainsQ[runnerSource,
       "\"PreservedSourceCompleteMax\" -> If["]];
 
-newCounts[] := <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
+newCounts[] := <|"singularities" -> 0, "segment" -> 0,
+  "prepare" -> 0, "run" -> 0,
   "export" -> 0, "releaseBatch" -> 0, "releaseAtlas" -> 0|>;
 fixtureCertifiedEnvelope = <|"guarantee" -> "certified",
   "absolute_upper_approx" -> {1.*^-30},
@@ -761,9 +762,14 @@ capturedObservables = None;
 capturedMatchingCertificationDigits = None;
 capturedPublicationDigits = None;
 capturedMaxExtraPrecision = None;
+capturedPlanAtlases = {};
+syntheticSingularityAtlas = <|"Synthetic" -> "shared-atlas"|>;
 
 mixed = Block[{
-    ft2NativeSegmentLine = Function[{system, path},
+    ft2NativeFindSingularities = Function[system,
+      counts["singularities"]++; syntheticSingularityAtlas],
+    ft2NativeSegmentLine = Function[{system, path, singularityAtlas},
+      AppendTo[capturedPlanAtlases, singularityAtlas];
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors,
@@ -810,8 +816,11 @@ mixed = Block[{
 
 assert["mixed dispatch plans both arms but invokes one native batch/export",
   AssociationQ[mixed] &&
-    counts === <|"segment" -> 2, "prepare" -> 1, "run" -> 1,
+    counts === <|"singularities" -> 1, "segment" -> 2,
+      "prepare" -> 1, "run" -> 1,
       "export" -> 1, "releaseBatch" -> 1, "releaseAtlas" -> 0|> &&
+    capturedPlanAtlases ===
+      {syntheticSingularityAtlas, syntheticSingularityAtlas} &&
     mixed["NativeBatchCalls"] === 1 &&
     mixed["NativeMarches"] === 2 &&
     mixed["CompatibilityExports"] === 4 &&
@@ -950,7 +959,10 @@ checkpointSpec = <|"Mode" -> "Save",
     publishedResume = resumeRecord; publishedAudit = auditRecord;
     "published-before-export"]|>;
 checkpointed = Block[{
-    ft2NativeSegmentLine = Function[{system, path}, <|"Path" -> path|>],
+    ft2NativeFindSingularities =
+      Function[system, syntheticSingularityAtlas],
+    ft2NativeSegmentLine = Function[
+      {system, path, singularityAtlas}, <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors,
        integrandRequiredMaxima, variable, targetMax, requiredTargetMax,
@@ -993,10 +1005,13 @@ assert["native sidecar publisher runs synchronously after schema-2 save and befo
     checkpointed["NativeTransportCheckpoint"] === publishedResume,
   {checkpointEvents, publishedResume}];
 
-restoreCounts = <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
+restoreCounts = <|"singularities" -> 0, "segment" -> 0,
+  "prepare" -> 0, "run" -> 0,
   "restore" -> 0, "export" -> 0|>;
 restoredDispatch = Block[{
-    ft2NativeSegmentLine = Function[{system, path},
+    ft2NativeFindSingularities = Function[system,
+      restoreCounts["singularities"]++; $Failed],
+    ft2NativeSegmentLine = Function[{system, path, singularityAtlas},
       restoreCounts["segment"]++; $Failed],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors,
@@ -1032,8 +1047,8 @@ restoredDispatch = Block[{
       "ContractIdentity" -> checkpointContractIdentity|>]];
 assert["resume dispatch restores and exports without replanning or remarching",
   AssociationQ[restoredDispatch] &&
-    restoreCounts === <|"segment" -> 0, "prepare" -> 0, "run" -> 0,
-      "restore" -> 1, "export" -> 1|> &&
+    restoreCounts === <|"singularities" -> 0, "segment" -> 0,
+      "prepare" -> 0, "run" -> 0, "restore" -> 1, "export" -> 1|> &&
     restoredDispatch["NativeBatchCalls"] === 0 &&
     restoredDispatch["NativeMarches"] === 0 &&
     TrueQ[restoredDispatch["RestoredNativeTransport"]] &&
@@ -1061,7 +1076,9 @@ directEntries = ft2PrepareBoundaryEntries[
 directLedger = ft2NativeEpsilonLedger[directEntries, sourceRows, 4, 4];
 counts = newCounts[];
 directOnly = Block[{
-    ft2NativeSegmentLine = Function[{system, path},
+    ft2NativeFindSingularities = Function[system,
+      counts["singularities"]++; $Failed],
+    ft2NativeSegmentLine = Function[{system, path, singularityAtlas},
       counts["segment"]++; $Failed],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors,
@@ -1098,7 +1115,9 @@ assert["direct-only and proven-zero work skips atlas, march, export, and release
 
 counts = newCounts[];
 malformedBatch = Block[{
-    ft2NativeSegmentLine = Function[{system, path},
+    ft2NativeFindSingularities = Function[system,
+      counts["singularities"]++; syntheticSingularityAtlas],
+    ft2NativeSegmentLine = Function[{system, path, singularityAtlas},
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
       {system, boundary, lower, upper, coefficientVectors,
@@ -1125,7 +1144,8 @@ malformedBatch = Block[{
     {{x, 1}, {1 - x, 1}}, 6, 50, 8, 8]];
 assert["malformed published batch falls back to releasing its atlas owner",
   FailureQ[malformedBatch] &&
-    counts === <|"segment" -> 2, "prepare" -> 1, "run" -> 1,
+    counts === <|"singularities" -> 1, "segment" -> 2,
+      "prepare" -> 1, "run" -> 1,
       "export" -> 0, "releaseBatch" -> 0, "releaseAtlas" -> 1|>,
   {counts, malformedBatch}];
 

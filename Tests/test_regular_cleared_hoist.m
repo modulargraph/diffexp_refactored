@@ -143,6 +143,23 @@ assert["singular_identity_physical_clear_reuses_global_affine_proof",
     sameClearedEquationQ[singularPhysicalHoist, singularPhysicalLegacy] &&
     singularPhysicalHoistCounts === {1, 0}];
 
+(* CoefficientList[0,x] is the empty list.  Zero matrix entries must stay
+   typed polynomial coefficient lists across affine translation rather than
+   becoming an unevaluated trimExactPolynomialCoefficientList[0]. *)
+zeroEntrySys = <|"Matrix" -> {{0, 0, 0}, {eps, 0, 1}, {0, 1, 0}},
+  "Variable" -> x|>;
+zeroEntryChart = catchDE2[DiffExp2`Solve`PrepareChart[zeroEntrySys,
+  chart[0, 1, "affine-zero-entry-coefficient-list"]]];
+zeroEntryData = catchDE2[
+  DiffExp2`Solve`Private`affinePhysicalClearedFromGlobal[zeroEntryChart]];
+assert["regular_global_clear_normalizes_empty_zero_coefficient_lists",
+  !FailureQ[zeroEntryChart] && !FailureQ[zeroEntryData] &&
+    FreeQ[zeroEntryData,
+      _DiffExp2`Solve`Private`trimExactPolynomialCoefficientList] &&
+    zeroEntryData["dExpr"] === {1} &&
+    zeroEntryData["NhatExpr"] === {
+      ConstantArray[0, {3, 3}], zeroEntrySys["Matrix"]}];
+
 (* Pole depth cannot be cached by system alone.  The same A=x/eps has a
    t^2/eps first lag at center 0 but a t/eps first lag at center 1. *)
 counterSys = <|"Matrix" -> {{x/eps}}, "Variable" -> x|>;

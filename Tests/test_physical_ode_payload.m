@@ -53,6 +53,22 @@ samePhysicalEquationQ[a_Association, b_Association] := AllTrue[
       physicalQPolynomial[b]*physicalCPolynomial[a], {2}]],
   # === 0 &];
 
+(* A certified polynomial q/C pair must be encodable without first dividing
+   by q and asking the generic rational-matrix clearer to rediscover it. *)
+pairQ = 1 + t + t^2;
+pairC = {{eps t, 0}, {(1 + eps)/(1 - eps) + t^2, 2 t}};
+pairCs = <|"ChartVar" -> t, "Center" -> 0, "SystemSize" -> 2,
+  "ThetaOriginal" -> Map[Cancel[Together[#/pairQ]] &, pairC, {2}]|>;
+pairDirect = catchDE2[
+  DiffExp2`Solve`Private`physicalPolynomialPairODEData[
+    pairQ, pairC, pairCs]];
+pairLegacy = catchDE2[
+  DiffExp2`Solve`Private`physicalClearedODEData[pairCs]];
+assert["physical_ode_precleared_polynomial_pair_matches_legacy_equation",
+  AssociationQ[pairDirect] && AssociationQ[pairLegacy] &&
+    samePhysicalEquationQ[pairDirect, pairLegacy] &&
+    Lookup[First[pairDirect["Q"]], "Valuation", None] === 0];
+
 (* A regular chart belongs to an exact registered input system.  Its local
    physical equation is just the affine image of the global cleared pair.
    The fast path may retain a harmless coefficient-field unit that the

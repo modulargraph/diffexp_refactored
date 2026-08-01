@@ -683,6 +683,39 @@ physicalEpsRationalData[expr_, eps_, cs_] := Module[
 $physicalClearedODECache = <||>;
 $physicalClearedODECacheMax = 256;
 
+(* Package an already-cleared polynomial equation
+
+                       q(t,eps) theta f = C(t,eps) f
+
+   without dividing C by q and then asking the generic rational-matrix
+   clearer to recover the same pair.  Singular SCC gauges and epsilon
+   shearings naturally act on this pair.  Retaining it avoids a redundant
+   global denominator/GCD reconstruction while preserving the exact q/C
+   identity consumed by the native physical residual and tail proofs. *)
+physicalPolynomialPairODEData[qExpr_, cMatrix_, cs_Association] := Module[
+  {eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"],
+   d = cs["SystemSize"], qDegree, cDegree, qCoeffs, cCoeffs,
+   qData, cData, identity},
+  If[zeroCanQ[qExpr] || !PolynomialQ[qExpr, t] ||
+      !MatrixQ[cMatrix] || Dimensions[cMatrix] =!= {d, d} ||
+      !AllTrue[Flatten[cMatrix], PolynomialQ[#, t] &],
+    err["E5", cs, <|
+      "Detail" ->
+        "precleared physical q/C pair is not a nonzero polynomial equation in the local chart coordinate"|>]];
+  qDegree = Max[0, Exponent[qExpr, t]];
+  cDegree = Max[0, Max[Exponent[#, t] & /@ Flatten[cMatrix]]];
+  qCoeffs = Table[Cancel[Together[Coefficient[qExpr, t, j]]],
+    {j, 0, qDegree}];
+  cCoeffs = Table[Map[Cancel[Together[#]] &,
+      Map[Coefficient[#, t, j] &, cMatrix, {2}], {2}],
+    {j, 0, cDegree}];
+  qData = physicalEpsRationalData[#, eps, cs] & /@ qCoeffs;
+  cData = Map[physicalEpsRationalData[#, eps, cs] &, cCoeffs, {3}];
+  identity = "de2-physical-ode-" <>
+    IntegerString[Hash[{"physical-original-master", qData, cData},
+      "SHA256"], 16, 64];
+  <|"Identity" -> identity, "Q" -> qData, "C" -> cData|>];
+
 (* Capture the exact equation in the delivered master basis, before any
    spectral V/VInv recurrence frame is applied:
 
@@ -1369,8 +1402,14 @@ affinePolynomialCoefficientTransform[degree_Integer?NonNegative,
   {j, 0, degree}, {m, 0, degree}];
 
 affineTranslatePolynomialCoefficientList[list_List, transform_List] :=
-  trimExactPolynomialCoefficientList[
-    Take[transform, {1, Length[list]}, {1, Length[list]}] . list];
+  If[list === {},
+    (* CoefficientList[0,x] is {} rather than {0}.  The empty matrix-vector
+       product is scalar 0, which cannot satisfy the coefficient-list
+       contract and used to leave trimExactPolynomialCoefficientList[0]
+       unevaluated inside an otherwise exact zero matrix entry. *)
+    {0},
+    trimExactPolynomialCoefficientList[
+      Take[transform, {1, Length[list]}, {1, Length[list]}] . list]];
 
 polynomialCoefficientListValuation[list_List] := Module[{first},
   first = SelectFirst[Range[Length[list]], !zeroCanQ[list[[#]]] &,
@@ -5806,11 +5845,23 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
     ownerIdentity_String, serialization_Association,
     inputDigits_Integer] := Module[
   {field, eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"],
-   d = cs["SystemSize"], components, gauge, gaugeInverse, reducedTheta,
+   d = cs["SystemSize"], components, parentPhysicalData, parentCleared,
+   qExpr, parentCMatrix, reducedCMatrix, directPolynomialQ,
+   activePairEntries, centerPower, directQ0,
+   reducedTheta, targetVertices, sourceVertices, reducedBlock,
    reducedSystem, reducedData, positions, constraints, shifts, changed,
    candidate,
-   shearedTheta, shearedSystem, shearedData, rationalCoefficientQ,
-   q0, valuations, payload, fail},
+   shearedCMatrix, shearedTheta, shearedSystem, shearedData,
+   rationalCoefficientQ,
+   q0, valuations, payload, fail, timingQ, phaseStart, phase},
+  timingQ = Environment["DE2_SCC_GAUGE_TIMING"] === "1" ||
+    Environment["DE2_NATIVE_STAGE_TIMING"] === "1";
+  phaseStart = AbsoluteTime[];
+  phase[label_String] := If[timingQ, Module[{now = AbsoluteTime[]},
+    Print["DE2 SINGULAR TAIL PHASE center=", InputForm[cs["Center"]],
+      " phase=", label, " elapsedSeconds=", N[now - phaseStart, 8],
+      " memory=", MemoryInUse[]];
+    phaseStart = now]];
   fail[detail_String] := Module[{},
     If[Environment["DE2_DIAGNOSTIC_SINGULAR_TAIL_FRAME"] === "1",
       Print["DE2 SINGULAR TAIL FRAME unavailable: ", detail]];
@@ -5826,18 +5877,90 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
       Sort[Flatten[components]] =!= Range[d],
     err["E6", cs, <|"Detail" ->
       "singular-tail block gauge does not cover the full parent exactly"|>]];
-  gauge = IdentityMatrix[d];
-  gaugeInverse = IdentityMatrix[d];
-  MapThread[Function[{vertices, block},
-      gauge[[vertices, vertices]] = block["Gauge"];
-      gaugeInverse[[vertices, vertices]] = block["GaugeInverse"]],
-    {components, blockSystems}];
-  reducedTheta = Map[Cancel[Together[#]] &,
-    gaugeInverse . cs["ThetaOriginal"] . gauge -
-      gaugeInverse . (t D[gauge, t]), {2}];
-  reducedSystem = KeyDrop[
-    Join[cs, <|"ThetaOriginal" -> reducedTheta|>], {"SystemClearKey"}];
-  reducedData = physicalClearedODEData[reducedSystem];
+  (* Keep the parent equation in its already-cleared q/C representation.
+     Dividing C by q here and invoking physicalClearedODEData on the resulting
+     rational matrix made the singular-tail proof rediscover the same global
+     denominator and polynomial GCD from scratch. *)
+  parentPhysicalData = physicalClearedODEData[cs];
+  parentCleared = regularClearedSymbolicFromPhysicalData[
+    cs, parentPhysicalData];
+  qExpr = Sum[parentCleared["dExpr"][[j]] t^(j - 1),
+    {j, Length[parentCleared["dExpr"]]}];
+  parentCMatrix = Sum[parentCleared["NhatExpr"][[j]] t^(j - 1),
+    {j, Length[parentCleared["NhatExpr"]]}];
+  phase["parent-precleared-reconstruct"];
+
+  (* The exact SCC gauge is block diagonal by construction.  Materializing
+     it as a dense D by D matrix and asking Dot to rediscover that sparsity
+     can expand a small block-triangular system into enormous intermediate
+     symbolic sums before Together cancels the structural zeros.  Transform
+     each certified target/source block directly.  For
+
+       q theta = C,
+
+     the corresponding cleared block is
+
+       G_target^-1 C_target,source G_source
+         - delta_target,source q G_target^-1 t dG_target/dt. *)
+  reducedCMatrix = ConstantArray[0, {d, d}];
+  Do[
+    targetVertices = components[[targetBlock]];
+    sourceVertices = components[[sourceBlock]];
+    reducedBlock =
+      blockSystems[[targetBlock]]["GaugeInverse"] .
+        parentCMatrix[[targetVertices, sourceVertices]] .
+        blockSystems[[sourceBlock]]["Gauge"];
+    If[targetBlock === sourceBlock,
+      reducedBlock -= qExpr *
+        blockSystems[[targetBlock]]["GaugeInverse"] .
+          (t D[blockSystems[[targetBlock]]["Gauge"], t])];
+    reducedCMatrix[[targetVertices, sourceVertices]] =
+      Map[Cancel[Together[#]] &, reducedBlock, {2}],
+    {targetBlock, Length[components]},
+    {sourceBlock, Length[components]}];
+  phase["block-gauge-cleared-reduction"];
+  directPolynomialQ = PolynomialQ[qExpr, t] &&
+    AllTrue[Flatten[reducedCMatrix], PolynomialQ[#, t] &];
+  If[directPolynomialQ,
+    (* Normalize the only common factor introduced solely by changing from
+       d/dt to theta=t d/dt.  If q still vanishes at t=0 afterwards, some
+       active C entry has smaller t-valuation by construction: the reduced
+       equation has a genuine center pole and no generic denominator rebuild
+       can turn q0 into a formal unit. *)
+    activePairEntries = Prepend[
+      Select[Flatten[reducedCMatrix], !zeroCanQ[#] &], qExpr];
+    centerPower = Min[Exponent[#, t, Min] & /@ activePairEntries];
+    If[!IntegerQ[centerPower] || centerPower < 0,
+      err["E6", cs, <|"Detail" ->
+        "reduced precleared SCC equation has an invalid center valuation"|>]];
+    If[centerPower > 0,
+      qExpr = Cancel[Together[qExpr/t^centerPower]];
+      reducedCMatrix = Map[
+        Cancel[Together[#/t^centerPower]] &, reducedCMatrix, {2}]];
+    directQ0 = physicalEpsRationalData[
+      Cancel[Together[qExpr /. t -> 0]], eps, cs];
+    If[TrueQ[Lookup[directQ0, "Zero", False]],
+      Return[fail[
+        "Fuchsian block gauge retains a genuine center pole"], Module]];
+    (* A nonzero but epsilon-singular q0 can still contain a moving common
+       polynomial factor.  Leave that uncommon case to the established
+       generic clearer; the direct proof is used only when q0 is already the
+       required formal unit. *)
+    If[Lookup[directQ0, "Valuation", None] =!= 0,
+      directPolynomialQ = False];
+    phase["precleared-center-normalization"]];
+  If[directPolynomialQ,
+    reducedData = physicalPolynomialPairODEData[
+      qExpr, reducedCMatrix, cs];
+    phase["reduced-precleared-encode"],
+    (* A future rational-in-t gauge remains supported by the established
+       generic clearer.  Only the proved polynomial pair takes the fast path. *)
+    reducedTheta = Map[Cancel[Together[#/qExpr]] &,
+      reducedCMatrix, {2}];
+    reducedSystem = KeyDrop[
+      Join[cs, <|"ThetaOriginal" -> reducedTheta|>], {"SystemClearKey"}];
+    reducedData = physicalClearedODEData[reducedSystem];
+    phase["reduced-rational-fallback-clear"]];
   q0 = First[reducedData["Q"]];
   If[TrueQ[Lookup[q0, "Zero", False]] ||
       Lookup[q0, "Valuation", None] =!= 0,
@@ -5866,13 +5989,25 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
         Module]],
     {iteration, d}];
   shifts -= Min[shifts];
-  shearedTheta = MapIndexed[
-    Cancel[Together[
-      eps^(shifts[[#2[[2]]]] - shifts[[#2[[1]]]]) #1]] &,
-    reducedTheta, {2}];
-  shearedSystem = KeyDrop[
-    Join[cs, <|"ThetaOriginal" -> shearedTheta|>], {"SystemClearKey"}];
-  shearedData = physicalClearedODEData[shearedSystem];
+  phase["epsilon-shift-plan"];
+  If[directPolynomialQ,
+    (* The diagonal epsilon shearing changes C_target,source by
+       eps^(s_source-s_target) and leaves the scalar q unchanged. *)
+    shearedCMatrix = MapIndexed[
+      Cancel[Together[
+        eps^(shifts[[#2[[2]]]] - shifts[[#2[[1]]]]) #1]] &,
+      reducedCMatrix, {2}];
+    shearedData = physicalPolynomialPairODEData[
+      qExpr, shearedCMatrix, cs];
+    phase["sheared-precleared-encode"],
+    shearedTheta = MapIndexed[
+      Cancel[Together[
+        eps^(shifts[[#2[[2]]]] - shifts[[#2[[1]]]]) #1]] &,
+      reducedTheta, {2}];
+    shearedSystem = KeyDrop[
+      Join[cs, <|"ThetaOriginal" -> shearedTheta|>], {"SystemClearKey"}];
+    shearedData = physicalClearedODEData[shearedSystem];
+    phase["sheared-rational-fallback-clear"]];
   q0 = First[shearedData["Q"]];
   valuations = Join[
     Cases[shearedData["Q"],
@@ -5901,7 +6036,8 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
   payload = Block[{$cppSerializationDomain = "rational",
       $cppSerializationSymbols = {}},
     cppPhysicalODEPayload[
-      shearedData, ownerIdentity, inputDigits, shearedSystem]];
+      shearedData, ownerIdentity, inputDigits, cs]];
+  phase["payload-encode"];
   <|"schema" -> "diffexp2-scc-singular-tail-frame-v1",
     "equation" -> payload, "epsilon_shifts" -> shifts|>];
 

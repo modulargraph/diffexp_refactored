@@ -1297,7 +1297,8 @@ regularIdentityFrameQ[cs_Association] :=
    field automorphism, so the LCM of canceled entry denominators may be shifted
    to every regular chart instead of recomputed after the algebraic shift. *)
 globalClearedSystem[systemKey_] := Module[
-  {cached, input, x, A, den, denCoeffs, denContent, num, phaseQ, phaseTime},
+  {cached, input, x, A, den, denCoeffs, denContent, num,
+   numCoefficientLists, phaseQ, phaseTime},
   cached = If[KeyExistsQ[$globalClearedCache, systemKey],
     $globalClearedCache[systemKey], None];
   If[cached =!= None, Return[cached, Module]];
@@ -1324,16 +1325,49 @@ globalClearedSystem[systemKey_] := Module[
     Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
   den = Cancel[Together[den/denContent]];
   num = Map[Cancel[Together[#*den]] &, A, {2}];
+  If[!PolynomialQ[den, x] ||
+      !AllTrue[Flatten[num], PolynomialQ[#, x] &],
+    err["E5", <|"Center" -> "global-system-clear"|>, <|
+      "Detail" ->
+        "globally cleared denominator or numerator is not polynomial in the system variable"|>]];
+  denCoeffs = CoefficientList[den, x];
+  numCoefficientLists = Map[CoefficientList[#, x] &, num, {2}];
   cached = <|"Variable" -> x, "Denominator" -> den,
-    "Numerator" -> num, "Dimension" -> Length[A]|>;
+    "Numerator" -> num,
+    "DenominatorCoefficientList" -> denCoeffs,
+    "NumeratorCoefficientLists" -> numCoefficientLists,
+    "Dimension" -> Length[A]|>;
   AssociateTo[$globalClearedCache, systemKey -> cached];
   cached];
+
+trimExactPolynomialCoefficientList[list_List] := Module[{last},
+  last = SelectFirst[Reverse[Range[Length[list]]],
+    !zeroCanQ[list[[#]]] &, None];
+  If[last === None, {0}, Take[list, last]]];
+
+affinePolynomialCoefficientTransform[degree_Integer?NonNegative,
+    center_, beta_] := Table[
+  If[m < j, 0,
+    If[j === 0, 1, beta^j] Binomial[m, j]
+      If[m === j, 1, center^(m - j)]],
+  {j, 0, degree}, {m, 0, degree}];
+
+affineTranslatePolynomialCoefficientList[list_List, transform_List] :=
+  trimExactPolynomialCoefficientList[
+    Take[transform, {1, Length[list]}, {1, Length[list]}] . list];
+
+polynomialCoefficientListValuation[list_List] := Module[{first},
+  first = SelectFirst[Range[Length[list]], !zeroCanQ[list[[#]]] &,
+    Infinity];
+  first - 1];
 
 affinePhysicalClearedFromGlobal[cs_Association] := Module[
   {systemKey = cs["SystemClearKey"], key, cached, global, x,
    t = cs["ChartVar"], center = cs["Center"], beta = cs["ChartMap", "Scale"],
    affineContentInvariantQ, den, denCoeffs, denContent, num, dD, dN,
    dExpr, NhatExpr, coefficientLists, activePairEntries, centerPower,
+   transformDegree, coefficientTransform, numCoefficientLists,
+   activeCoefficientLists,
    phaseQ, phaseTime, phase},
   key = {systemKey, center, beta, t};
   cached = If[KeyExistsQ[$chartClearedCache, key],
@@ -1368,6 +1402,60 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
       "Detail" -> "affine-clearing scale must be nonzero"|>]];
   affineContentInvariantQ = AllTrue[{center, beta},
     NumericQ[#] && FreeQ[#, _?InexactNumberQ] &];
+  (* For ordinary exact geometry, translate the already-cleared global
+     coefficient lists directly.  If p(x)=Sum[p_m x^m,m], then
+
+       [t^j] p(center+beta t) =
+         beta^j Sum[Binomial[m,j] center^(m-j) p_m,{m,j,degree}].
+
+     This is the same field automorphism used by the expression path below,
+     but it performs the polynomial expansion once globally and only a
+     triangular linear transform at each chart.  In particular it avoids
+     rebuilding and re-expanding all 23^2 large rational expressions at each
+     Henn level-3 center. *)
+  If[affineContentInvariantQ,
+    transformDegree = Max[
+      Length[global["DenominatorCoefficientList"]] - 1,
+      Max[Length /@ Flatten[
+        global["NumeratorCoefficientLists"], 1]] - 1];
+    coefficientTransform = affinePolynomialCoefficientTransform[
+      transformDegree, center, beta];
+    dExpr = affineTranslatePolynomialCoefficientList[
+      global["DenominatorCoefficientList"], coefficientTransform];
+    numCoefficientLists = Map[
+      affineTranslatePolynomialCoefficientList[#, coefficientTransform] &,
+      global["NumeratorCoefficientLists"], {2}];
+    numCoefficientLists = Map[Prepend[beta*#, 0] &,
+      numCoefficientLists, {2}];
+    activeCoefficientLists = Prepend[
+      Select[Flatten[numCoefficientLists, 1],
+        AnyTrue[#, !zeroCanQ[#] &] &], dExpr];
+    centerPower = Min[
+      polynomialCoefficientListValuation /@ activeCoefficientLists];
+    If[!IntegerQ[centerPower] || centerPower < 0,
+      err["E3", cs, <|"CenterPower" -> centerPower,
+        "Detail" ->
+          "affine physical q/C pair has an invalid common center valuation"|>]];
+    If[centerPower > 0,
+      dExpr = Drop[dExpr, centerPower];
+      numCoefficientLists = Map[
+        If[AllTrue[#, zeroCanQ], {0}, Drop[#, centerPower]] &,
+        numCoefficientLists, {2}]];
+    dExpr = trimExactPolynomialCoefficientList[dExpr];
+    numCoefficientLists = Map[trimExactPolynomialCoefficientList,
+      numCoefficientLists, {2}];
+    dD = Length[dExpr] - 1;
+    dN = Max[0,
+      Max[Length /@ Flatten[numCoefficientLists, 1]] - 1];
+    NhatExpr = Table[
+      Map[If[j + 1 <= Length[#], #[[j + 1]], 0] &,
+        numCoefficientLists, {2}],
+      {j, 0, dN}];
+    phase["coefficient-translation"];
+    cached = <|"dExpr" -> dExpr, "NhatExpr" -> NhatExpr,
+      "dD" -> dD, "dN" -> dN|>;
+    AssociateTo[$chartClearedCache, key -> cached];
+    Return[cached, Module]];
   den = Cancel[Together[global["Denominator"] /. x -> center + beta*t]];
   If[zeroCanQ[den],
     err["E3", cs, <|"Denominator" -> den,

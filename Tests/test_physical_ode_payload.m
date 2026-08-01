@@ -102,8 +102,10 @@ centerPolePair = catchDE2[
     1, {{1/t}}, <|"ChartVar" -> t, "Center" -> 0,
       "SystemSize" -> 1|>]];
 assert["physical_ode_gauge_local_clear_preserves_genuine_center_pole",
-  AssociationQ[centerPolePair] && centerPolePair["QExpr"] === t &&
-    centerPolePair["CMatrix"] === {{1}}];
+  AssociationQ[centerPolePair] &&
+    TrueQ[centerPolePair["GenuineCenterPole"]] &&
+    centerPolePair["CenterPower"] === 0 &&
+    centerPolePair["QCenterPower"] === 1];
 
 (* Exercise the actual singular-tail dispatcher with a rational gauge.  The
    parent equation is (1-t) theta f=f and f=(1+t)^-1 g.  Its reduced C has a

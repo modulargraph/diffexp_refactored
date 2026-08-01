@@ -734,9 +734,10 @@ physicalPolynomialPairODEData[qExpr_, cMatrix_, cs_Association] := Module[
    uncommon moving common factor remains, it may retain the generic clearer
    as a fail-safe rather than weakening the singular-tail theorem. *)
 physicalClearRationalPair[qExpr_, cMatrix_, cs_Association] := Module[
-  {t = cs["ChartVar"], d = cs["SystemSize"], denominators, den,
-   denCoeffs, denContent, clearedQ, clearedC, activePairEntries,
-   centerPower, timingQ, phaseStart, phase},
+  {t = cs["ChartVar"], d = cs["SystemSize"], canonicalC,
+   denominators, den, denCoeffs, denContent, denCenterPower,
+   clearedQ, clearedC, cCenterPowers, centerPower, qCenterPower,
+   timingQ, phaseStart, phase},
   timingQ = Environment["DE2_SCC_GAUGE_TIMING"] === "1" ||
     Environment["DE2_NATIVE_STAGE_TIMING"] === "1";
   phaseStart = AbsoluteTime[];
@@ -750,8 +751,9 @@ physicalClearRationalPair[qExpr_, cMatrix_, cs_Association] := Module[
     err["E5", cs, <|
       "Detail" ->
         "rational precleared q/C input is not a polynomial-q square equation"|>]];
+  canonicalC = Map[Cancel[Together[#]] &, cMatrix, {2}];
   denominators = DeleteDuplicates[DeleteCases[
-    Denominator[Cancel[Together[#]]] & /@ Flatten[cMatrix], 1]];
+    Denominator[#] & /@ Flatten[canonicalC], 1]];
   phase["denominator-extraction"];
   den = If[denominators === {}, 1,
     Fold[PolynomialLCM, First[denominators], Rest[denominators]]];
@@ -768,27 +770,54 @@ physicalClearRationalPair[qExpr_, cMatrix_, cs_Association] := Module[
     Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
   den = Cancel[Together[den/denContent]];
   phase["denominator-content"];
+  (* Read center valuations before multiplying h through every matrix entry.
+     canonicalC is already a canceled rational matrix, hence
+
+       val_t(h C_ij) = val_t(h)+val_t(num C_ij)-val_t(den C_ij).
+
+     This avoids expanding h C and then asking Exponent[...,Min] to scan 529
+     large polynomials merely to prove that q has a stricter center zero. *)
+  denCenterPower = polyMinDeg[den, t];
+  qCenterPower = denCenterPower + polyMinDeg[qExpr, t];
+  cCenterPowers = Map[If[zeroCanQ[#], Infinity,
+      denCenterPower + polyMinDeg[Numerator[#], t] -
+        polyMinDeg[Denominator[#], t]] &,
+    Flatten[canonicalC]];
+  centerPower = Min[Prepend[cCenterPowers, qCenterPower]];
+  If[!IntegerQ[centerPower] || centerPower < 0,
+    err["E5", cs, <|"CenterPower" -> centerPower,
+      "Detail" ->
+        "gauge-local polynomial q/C pair has an invalid center valuation"|>]];
+  If[!IntegerQ[qCenterPower] || qCenterPower < centerPower,
+    err["E5", cs, <|"CenterPower" -> centerPower,
+      "QCenterPower" -> qCenterPower,
+      "Detail" ->
+        "gauge-local polynomial q/C scalar has an invalid center valuation"|>]];
+  phase["center-valuation-scan"];
+  If[qCenterPower > centerPower,
+    (* Some active C entry attains centerPower while q does not.  Dividing
+       the common t^centerPower through all matrix entries cannot change that
+       strict inequality, so the formal-unit premise is already impossible.
+       Return the proof before performing a large exact matrix division. *)
+    Return[<|"CenterPower" -> centerPower,
+      "QCenterPower" -> qCenterPower,
+      "GenuineCenterPole" -> True|>, Module]];
   clearedQ = Cancel[Together[den*qExpr]];
-  clearedC = Map[Cancel[Together[den*#]] &, cMatrix, {2}];
+  clearedC = Map[Cancel[Together[den*#]] &, canonicalC, {2}];
   phase["polynomial-pair-multiply"];
   If[!PolynomialQ[clearedQ, t] ||
       !AllTrue[Flatten[clearedC], PolynomialQ[#, t] &],
     err["E5", cs, <|
       "Detail" ->
         "gauge-local denominator clear did not produce a polynomial q/C pair"|>]];
-  activePairEntries = Prepend[
-    Select[Flatten[clearedC], !zeroCanQ[#] &], clearedQ];
-  centerPower = Min[Exponent[#, t, Min] & /@ activePairEntries];
-  If[!IntegerQ[centerPower] || centerPower < 0,
-    err["E5", cs, <|"CenterPower" -> centerPower,
-      "Detail" ->
-        "gauge-local polynomial q/C pair has an invalid center valuation"|>]];
+  phase["polynomial-validation"];
   If[centerPower > 0,
     clearedQ = Cancel[Together[clearedQ/t^centerPower]];
     clearedC = Map[
       Cancel[Together[#/t^centerPower]] &, clearedC, {2}]];
   phase["center-normalization"];
-  <|"QExpr" -> clearedQ, "CMatrix" -> clearedC|>];
+  <|"QExpr" -> clearedQ, "CMatrix" -> clearedC,
+    "GenuineCenterPole" -> False|>];
 
 (* Capture the exact equation in the delivered master basis, before any
    spectral V/VInv recurrence frame is applied:
@@ -6033,6 +6062,10 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
        remains the compatibility fallback for a moving common factor. *)
     rationalPair = physicalClearRationalPair[
       qExpr, reducedCMatrix, cs];
+    If[TrueQ[Lookup[rationalPair, "GenuineCenterPole", False]],
+      Return[fail[
+        "Fuchsian rational block gauge retains a genuine center pole"],
+        Module]];
     rationalPairQ0 = physicalEpsRationalData[
       Cancel[Together[rationalPair["QExpr"] /. t -> 0]], eps, cs];
     If[TrueQ[Lookup[rationalPairQ0, "Zero", False]],

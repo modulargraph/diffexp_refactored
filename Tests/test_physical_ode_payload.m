@@ -69,6 +69,76 @@ assert["physical_ode_precleared_polynomial_pair_matches_legacy_equation",
     samePhysicalEquationQ[pairDirect, pairLegacy] &&
     Lookup[First[pairDirect["Q"]], "Valuation", None] === 0];
 
+(* A rational SCC gauge may put a small t-denominator into C while q remains
+   the already-cleared parent polynomial.  Clear that denominator on the
+   pair itself; the result must be polynomial and represent exactly the same
+   equation as the independent whole-matrix clearer. *)
+rationalPairQ = 1 - t;
+rationalPairC = {{(1 + eps)/(eps (1 + t)), 0},
+  {t/(1 + t)^2, (1 - t)/(1 + t)}};
+rationalPairCs = <|"ChartVar" -> t, "Center" -> 0, "SystemSize" -> 2,
+  "ThetaOriginal" ->
+    Map[Cancel[Together[#/rationalPairQ]] &, rationalPairC, {2}]|>;
+rationalPairCleared = catchDE2[
+  DiffExp2`Solve`Private`physicalClearRationalPair[
+    rationalPairQ, rationalPairC, rationalPairCs]];
+rationalPairDirect = If[AssociationQ[rationalPairCleared], catchDE2[
+    DiffExp2`Solve`Private`physicalPolynomialPairODEData[
+      rationalPairCleared["QExpr"], rationalPairCleared["CMatrix"],
+      rationalPairCs]], rationalPairCleared];
+rationalPairLegacy = catchDE2[
+  DiffExp2`Solve`Private`physicalClearedODEData[rationalPairCs]];
+assert["physical_ode_gauge_local_rational_pair_matches_legacy_equation",
+  AssociationQ[rationalPairCleared] &&
+    PolynomialQ[rationalPairCleared["QExpr"], t] &&
+    AllTrue[Flatten[rationalPairCleared["CMatrix"]],
+      PolynomialQ[#, t] &] &&
+    AssociationQ[rationalPairDirect] && AssociationQ[rationalPairLegacy] &&
+    samePhysicalEquationQ[rationalPairDirect, rationalPairLegacy] &&
+    Lookup[First[rationalPairDirect["Q"]], "Valuation", None] === 0];
+
+centerPolePair = catchDE2[
+  DiffExp2`Solve`Private`physicalClearRationalPair[
+    1, {{1/t}}, <|"ChartVar" -> t, "Center" -> 0,
+      "SystemSize" -> 1|>]];
+assert["physical_ode_gauge_local_clear_preserves_genuine_center_pole",
+  AssociationQ[centerPolePair] && centerPolePair["QExpr"] === t &&
+    centerPolePair["CMatrix"] === {{1}}];
+
+(* Exercise the actual singular-tail dispatcher with a rational gauge.  The
+   parent equation is (1-t) theta f=f and f=(1+t)^-1 g.  Its reduced C has a
+   denominator 1+t, so this must select the gauge-local pair clear while
+   retaining a causal q(0)=1 tail payload. *)
+rationalTailCs = <|"ChartVar" -> t, "Center" -> 0, "SystemSize" -> 1,
+  "ThetaOriginal" -> {{1/(1 - t)}},
+  "IntegrationSequence" -> <|"Components" -> {{1}}|>|>;
+rationalTailBlocks = {<|"Gauge" -> {{1/(1 + t)}},
+  "GaugeInverse" -> {{1 + t}}|>};
+rationalTail = catchDE2[
+  DiffExp2`Solve`Private`sccRationalShadowSingularTailPayload[
+    rationalTailCs, rationalTailBlocks, "rational-tail-owner",
+    <|"domain" -> "rational", "symbols" -> {}|>, 80]];
+assert["physical_ode_singular_tail_uses_gauge_local_rational_clear",
+  AssociationQ[rationalTail] &&
+    rationalTail["schema"] ===
+      "diffexp2-scc-singular-tail-frame-v1" &&
+    rationalTail["epsilon_shifts"] === {0} &&
+    rationalTail["equation", "q"][[1, "valuation"]] === 0];
+
+genuineRationalPoleCs = <|"ChartVar" -> t, "Center" -> 0,
+  "SystemSize" -> 2, "ThetaOriginal" -> {{0, 1}, {0, 0}},
+  "IntegrationSequence" -> <|"Components" -> {{1}, {2}}|>|>;
+genuineRationalPoleBlocks = {
+  <|"Gauge" -> {{t}}, "GaugeInverse" -> {{1/t}}|>,
+  <|"Gauge" -> {{1}}, "GaugeInverse" -> {{1}}|>};
+genuineRationalPoleTail = catchDE2[
+  DiffExp2`Solve`Private`sccRationalShadowSingularTailPayload[
+    genuineRationalPoleCs, genuineRationalPoleBlocks,
+    "rational-center-pole-owner",
+    <|"domain" -> "rational", "symbols" -> {}|>, 80]];
+assert["physical_ode_gauge_local_clear_rejects_proved_rational_center_pole",
+  genuineRationalPoleTail === None];
+
 (* A regular chart belongs to an exact registered input system.  Its local
    physical equation is just the affine image of the global cleared pair.
    The fast path may retain a harmless coefficient-field unit that the

@@ -716,6 +716,80 @@ physicalPolynomialPairODEData[qExpr_, cMatrix_, cs_Association] := Module[
       "SHA256"], 16, 64];
   <|"Identity" -> identity, "Q" -> qData, "C" -> cData|>];
 
+(* Clear only the t-denominators introduced into an already-cleared q/C
+   equation by an exact rational gauge.  Starting again from Theta=C/q asks
+   the generic matrix clearer to insert q into every entry denominator and
+   then rediscover the same common q by a global PolynomialLCM.  On a large
+   SCC envelope that turns a handful of small gauge factors into a
+   matrix-sized symbolic GCD problem.
+
+   If h is the primitive common denominator of the entries of C, then
+
+                    (h q) theta = (h C)
+
+   is the identical equation.  This helper constructs that pair directly.
+   It removes only a common center monomial, whose cancellation is exact and
+   is needed because theta=t d/dt can put a harmless t on both sides.  The
+   caller still verifies that the resulting q(0,eps) is a formal unit; if an
+   uncommon moving common factor remains, it may retain the generic clearer
+   as a fail-safe rather than weakening the singular-tail theorem. *)
+physicalClearRationalPair[qExpr_, cMatrix_, cs_Association] := Module[
+  {t = cs["ChartVar"], d = cs["SystemSize"], denominators, den,
+   denCoeffs, denContent, clearedQ, clearedC, activePairEntries,
+   centerPower, timingQ, phaseStart, phase},
+  timingQ = Environment["DE2_SCC_GAUGE_TIMING"] === "1" ||
+    Environment["DE2_NATIVE_STAGE_TIMING"] === "1";
+  phaseStart = AbsoluteTime[];
+  phase[label_String] := If[timingQ, Module[{now = AbsoluteTime[]},
+    Print["DE2 GAUGE-LOCAL CLEAR center=", InputForm[cs["Center"]],
+      " phase=", label, " elapsedSeconds=", N[now - phaseStart, 8],
+      " memory=", MemoryInUse[]];
+    phaseStart = now]];
+  If[zeroCanQ[qExpr] || !PolynomialQ[qExpr, t] ||
+      !MatrixQ[cMatrix] || Dimensions[cMatrix] =!= {d, d},
+    err["E5", cs, <|
+      "Detail" ->
+        "rational precleared q/C input is not a polynomial-q square equation"|>]];
+  denominators = DeleteDuplicates[DeleteCases[
+    Denominator[Cancel[Together[#]]] & /@ Flatten[cMatrix], 1]];
+  phase["denominator-extraction"];
+  den = If[denominators === {}, 1,
+    Fold[PolynomialLCM, First[denominators], Rest[denominators]]];
+  phase["denominator-lcm"];
+  If[zeroCanQ[den] || !PolynomialQ[den, t],
+    err["E5", cs, <|
+      "Detail" ->
+        "rational precleared q/C gauge denominator is not a nonzero polynomial in the chart coordinate"|>]];
+  denCoeffs = Select[CoefficientList[den, t], !zeroCanQ[#] &];
+  If[denCoeffs === {},
+    err["E5", cs, <|
+      "Detail" -> "rational precleared q/C gauge denominator is zero"|>]];
+  denContent = If[Length[denCoeffs] === 1, First[denCoeffs],
+    Fold[PolynomialGCD, First[denCoeffs], Rest[denCoeffs]]];
+  den = Cancel[Together[den/denContent]];
+  phase["denominator-content"];
+  clearedQ = Cancel[Together[den*qExpr]];
+  clearedC = Map[Cancel[Together[den*#]] &, cMatrix, {2}];
+  phase["polynomial-pair-multiply"];
+  If[!PolynomialQ[clearedQ, t] ||
+      !AllTrue[Flatten[clearedC], PolynomialQ[#, t] &],
+    err["E5", cs, <|
+      "Detail" ->
+        "gauge-local denominator clear did not produce a polynomial q/C pair"|>]];
+  activePairEntries = Prepend[
+    Select[Flatten[clearedC], !zeroCanQ[#] &], clearedQ];
+  centerPower = Min[Exponent[#, t, Min] & /@ activePairEntries];
+  If[!IntegerQ[centerPower] || centerPower < 0,
+    err["E5", cs, <|"CenterPower" -> centerPower,
+      "Detail" ->
+        "gauge-local polynomial q/C pair has an invalid center valuation"|>]];
+  If[centerPower > 0,
+    clearedQ = Cancel[Together[clearedQ/t^centerPower]];
+    clearedC = Map[
+      Cancel[Together[#/t^centerPower]] &, clearedC, {2}]];
+  phase["center-normalization"];
+  <|"QExpr" -> clearedQ, "CMatrix" -> clearedC|>];
+
 (* Capture the exact equation in the delivered master basis, before any
    spectral V/VInv recurrence frame is applied:
 
@@ -5847,6 +5921,7 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
   {field, eps = DiffExp2`Config`CanonicalEps[], t = cs["ChartVar"],
    d = cs["SystemSize"], components, parentPhysicalData, parentCleared,
    qExpr, parentCMatrix, reducedCMatrix, directPolynomialQ,
+   rationalPair, rationalPairQ0,
    activePairEntries, centerPower, directQ0,
    reducedTheta, targetVertices, sourceVertices, reducedBlock,
    reducedSystem, reducedData, positions, constraints, shifts, changed,
@@ -5949,12 +6024,39 @@ sccRationalShadowSingularTailPayload[cs_Association, blockSystems_List,
     If[Lookup[directQ0, "Valuation", None] =!= 0,
       directPolynomialQ = False];
     phase["precleared-center-normalization"]];
+  If[!directPolynomialQ,
+    (* Rational t-dependence here comes from the small exact SCC gauges, not
+       from the parent physical equation.  Clear those gauge denominators on
+       the retained q/C pair before considering the legacy whole-matrix
+       clearer.  Accept the result only when its center coefficient already
+       satisfies the same formal-unit theorem; otherwise the legacy path
+       remains the compatibility fallback for a moving common factor. *)
+    rationalPair = physicalClearRationalPair[
+      qExpr, reducedCMatrix, cs];
+    rationalPairQ0 = physicalEpsRationalData[
+      Cancel[Together[rationalPair["QExpr"] /. t -> 0]], eps, cs];
+    If[TrueQ[Lookup[rationalPairQ0, "Zero", False]],
+      (* The gauge-local denominator is an actual common denominator, and
+         physicalClearRationalPair has already divided the largest center
+         monomial shared by q and every active C entry.  Therefore q(0)=0 at
+         this point means at least one active C entry has smaller t-valuation:
+         the reduced equation has a genuine center pole.  A generic global
+         clear cannot turn it into a formal unit. *)
+      Return[fail[
+        "Fuchsian rational block gauge retains a genuine center pole"],
+        Module]];
+    If[Lookup[rationalPairQ0, "Valuation", None] === 0,
+      qExpr = rationalPair["QExpr"];
+      reducedCMatrix = rationalPair["CMatrix"];
+      directPolynomialQ = True;
+      phase["gauge-local-denominator-clear"]]];
   If[directPolynomialQ,
     reducedData = physicalPolynomialPairODEData[
       qExpr, reducedCMatrix, cs];
     phase["reduced-precleared-encode"],
-    (* A future rational-in-t gauge remains supported by the established
-       generic clearer.  Only the proved polynomial pair takes the fast path. *)
+    (* Only a nonunit moving common factor can reach this compatibility path:
+       polynomial gauges and gauge-local rational denominators have already
+       been handled above with a proved formal-unit pair. *)
     reducedTheta = Map[Cancel[Together[#/qExpr]] &,
       reducedCMatrix, {2}];
     reducedSystem = KeyDrop[

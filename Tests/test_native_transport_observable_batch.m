@@ -333,6 +333,7 @@ assert["streamed value accuracy circuit bounds failed shortcuts but retains ever
    value call and must still build, consume, and retain every certified
    receiving basis. *)
 basisOnlyValueCalls = 0; basisOnlyValueBasisCalls = 0;
+basisOnlyCacheDrops = 0;
 basisOnlyValueOldEnvironment =
   Quiet[Environment["DE2_NATIVE_VALUE_HOP_EXECUTION"]];
 basisOnlyValueFixture = Internal`WithLocalSettings[
@@ -359,7 +360,9 @@ basisOnlyValueFixture = Internal`WithLocalSettings[
               <|"local" -> ("l:basis-only-next-" <> ToString[index]),
                 "checkpoint_identity" ->
                   ("basis-only-next-checkpoint-" <> ToString[index])|>,
-            "consumed_basis_handles" -> Lookup[basis, "local"]|>]},
+            "consumed_basis_handles" -> Lookup[basis, "local"]|>],
+      DiffExp2`Solve`DropWolframStaticOperatorCache =
+        Function[Null, basisOnlyCacheDrops++; Null]},
     DiffExp2`NativeTransport`Private`nativeStreamTransportArm[
       <|"Session" -> "stream-fixture-session",
         "Anchor" -> streamFixtureAnchor, "Plan" -> <||>, "Threads" -> 1,
@@ -383,7 +386,8 @@ basisOnlyValueFixture = Internal`WithLocalSettings[
 assert["value-aware plan can execute as certified basis-only transport",
   AssociationQ[basisOnlyValueFixture] &&
     Length[basisOnlyValueFixture["tile_sources"]] === 3 &&
-    basisOnlyValueCalls === 0 && basisOnlyValueBasisCalls === 2];
+    basisOnlyValueCalls === 0 && basisOnlyValueBasisCalls === 2 &&
+    basisOnlyCacheDrops === 2];
 
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[
@@ -806,6 +810,24 @@ assert["unexecuted deferred atlas release drops_public_equation_owner",
     Lookup[releasedOwnerResponse, "Failures", {"missing"}] === {} &&
     AssociationQ[releasedOwnerCounters] &&
     Lookup[releasedOwnerCounters, "regular_equation_owners", -1] === 0];
+
+staticDropRegistryBefore =
+  DiffExp2`Solve`Private`$systemClearRegistry;
+staticDropGlobalBefore =
+  DiffExp2`Solve`Private`$globalClearedCache;
+staticDropSCCBefore =
+  DiffExp2`Solve`Private`$nativeSCCCompositeCache;
+DiffExp2`Solve`Private`$cppStaticOperatorCache = <|
+  "completed-stream-basis" -> <|"Payload" -> "dead"|>|>;
+DiffExp2`Solve`DropWolframStaticOperatorCache[];
+assert["stream cache drop removes only completed static operators",
+  DiffExp2`Solve`Private`$cppStaticOperatorCache === <||> &&
+    SameQ[DiffExp2`Solve`Private`$systemClearRegistry,
+      staticDropRegistryBefore] &&
+    SameQ[DiffExp2`Solve`Private`$globalClearedCache,
+      staticDropGlobalBefore] &&
+    SameQ[DiffExp2`Solve`Private`$nativeSCCCompositeCache,
+      staticDropSCCBefore]];
 
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

@@ -33,6 +33,7 @@ PrepareNativeRegularBasisOwner::usage = "PrepareNativeRegularBasisOwner[chartSys
 WithNativeSCCCompositeCacheReservation::usage = "WithNativeSCCCompositeCacheReservation[count,expr] evaluates expr with capacity reserved for exactly count additional live native SCC composite owners. The reservation is dynamically scoped, never evicts a live public handle, and leaves ordinary direct preparation subject to the default bounded capacity.";
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
+DropWolframStaticOperatorCache::usage = "DropWolframStaticOperatorCache[] drops only completed Wolfram-side serialized recurrence-operator memo payloads. It preserves original-system clearing registries, chart/SCC preparation, and every retained native handle, so a streamed transport arm may call it after one receiving basis has been consumed.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -4186,6 +4187,8 @@ DropWolframPreparationCaches[] := Module[{},
   $cppHomogeneousFrameOverride = None;
   DiffExp2`SectorSeries`Private`$multiplyRationalPreparedCache = <||>;
   Null];
+
+DropWolframStaticOperatorCache[] := ($cppStaticOperatorCache = <||>; Null);
 
 (* The exact homogeneous work rectangle is needed both by the ordinary
    column builder and by persistent SCC preparation.  Keeping the arithmetic

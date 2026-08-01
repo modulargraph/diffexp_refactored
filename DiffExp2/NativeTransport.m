@@ -2413,7 +2413,7 @@ nativeStreamTransportArm[atlas_Association, data_Association,
      Environment["DE2_DIAGNOSTIC_PRETERMINAL_MATCH_ARM"],
    terminalMatchDigits, preterminalMatchDigits, preterminalMatchArm,
    hopRefinement,
-   diagnosticMatchDigits},
+   diagnosticMatchDigits, cacheMemoryBefore, cacheMemoryAfter},
   If[!ListQ[valueSolvers] || Length[valueSolvers] =!= Length[systems],
     err["E6", <|"Arm" -> arm,
       "ValueSolverCount" -> Quiet[Check[Length[valueSolvers], None]],
@@ -2757,7 +2757,24 @@ nativeStreamTransportArm[atlas_Association, data_Association,
             " identity=", posthopIdentity]]];
       current = next;
       basis = None;
+      (* A streamed receiving basis has transferred all of its opaque locals
+         to the retained native arm at this point.  Its exact Wolfram-side
+         frame and serialized static operator are no longer reusable: the
+         next chart has a different center/frame, and a rational-shadow retry
+         was already resolved above.  Keeping those memo entries until the
+         entire arm finishes grows by one full operator payload per hop and
+         defeats the bounded-memory streaming contract.  Drop only completed
+         serialized-operator memo payloads.  In particular, preserve the
+         original-system clearing registry needed by later singular charts,
+         together with every retained native owner, local, match, and plan. *)
+      cacheMemoryBefore = MemoryInUse[];
+      DiffExp2`Solve`DropWolframStaticOperatorCache[];
       ClearSystemCache[];
+      cacheMemoryAfter = MemoryInUse[];
+      nativeStageTiming["stream-post-hop-cache-drop arm=", arm,
+        " index=", index, " before=", cacheMemoryBefore,
+        " after=", cacheMemoryAfter,
+        " released=", cacheMemoryBefore - cacheMemoryAfter];
       nativeStageTiming["stream-hop-done arm=", arm,
         " index=", index,
         " execution=", Lookup[response, "execution_mode", None],

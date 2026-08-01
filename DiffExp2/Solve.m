@@ -1298,7 +1298,7 @@ regularIdentityFrameQ[cs_Association] :=
    to every regular chart instead of recomputed after the algebraic shift. *)
 globalClearedSystem[systemKey_] := Module[
   {cached, input, x, A, den, denCoeffs, denContent, num,
-   numCoefficientLists, phaseQ, phaseTime},
+   numRationalCoefficientData, phaseQ, phaseTime},
   cached = If[KeyExistsQ[$globalClearedCache, systemKey],
     $globalClearedCache[systemKey], None];
   If[cached =!= None, Return[cached, Module]];
@@ -1331,11 +1331,27 @@ globalClearedSystem[systemKey_] := Module[
       "Detail" ->
         "globally cleared denominator or numerator is not polynomial in the system variable"|>]];
   denCoeffs = CoefficientList[den, x];
-  numCoefficientLists = Map[CoefficientList[#, x] &, num, {2}];
+  (* Each globally cleared entry is a polynomial in x over the epsilon
+     coefficient field.  Retain one common epsilon-only denominator for the
+     complete x polynomial instead of distributing it into every coefficient.
+     Affine translation can then operate on polynomial numerators and carry
+     the denominator unchanged, avoiding a large rational sum at each chart. *)
+  numRationalCoefficientData = Map[Function[entry, Module[
+      {entryDenominator = Denominator[entry],
+       entryNumerator = Numerator[entry]},
+      If[!FreeQ[entryDenominator, x] ||
+          !PolynomialQ[entryNumerator, x],
+        err["E5", <|"Center" -> "global-system-clear"|>, <|
+          "Entry" -> entry,
+          "Detail" ->
+            "globally cleared entry did not expose an x-polynomial numerator over an x-independent coefficient denominator"|>]];
+      <|"Denominator" -> entryDenominator,
+        "NumeratorCoefficientList" ->
+          CoefficientList[entryNumerator, x]|>]], num, {2}];
   cached = <|"Variable" -> x, "Denominator" -> den,
     "Numerator" -> num,
     "DenominatorCoefficientList" -> denCoeffs,
-    "NumeratorCoefficientLists" -> numCoefficientLists,
+    "NumeratorRationalCoefficientData" -> numRationalCoefficientData,
     "Dimension" -> Length[A]|>;
   AssociateTo[$globalClearedCache, systemKey -> cached];
   cached];
@@ -1416,15 +1432,18 @@ affinePhysicalClearedFromGlobal[cs_Association] := Module[
   If[affineContentInvariantQ,
     transformDegree = Max[
       Length[global["DenominatorCoefficientList"]] - 1,
-      Max[Length /@ Flatten[
-        global["NumeratorCoefficientLists"], 1]] - 1];
+      Max[Length /@ Lookup[Flatten[
+        global["NumeratorRationalCoefficientData"], 1],
+          "NumeratorCoefficientList"]] - 1];
     coefficientTransform = affinePolynomialCoefficientTransform[
       transformDegree, center, beta];
     dExpr = affineTranslatePolynomialCoefficientList[
       global["DenominatorCoefficientList"], coefficientTransform];
-    numCoefficientLists = Map[
-      affineTranslatePolynomialCoefficientList[#, coefficientTransform] &,
-      global["NumeratorCoefficientLists"], {2}];
+    numCoefficientLists = Map[Function[entryData,
+        affineTranslatePolynomialCoefficientList[
+          entryData["NumeratorCoefficientList"],
+          coefficientTransform]/entryData["Denominator"]],
+      global["NumeratorRationalCoefficientData"], {2}];
     numCoefficientLists = Map[Prepend[beta*#, 0] &,
       numCoefficientLists, {2}];
     activeCoefficientLists = Prepend[

@@ -839,6 +839,29 @@ preparedReductionCacheQ[data_, rc_] := AssociationQ[rc] &&
       AssociationQ[entry] && KeyExistsQ[entry, "Reduction"] &&
         KeyExistsQ[entry, "Masters"]]]];
 
+hydratePreparedReductionCache[data_Association] := Module[
+  {nLevels = Lookup[data, "NumLevels", 0], batches},
+  If[!IntegerQ[nLevels] || nLevels < 0,
+    Return[Failure["PreparedFTReductionHydration", <|
+      "Detail" -> "prepared data has an invalid level count",
+      "NumLevels" -> nLevels|>], Module]];
+  batches = AssociationMap[
+    FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[data, #] &,
+    Range[nLevels]];
+  If[AnyTrue[Values[batches], !AssociationQ[#] &],
+    Return[Failure["PreparedFTReductionHydration", <|
+      "Detail" -> "an exact boundary-reduction batch failed",
+      "FailedLevels" -> Keys@Select[batches, !AssociationQ[#] &]|>],
+      Module]];
+  If[!preparedReductionCacheQ[data,
+      FeynmanTrick`FIREInterface`Private`$ReductionCache],
+    Return[Failure["PreparedFTReductionHydration", <|
+      "Detail" ->
+        "exact boundary batches did not populate every snapshot reduction key"
+      |>], Module]];
+  batches
+];
+
 ftPrepKey[name_String, topology_Association, sequence_List] :=
   ftPrepContractKey[ftPrepContractRecord[name, topology, sequence]];
 
@@ -2971,7 +2994,8 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
   AllTrue[Lookup[record, {"SourceCompleteMax", "TargetCompleteMax",
       "RequiredTargetCompleteMax",
       "DeliverableCompleteMax", "RequiredRawTop",
-      "CoefficientHalo", "IntegrationHalo", "MatchEpsilonPadding"},
+      "CoefficientHalo", "IntegrationHalo",
+      "MatchEpsilonPadding"},
     None], IntegerQ] &&
   With[{source = record["SourceCompleteMax"],
       target = record["TargetCompleteMax"],
@@ -2980,12 +3004,25 @@ ft2NativeCheckpointRecordQ[record_] := AssociationQ[record] &&
       required = record["RequiredRawTop"],
       coefficientHalo = record["CoefficientHalo"],
       integrationHalo = record["IntegrationHalo"],
-      matchPadding = record["MatchEpsilonPadding"]},
+      matchPadding = record["MatchEpsilonPadding"],
+      hasRequiredSolve =
+        KeyExistsQ[record, "RequiredSolveCompleteMax"],
+      hasMaximumSourceLoss =
+        KeyExistsQ[record, "MaximumSourceLoss"]},
     coefficientHalo >= 0 && matchPadding >= 0 &&
       MemberQ[{0, 1}, integrationHalo] &&
-      requiredTarget + matchPadding === source - coefficientHalo &&
       source >= target >= deliverable >= required &&
-      target >= requiredTarget];
+      target >= requiredTarget &&
+      If[hasRequiredSolve && hasMaximumSourceLoss,
+        With[{requiredSolve = record["RequiredSolveCompleteMax"],
+            maximumSourceLoss = record["MaximumSourceLoss"]},
+          IntegerQ[requiredSolve] && IntegerQ[maximumSourceLoss] &&
+            maximumSourceLoss >= 0 &&
+            requiredSolve === requiredTarget + maximumSourceLoss &&
+            requiredSolve + matchPadding === source &&
+            source >= requiredSolve],
+        !hasRequiredSolve && !hasMaximumSourceLoss &&
+          requiredTarget + matchPadding === source - coefficientHalo]];
 
 ft2NativeTransportContract[name_String, level_Integer, prepKey_, sys_,
     boundaryValues_, boundaryPrefactors_, entries_List, ledger_Association,
@@ -3642,7 +3679,8 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
     downstreamFiniteTop_Integer,
     downstreamPublicFiniteTop_Integer] := Module[
   {widths, availableSourceMax, active, nonDirect,
-   coefficientShift, coefficientHalo, integrationHalo, targetMax,
+   coefficientShift, coefficientHalo, integrationHalo, entrySourceLosses,
+   maximumSourceLoss, targetMax, requiredSolveMax,
    publicTargetMax, deliverableMax, publicDeliverableMax,
    maximumDeliverableMax, outputMins, capacityByMaster,
    activeCapacities},
@@ -3657,8 +3695,21 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
   nonDirect = Select[active, #["Case"] =!= "direct" &];
   coefficientShift = If[nonDirect === {}, 0,
     Min[Lookup[nonDirect, "MinimumEpsilonShift"]]];
-  coefficientHalo = Max[0, -coefficientShift];
   integrationHalo = ft2NativeIntegrationHalo[active];
+  (* The padded native source already carries the one global primitive order
+     whenever any integrate row is present.  Compute the remaining atlas halo
+     from each row's combined loss before taking a maximum.  Taking the worst
+     coefficient pole and the integration halo independently can combine two
+     different rows (for example, a limit row at -6 and an integrate row at
+     -5) and invent one unavailable epsilon order even though every row has
+     sufficient exact capacity. *)
+  entrySourceLosses = Association@Map[Function[entry,
+    entry["MasterIndex"] -> Max[0,
+      If[entry["Case"] === "integrate", 1, 0] -
+        entry["MinimumEpsilonShift"]]], nonDirect];
+  maximumSourceLoss = If[entrySourceLosses === <||>, 0,
+    Max[Values[entrySourceLosses]]];
+  coefficientHalo = Max[0, maximumSourceLoss - integrationHalo];
   (* downstreamFiniteTop is the independently planned public output edge.
      Keep it distinct from the source reservoir: integration needs one state
      coefficient beyond that edge, while every remaining source coefficient
@@ -3669,6 +3720,7 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
   publicDeliverableMax = downstreamPublicFiniteTop;
   targetMax = deliverableMax + integrationHalo;
   publicTargetMax = publicDeliverableMax + integrationHalo;
+  requiredSolveMax = publicDeliverableMax + maximumSourceLoss;
   outputMins = Association@Map[Function[entry,
     entry["MasterIndex"] -> If[entry["Case"] === "integrate",
       entry["MinimumEpsilonShift"] - integrationHalo,
@@ -3684,7 +3736,7 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
       downstreamPublicFiniteTop > downstreamFiniteTop ||
       targetMax < 0 || publicTargetMax < 0 ||
       maximumDeliverableMax < deliverableMax ||
-      targetMax > availableSourceMax - coefficientHalo,
+      requiredSolveMax > availableSourceMax,
     Return[ft2NativeFailure[
       "source epsilon depth cannot cover the downstream raw boundary window",
       <|"AvailableSourceCompleteMax" -> availableSourceMax,
@@ -3692,6 +3744,7 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
         "CoefficientHalo" -> coefficientHalo,
         "IntegrationHalo" -> integrationHalo,
         "PublicTargetCompleteMax" -> publicTargetMax,
+        "RequiredSolveCompleteMax" -> requiredSolveMax,
         "TargetCompleteMax" -> targetMax,
         "PublicDeliverableCompleteMax" -> publicDeliverableMax,
         "DeliverableCompleteMax" -> deliverableMax,
@@ -3702,10 +3755,14 @@ ft2NativeEpsilonLedger[entries_List, currentBCs_List,
     "CoefficientMinimumShift" -> coefficientShift,
     "CoefficientHalo" -> coefficientHalo,
     "IntegrationHalo" -> integrationHalo,
+    "EntrySourceLosses" -> entrySourceLosses,
+    "MaximumSourceLoss" -> maximumSourceLoss,
     "PublicTargetCompleteMax" -> publicTargetMax,
+    "RequiredSolveCompleteMax" -> requiredSolveMax,
     "TargetCompleteMax" -> targetMax,
     "PublicDeliverableCompleteMax" -> publicDeliverableMax,
     "DeliverableCompleteMax" -> deliverableMax,
+    "MaximumDeliverableCompleteMax" -> maximumDeliverableMax,
     "OutputMinimums" -> outputMins,
     "CapacityByMaster" -> capacityByMaster,
     "DownstreamFiniteTop" -> downstreamFiniteTop,
@@ -3753,13 +3810,15 @@ ft2NativeSegmentLine[sys_, path_] :=
   DiffExp2`Transport`SegmentLine[
     sys, path, "ValueTailContract" -> "NativeCertified"];
 ft2NativePrepare[sys_, boundary_, lower_, upper_, coefficientVectors_,
-    physicalVar_, targetMax_, requiredTargetMax_, threads_,
+    integrandRequiredMaxima_, physicalVar_, targetMax_,
+    requiredTargetMax_, threads_,
     matchingCertificationDigits_] :=
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
     sys, boundary, lower, upper, "Threads" -> threads,
     "Integrands" -> {coefficientVectors, physicalVar},
     "TargetCompleteMax" -> targetMax,
     "RequiredTargetCompleteMax" -> requiredTargetMax,
+    "IntegrandRequiredCompleteMaxima" -> integrandRequiredMaxima,
     "MatchingCertificationDigits" -> matchingCertificationDigits,
     "DeferReceivingBases" -> True];
 SetAttributes[ft2NativeRun, HoldFirst];
@@ -3855,7 +3914,7 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
    restoredNativeQ = False, resumeCore, checkpointAuditRecord = None,
    publishResult = None, makeCheckpointAuditRecord, nativeBatchMatchesQ,
    nativeResultByMaster = <||>, certifications,
-   divergentCancellation},
+   divergentCancellation, integrandRequiredMaxima},
   masterIndices = Lookup[entries, "MasterIndex", {}];
   batchKeys = DeleteDuplicates[Lookup[entries, "BatchKey", {}]];
   batchPayloadKeys =
@@ -3929,17 +3988,20 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
     "SourceCompleteMax" -> ledger["SourceCompleteMax"],
     "TargetCompleteMax" -> ledger["TargetCompleteMax"],
     "RequiredTargetCompleteMax" ->
-      ledger["PublicTargetCompleteMax"],
+      ledger["PublicDeliverableCompleteMax"],
+    "RequiredSolveCompleteMax" ->
+      ledger["RequiredSolveCompleteMax"],
     "DeliverableCompleteMax" -> deliverableMax,
     "RequiredRawTop" -> ledger["DownstreamRawTop"],
     "CoefficientHalo" -> ledger["CoefficientHalo"],
     "IntegrationHalo" -> integrationHalo,
+    "MaximumSourceLoss" -> ledger["MaximumSourceLoss"],
     "MatchEpsilonPadding" -> If[AssociationQ[atlas],
       Lookup[atlas, "MatchEpsilonPadding",
-        ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-          ledger["PublicTargetCompleteMax"]],
-      ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-        ledger["PublicTargetCompleteMax"]]|>;
+        ledger["SourceCompleteMax"] -
+          ledger["RequiredSolveCompleteMax"]],
+      ledger["SourceCompleteMax"] -
+        ledger["RequiredSolveCompleteMax"]]|>;
   provenZeroEntries = Select[entries,
     TrueQ[Lookup[#, "ProvenZero", False]] &];
   activeEntries = Select[entries,
@@ -4038,6 +4100,10 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
           "DivergentCancellation" -> divergentCancellation|>],
         observable]]],
       nativeEntries];
+    integrandRequiredMaxima = Map[
+      #["Epsilon", "RequiredCompleteMax"] +
+        If[#["Operation"] === "integrate", 1, 0] &,
+      observables];
     nativeBatchMatchesQ[candidate_, expectedAtlas_] :=
       AssociationQ[candidate] &&
       Lookup[candidate, "Type", None] ===
@@ -4087,8 +4153,9 @@ ft2RunNativeBoundaryDispatch[sys_Association, currentBCs_List,
         ft2NativeStageTiming["atlas-prepare-start"];
         atlas = catch2[ft2NativePrepare[transportSystem, paddedBoundary,
           lowerPlan, upperPlan, Lookup[nativeEntries, "CoefficientVector"],
-          physicalVar, ledger["TargetCompleteMax"],
-          ledger["PublicTargetCompleteMax"], threads,
+          integrandRequiredMaxima, physicalVar,
+          ledger["TargetCompleteMax"],
+          ledger["PublicDeliverableCompleteMax"], threads,
           matchingCertificationDigits]];
         If[FailureQ[atlas] || !AssociationQ[atlas] ||
             Lookup[atlas, "Type", None] =!=
@@ -4268,7 +4335,8 @@ runExample[name_String, familyRequest_:None,
    discoveredCheckpoint, customQ, family, outputName, numericalPoint,
    outputIntegrals, outputRequests, dimensionExpression, familyID,
    pipelineRequestID, outputMode = None, outputResolution = None,
-   outputResolutionLine, pretrimFinalPoleAudit, fixedParameterValues},
+   outputResolutionLine, pretrimFinalPoleAudit, fixedParameterValues,
+   prepBatches, prepSaveResult},
   customQ = familyRequest =!= None;
   If[customQ &&
       !TrueQ[FeynmanTrick`PipelineRequest`PipelineRequestQ[familyRequest]],
@@ -4372,7 +4440,18 @@ runExample[name_String, familyRequest_:None,
     CreateDirectory[outputDir, CreateIntermediateDirectories -> True];
     ftData = FeynmanTrick`FeynmanTrickIteration`RunFullIteration[ftData, outputDir];
     If[preparedFTDataQ[ftData],
-      savePreparedFT[prepFile, prepContract, ftData]]];
+      (* RunFullIteration prepares the differential systems, while the exact
+         boundary reductions are first requested by the native epsilon
+         preplanner.  Hydrate them before writing the snapshot so a learned
+         one-order retry can actually reload the expensive preparation. *)
+      prepBatches = hydratePreparedReductionCache[ftData];
+      If[FailureQ[prepBatches],
+        Print["FTPREP REDUCTION HYDRATION FAIL ", prepBatches];
+        Return[$Failed, Module]];
+      prepSaveResult = savePreparedFT[
+        prepFile, prepContract, ftData];
+      If[prepSaveResult === $Failed && TrueQ[ft2PreparationOnly],
+        Return[$Failed, Module]]]];
   If[ftData === $Failed, Return[$Failed]];
   If[TrueQ[ft2PreparationOnly],
     Print["FTPREP ONLY COMPLETE ", prepFile];

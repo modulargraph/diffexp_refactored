@@ -198,6 +198,32 @@ assert["common prefactor shifts cancel instead of becoming recursive halos",
     runtimeLedger["DeliverableCompleteMax"] === 0,
   {runtimeParity, runtimeLedger}];
 
+(* A global primitive pad must not be added again to the worst coefficient
+   pole when those extrema belong to different rows.  This is the geometry
+   encountered by the Henn level-3 handoff: the integrate row loses six
+   orders in total, the endpoint-limit row also loses six, and a source top
+   of 22 therefore exactly covers the requested raw top 16. *)
+mixedHaloEntries = {
+  <|"MasterIndex" -> 1, "Case" -> "integrate",
+    "ProvenZero" -> False, "MinimumEpsilonShift" -> -5|>,
+  <|"MasterIndex" -> 2, "Case" -> "limitUpper",
+    "ProvenZero" -> False, "MinimumEpsilonShift" -> -6|>};
+mixedHaloSourceRows = {
+  ConstantArray[0, 23], ConstantArray[0, 23]};
+mixedHaloLedger = ft2NativeEpsilonLedger[
+  mixedHaloEntries, mixedHaloSourceRows, 16, 16];
+assert["mixed-row halo accounting takes the maximum combined row loss",
+  AssociationQ[mixedHaloLedger] &&
+    mixedHaloLedger["IntegrationHalo"] === 1 &&
+    mixedHaloLedger["EntrySourceLosses"] === <|1 -> 6, 2 -> 6|> &&
+    mixedHaloLedger["MaximumSourceLoss"] === 6 &&
+    mixedHaloLedger["CoefficientHalo"] === 5 &&
+    mixedHaloLedger["TargetCompleteMax"] === 17 &&
+    mixedHaloLedger["RequiredSolveCompleteMax"] === 22 &&
+    mixedHaloLedger["MaximumDeliverableCompleteMax"] === 16 &&
+    mixedHaloLedger["CapacityByMaster"] === <|1 -> 16, 2 -> 16|>,
+  mixedHaloLedger];
+
 deepBoundary[requested_Integer, prefactor_Integer] := Module[
   {working = requested + prefactor},
   <|"BoundaryValues" -> ConstantArray[

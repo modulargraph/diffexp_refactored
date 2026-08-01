@@ -8,7 +8,7 @@ BeginPackage["DiffExp2`NativeTransport`",
    "DiffExp2`CppBackend`"}];
 
 PrepareNativeRegularIndependentArms::usage =
-  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest global epsilon halo required by polar coefficient rows. TargetCompleteMax->Automatic uses the configured EpsilonOrder; a nonnegative integer selects the public atlas target before the coefficient halo is added to the source solve. MatchingCertificationDigits must match the subsequent observable run and binds deferred value-handoff accuracy to that run rather than to an unrelated global chop target. It returns only opaque native locals/bases and exact atlas metadata.";
+  "PrepareNativeRegularIndependentArms[sys,boundary,lowerPlan,upperPlan] prepares one shared regular retained anchor, dispatches every non-anchor chart strictly to a regular basis or supported exact affine-Jordan SCC basis, and creates one exact lower/upper native tile plan. Unsupported singular charts fail loudly without fallback. Option Integrand->{cvec,var}, or mutually exclusive Integrands->{cvecs,var}, derives the honest epsilon halo required by polar coefficient rows. IntegrandRequiredCompleteMaxima may give one operation-specific target per Integrands row, preventing unrelated coefficient and primitive maxima from being combined into a fictitious global halo. TargetCompleteMax->Automatic uses the configured EpsilonOrder; a nonnegative integer selects the public atlas target before the coefficient halo is added to the source solve. MatchingCertificationDigits must match the subsequent observable run and binds deferred value-handoff accuracy to that run rather than to an unrelated global chop target. It returns only opaque native locals/bases and exact atlas metadata.";
 RunNativeRegularIndependentArms::usage =
   "RunNativeRegularIndependentArms[atlas,cvec,var] precomputes one exact rational integrand row per tile, then marches regular or supported exact affine-Jordan singular receiving charts on the lower and upper arms concurrently in one persistent C++ request. Matching remains vector-valued, row projection is hidden, every tile and both arm sums remain native, and only the two final locals plus lower/upper/combined line handles are published.";
 RunNativeTransportObservableBatch::usage =
@@ -1699,6 +1699,7 @@ Options[PrepareNativeRegularIndependentArms] = {
   "Threads" -> Automatic, "Integrand" -> Automatic,
   "Integrands" -> Automatic, "TargetCompleteMax" -> Automatic,
   "RequiredTargetCompleteMax" -> Automatic,
+  "IntegrandRequiredCompleteMaxima" -> Automatic,
   "MatchingCertificationDigits" -> Automatic,
   "RegularValueAggregationGuardDigits" -> Automatic,
   "DeferReceivingBases" -> False};
@@ -1710,10 +1711,13 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
    upperData, sessions, anchorOwner, anchorStats, lowerOwners, upperOwners,
    planIdentity,
    nativePlan = None, geometryAudit = None, sessionStats,
-   domain, integrand,
+   domain, integrand, integrandVectors, preparedShifts,
    preparedShift, halo, targetMax, targetOption =
      OptionValue["TargetCompleteMax"], requiredTargetMax,
    requiredTargetOption = OptionValue["RequiredTargetCompleteMax"],
+   integrandRequiredMaximaOption =
+     OptionValue["IntegrandRequiredCompleteMaxima"],
+   integrandRequiredMaxima,
    availableMax,
    minimumSolveMax, matchEpsilonPadding,
    matchingCertificationDigits =
@@ -1766,23 +1770,47 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
   If[integrand =!= Automatic && integrands =!= Automatic,
     err["E8", <|"Integrand" -> integrand, "Integrands" -> integrands,
       "Detail" -> "Integrand and Integrands are mutually exclusive native halo declarations"|>]];
-  preparedShift = Which[
-    integrand === Automatic && integrands === Automatic, 0,
+  integrandVectors = Which[
+    integrand === Automatic && integrands === Automatic, {},
     MatchQ[integrand, {_List, _Symbol}],
-      nativeIntegrandMinimumShift[integrand[[1]], integrand[[2]],
-        dimension],
+      {integrand[[1]]},
     MatchQ[integrands, {_List, _Symbol}] &&
         AllTrue[integrands[[1]], ListQ],
-      If[integrands[[1]] === {}, 0,
-        Min[nativeIntegrandMinimumShift[#, integrands[[2]],
-            dimension] & /@ DeleteDuplicates[integrands[[1]], SameQ]]],
+      integrands[[1]],
     True, err["E8", <|"Integrand" -> integrand,
       "Integrands" -> integrands,
       "Detail" -> "Integrand must be Automatic or {coefficientVector,physicalVariable}; Integrands must be Automatic or {coefficientVectors,physicalVariable}"|>]];
+  preparedShifts = If[integrandVectors === {}, {},
+    nativeIntegrandMinimumShift[#,
+        If[integrand =!= Automatic, integrand[[2]], integrands[[2]]],
+        dimension] & /@ integrandVectors];
+  preparedShift = If[preparedShifts === {}, 0, Min[preparedShifts]];
+  integrandRequiredMaxima = If[
+    integrandRequiredMaximaOption === Automatic, Automatic,
+    If[!ListQ[integrandRequiredMaximaOption] ||
+        Length[integrandRequiredMaximaOption] =!= Length[integrandVectors] ||
+        !AllTrue[integrandRequiredMaximaOption,
+          IntegerQ[#] && 0 <= # <= targetMax &],
+      err["E8", <|
+        "IntegrandRequiredCompleteMaxima" ->
+          integrandRequiredMaximaOption,
+        "IntegrandCount" -> Length[integrandVectors],
+        "TargetCompleteMax" -> targetMax,
+        "Detail" ->
+          "IntegrandRequiredCompleteMaxima must be Automatic or one integer from zero through TargetCompleteMax per declared integrand"|>],
+      integrandRequiredMaximaOption]];
   halo = Max[0, -preparedShift];
   epsMin = Min[0, Min[esMin /@ values]];
   availableMax = Min[esCM /@ values];
-  minimumSolveMax = requiredTargetMax + halo;
+  (* A batch may mix integration and endpoint observables.  Their individual
+     state targets differ by the primitive epsilon order, so combine each
+     target only with its own coefficient valuation before taking a maximum.
+     The legacy Automatic contract remains deliberately conservative. *)
+  minimumSolveMax = If[integrandRequiredMaxima === Automatic,
+    requiredTargetMax + halo,
+    Max[Prepend[MapThread[
+      #1 + Max[0, -#2] &,
+      {integrandRequiredMaxima, preparedShifts}], requiredTargetMax]]];
   If[availableMax < minimumSolveMax,
     err["E6", <|"BoundaryCompleteMax" -> availableMax,
       "RequestedCompleteMax" -> targetMax,
@@ -1988,12 +2016,16 @@ PrepareNativeRegularIndependentArms[sys_Association, boundary_,
     "DeferredReceivingBases" -> deferReceivingBases,
     "TargetCompleteMax" -> targetMax,
     "RequiredTargetCompleteMax" -> requiredTargetMax,
+    "RequiredSolveCompleteMax" -> minimumSolveMax,
     "MatchEpsilonPadding" -> matchEpsilonPadding,
     "MatchingCertificationDigits" -> matchingCertificationDigits,
     "RegularValueAggregationGuardDigits" ->
       regularValueAggregationGuardDigits,
     "Threads" -> threads,
     "PreparedIntegrandEpsilonShift" -> preparedShift,
+    "PreparedIntegrandEpsilonShifts" -> preparedShifts,
+    "PreparedIntegrandRequiredCompleteMaxima" ->
+      integrandRequiredMaxima,
     "PlanCheckpointIdentity" -> planIdentity|>,
   "DiffExp2Error", Function[{failure, tag},
     cleanup[]; Throw[failure, tag]]]];

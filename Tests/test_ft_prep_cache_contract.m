@@ -160,6 +160,24 @@ preparedData = <|
 neededKey = First[requiredReductionKeys[preparedData]];
 legacyCache = Association[neededKey -> <|
   "Reduction" -> Global`G[1, {2, 0}], "Masters" -> {{2, 0}}|>];
+FeynmanTrick`FIREInterface`Private`$ReductionCache = <||>;
+hydrationCalls = {};
+hydratedBatches = Block[{
+    FeynmanTrick`LevelReduction`PrepareLevelIBPBatch},
+  FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[data_, level_] := Module[
+    {key = First[requiredReductionKeys[data]]},
+    AppendTo[hydrationCalls, level];
+    AssociateTo[FeynmanTrick`FIREInterface`Private`$ReductionCache,
+      key -> <|"Reduction" -> Global`G[1, {2, 0}],
+        "Masters" -> {{2, 0}}|>];
+    <|"UpperLevel" -> level|>];
+  hydratePreparedReductionCache[preparedData]];
+test["fresh preparation hydrates exact boundary reductions before snapshot",
+  AssociationQ[hydratedBatches] && hydrationCalls === {1} &&
+    preparedReductionCacheQ[preparedData,
+      FeynmanTrick`FIREInterface`Private`$ReductionCache],
+  {hydratedBatches, hydrationCalls,
+    FeynmanTrick`FIREInterface`Private`$ReductionCache}];
 legacyPayload = <|"Version" -> 2, "Key" -> 424242,
   "FTData" -> preparedData, "ReductionCache" -> legacyCache|>;
 legacyFile = FileNameJoin[{tmpDir, "prep-contract_legacy.mx"}];

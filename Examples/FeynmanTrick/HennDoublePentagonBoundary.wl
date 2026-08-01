@@ -49,6 +49,17 @@ positiveIntegerEnvironment[name_String, default_Integer] := Module[
   value
 ];
 
+flagEnvironment[name_String, default_] := Module[{text},
+  text = environmentOrDefault[name, If[TrueQ[default], "1", "0"]];
+  Switch[text,
+    "0", False,
+    "1", True,
+    _,
+      Print[name, " must be 0 or 1; received ", InputForm[text]];
+      Exit[2]
+  ]
+];
+
 arguments = Rest[$ScriptCommandLine];
 planOnly = MemberQ[arguments, "--plan"];
 arguments = DeleteCases[arguments, "--plan"];
@@ -244,6 +255,8 @@ divisionOrder = positiveIntegerEnvironment[
   "HENN_FT_DIVISION_ORDER", 5];
 fireTimeoutSeconds = positiveIntegerEnvironment[
   "HENN_FT_FIRE_TIMEOUT_SECONDS", 1800];
+allowStaleCheckpoint = flagEnvironment[
+  "FT_ALLOW_STALE_LADDER_CHECKPOINT", False];
 l0ReductionBatchSize = positiveIntegerEnvironment[
   "HENN_FT_L0_REDUCTION_BATCH_SIZE", 4];
 l0FireThreads = positiveIntegerEnvironment[
@@ -320,6 +333,7 @@ pipelineOptions[] := Module[
   "CheckpointDirectory" ->
     FileNameJoin[{checkpointRoot,
       "henn-double-pentagon-x0-master-basis"}],
+  "AllowStaleCheckpoint" -> allowStaleCheckpoint,
   (* Full Acb state propagation and endpoint publication remain at eight
      digits.  The measured level-3 chart-to-chart consistency diagnostic has
      a stable 1.7*10^-7 midpoint floor, so only that internal diagnostic is

@@ -766,13 +766,14 @@ mixed = Block[{
     ft2NativeSegmentLine = Function[{system, path},
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
-      {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads,
+      {system, boundary, lower, upper, coefficientVectors,
+       integrandRequiredMaxima, variable, targetMax, requiredTargetMax, threads,
        matchingCertificationDigits},
       counts["prepare"]++;
       capturedMaxExtraPrecision = $MaxExtraPrecision;
       capturedPrepare = <|"Boundary" -> boundary,
         "CoefficientVectors" -> coefficientVectors,
+        "IntegrandRequiredCompleteMaxima" -> integrandRequiredMaxima,
         "TargetCompleteMax" -> targetMax,
         "RequiredTargetCompleteMax" -> requiredTargetMax,
         "Threads" -> threads,
@@ -840,7 +841,9 @@ assert["atlas preparation receives every active non-direct vector and exact targ
     capturedMaxExtraPrecision >=
       DiffExp2`Tolerances`$MaxExtraPrecisionValue &&
     capturedPrepare["TargetCompleteMax"] === 8 &&
-    capturedPrepare["RequiredTargetCompleteMax"] === 4 &&
+    capturedPrepare["RequiredTargetCompleteMax"] === 3 &&
+    capturedPrepare["IntegrandRequiredCompleteMaxima"] ===
+      {4, 3, 3, 4} &&
     Length[capturedPrepare["CoefficientVectors"]] === 4 &&
     AllTrue[capturedPrepare["Boundary"],
       DiffExp2`EpsSeries`ESMinPower[#] === -1 &&
@@ -949,8 +952,9 @@ checkpointSpec = <|"Mode" -> "Save",
 checkpointed = Block[{
     ft2NativeSegmentLine = Function[{system, path}, <|"Path" -> path|>],
     ft2NativePrepare = Function[
-      {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads},
+      {system, boundary, lower, upper, coefficientVectors,
+       integrandRequiredMaxima, variable, targetMax, requiredTargetMax,
+       threads, matchingCertificationDigits},
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "checkpoint-atlas-plan"|>],
     ft2NativeRun = Function[
@@ -995,8 +999,9 @@ restoredDispatch = Block[{
     ft2NativeSegmentLine = Function[{system, path},
       restoreCounts["segment"]++; $Failed],
     ft2NativePrepare = Function[
-      {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads},
+      {system, boundary, lower, upper, coefficientVectors,
+       integrandRequiredMaxima, variable, targetMax, requiredTargetMax,
+       threads, matchingCertificationDigits},
       restoreCounts["prepare"]++; $Failed],
     ft2NativeRun = Function[
       {atlas, observables, variable, matchingCertificationDigits,
@@ -1059,8 +1064,9 @@ directOnly = Block[{
     ft2NativeSegmentLine = Function[{system, path},
       counts["segment"]++; $Failed],
     ft2NativePrepare = Function[
-      {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads},
+      {system, boundary, lower, upper, coefficientVectors,
+       integrandRequiredMaxima, variable, targetMax, requiredTargetMax,
+       threads, matchingCertificationDigits},
       counts["prepare"]++; $Failed],
     ft2NativeRun = Function[
       {atlas, observables, variable, matchingCertificationDigits,
@@ -1095,8 +1101,9 @@ malformedBatch = Block[{
     ft2NativeSegmentLine = Function[{system, path},
       counts["segment"]++; <|"Path" -> path|>],
     ft2NativePrepare = Function[
-      {system, boundary, lower, upper, coefficientVectors, variable,
-       targetMax, requiredTargetMax, threads},
+      {system, boundary, lower, upper, coefficientVectors,
+       integrandRequiredMaxima, variable, targetMax, requiredTargetMax,
+       threads, matchingCertificationDigits},
       counts["prepare"]++;
       <|"Type" -> "DiffExp2NativeRegularIndependentArmAtlas",
         "PlanCheckpointIdentity" -> "malformed-run-atlas"|>],

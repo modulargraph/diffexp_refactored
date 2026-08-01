@@ -163,6 +163,31 @@ assert["consumer desired maximum clips to live source after covering its require
 system = DiffExp2`LoadSystem[<|"Matrix" -> {{0}}, "Variable" -> x|>];
 lowerPlan = DiffExp2`Transport`SegmentLine[system, {0, -1/4}];
 upperPlan = DiffExp2`Transport`SegmentLine[system, {0, 1/4}];
+
+(* The Henn level-3 batch mixes an integrated row at eps^-5 with an endpoint
+   row at eps^-6.  Each needs six source orders, but combining the primitive
+   target of the first with the coefficient pole of the second invents a
+   seventh.  Preparation must bind targets and valuations row by row. *)
+crossRowBoundary = DiffExp2`EpsSeries`ESNew[
+  0, Join[{1}, ConstantArray[0, 6]]];
+crossRowAtlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {crossRowBoundary}, lowerPlan, upperPlan, "Threads" -> 1,
+    "Integrands" -> {{{Global`eps^-5}, {Global`eps^-6}}, x},
+    "TargetCompleteMax" -> 1, "RequiredTargetCompleteMax" -> 0,
+    "IntegrandRequiredCompleteMaxima" -> {1, 0}]];
+crossRowRelease = If[FailureQ[crossRowAtlas], crossRowAtlas,
+  DiffExp2`NativeTransport`ReleaseNativeRegularIndependentArms[
+    crossRowAtlas]];
+assert["mixed operation halos are combined per observable during atlas preparation",
+  AssociationQ[crossRowAtlas] &&
+    crossRowAtlas["RequiredSolveCompleteMax"] === 6 &&
+    crossRowAtlas["PreparedIntegrandEpsilonShifts"] === {-5, -6} &&
+    crossRowAtlas["PreparedIntegrandRequiredCompleteMaxima"] === {1, 0} &&
+    crossRowAtlas["MatchEpsilonPadding"] === 0 &&
+    AssociationQ[crossRowRelease] &&
+    Lookup[crossRowRelease, "Failures", {"missing"}] === {}];
+
 one = DiffExp2`EpsSeries`ESNew[0, {1, 0}];
 atlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[

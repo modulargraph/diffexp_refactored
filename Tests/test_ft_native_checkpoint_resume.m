@@ -96,26 +96,40 @@ audit = <|"Schema" -> "FeynmanTrick.NativeObservableBatch/v1",
   "NativeEpsilonPlanIdentity" -> execution["Identity"],
   "SourceCompleteMax" -> ledger["SourceCompleteMax"],
   "TargetCompleteMax" -> ledger["TargetCompleteMax"],
-  "RequiredTargetCompleteMax" -> ledger["PublicTargetCompleteMax"],
+  "RequiredTargetCompleteMax" ->
+    ledger["PublicDeliverableCompleteMax"],
+  "RequiredSolveCompleteMax" ->
+    ledger["RequiredSolveCompleteMax"],
   "DeliverableCompleteMax" -> ledger["DeliverableCompleteMax"],
   "RequiredRawTop" -> ledger["DownstreamRawTop"],
   "CoefficientHalo" -> ledger["CoefficientHalo"],
   "IntegrationHalo" -> ledger["IntegrationHalo"],
+  "MaximumSourceLoss" -> ledger["MaximumSourceLoss"],
   "MatchEpsilonPadding" ->
-    ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
-      ledger["PublicTargetCompleteMax"]|>;
+    ledger["SourceCompleteMax"] -
+      ledger["RequiredSolveCompleteMax"]|>;
 splitFrameAudit = Join[audit, <|
   "SourceCompleteMax" -> 8,
   "TargetCompleteMax" -> 5,
   "RequiredTargetCompleteMax" -> 3,
+  "RequiredSolveCompleteMax" -> 5,
   "DeliverableCompleteMax" -> 4,
   "RequiredRawTop" -> 4,
-  "CoefficientHalo" -> 2,
+  "CoefficientHalo" -> 2, "MaximumSourceLoss" -> 2,
   "IntegrationHalo" -> 1,
   "MatchEpsilonPadding" -> 3|>];
 assert[
   "checkpoint record keeps public target and downstream raw floors independent",
   ft2NativeCheckpointRecordQ[splitFrameAudit]];
+legacyAudit = Join[
+  KeyDrop[audit, {"RequiredSolveCompleteMax", "MaximumSourceLoss"}], <|
+    "RequiredTargetCompleteMax" -> ledger["PublicTargetCompleteMax"],
+    "MatchEpsilonPadding" ->
+      ledger["SourceCompleteMax"] - ledger["CoefficientHalo"] -
+        ledger["PublicTargetCompleteMax"]|>];
+assert[
+  "legacy boundary audit remains readable for stale numerical checkpoint reuse",
+  ft2NativeCheckpointRecordQ[legacyAudit]];
 checkpointIdentity = "native-resume-state";
 nativeStateFile = FileNameJoin[{tmpDir,
   name <> "_level1_native_transport.de2cp"}];
@@ -171,9 +185,11 @@ boundaryAudit = Join[audit, <|
   "SourceCompleteMax" -> requiredRaw,
   "TargetCompleteMax" -> requiredRaw,
   "RequiredTargetCompleteMax" -> requiredRaw,
+  "RequiredSolveCompleteMax" -> requiredRaw,
   "DeliverableCompleteMax" -> requiredRaw,
   "RequiredRawTop" -> requiredRaw,
   "CoefficientHalo" -> 0, "IntegrationHalo" -> 0,
+  "MaximumSourceLoss" -> 0,
   "MatchEpsilonPadding" -> 0|>];
 boundaryFile = FileNameJoin[{tmpDir, name <> "_level1_boundary.mx"}];
 saveLadderCheckpoint[boundaryFile, <|"Kind" -> "Boundary",

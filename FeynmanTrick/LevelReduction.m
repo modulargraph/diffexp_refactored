@@ -17,6 +17,9 @@ RequiredTransportEpsilonOrder::usage =
 Begin["`Private`"];
 
 $levelIBPBatchSchema = "FeynmanTrick.LevelIBPBatch/v1";
+$levelIBPSingularFactorCacheSchema =
+  "FeynmanTrick.LevelIBPSingularFactorCache/v2";
+$levelIBPSingularFactorCache = <||>;
 
 configuration[] := FeynmanTrick`FTConfiguration[];
 
@@ -255,52 +258,83 @@ resolveLevelIBPBatch[ftData_Association, upperLevel_Integer, batch_] := Which[
     $Failed
 ];
 
+factorAssociateQ[left_, right_] :=
+  TrueQ[PossibleZeroQ[Expand[left - right]]] ||
+    TrueQ[PossibleZeroQ[Expand[left + right]]];
+
+factorMultiplicity[factor_, factorList_List] := Total[
+  Cases[factorList, {candidate_, multiplicity_Integer} /;
+      factorAssociateQ[factor, candidate] :> multiplicity]];
+
+(* FIRE's reconstructed coefficients are normally already one rational
+   polynomial numerator times one explicit negative power.  Running Together
+   again on that normal form asks Mathematica for a huge multivariate
+   numerator/denominator GCD even though FactorList can audit cancellation
+   directly in milliseconds.  Keep the old Together route as a compatibility
+   fallback for additive or non-polynomial coefficient shapes. *)
+coefficientSingularFactors[coefficient_, feynmanParameter_Symbol] := Module[
+  {negativePowers, denominator, exponent, numerator,
+   denominatorFactorList, numeratorFactorList, remaining, fallback},
+  If[zeroCoefficientQ[coefficient], Return[{}, Module]];
+  negativePowers = Cases[Unevaluated[coefficient],
+    Power[base_, power_Integer?Negative] :> {base, power}, Infinity];
+  If[negativePowers === {}, Return[{}, Module]];
+  If[Head[coefficient] =!= Plus && Length[negativePowers] === 1,
+    denominator = negativePowers[[1, 1]];
+    exponent = -negativePowers[[1, 2]];
+    numerator = coefficient denominator^exponent;
+    denominatorFactorList = Quiet[Check[
+      FactorList[denominator], $Failed]];
+    numeratorFactorList = Quiet[Check[
+      FactorList[numerator], $Failed]];
+    If[ListQ[denominatorFactorList] && ListQ[numeratorFactorList] &&
+        AllTrue[Join[denominatorFactorList, numeratorFactorList],
+          MatchQ[#, {_, _Integer}] &],
+      remaining = Select[Rest[denominatorFactorList],
+        Last[#] * exponent >
+          factorMultiplicity[First[#], Rest[numeratorFactorList]] &];
+      Return[Select[First /@ remaining,
+        !FreeQ[#, feynmanParameter] &], Module]]];
+  fallback = Denominator[Together[coefficient]];
+  If[fallback === 1, {},
+    Select[First /@ FactorList[Factor[fallback]],
+      !FreeQ[#, feynmanParameter] &]]
+];
+
 CollectLevelIBPSingularFactors[ftData_Association, level_Integer,
     suppliedBatch_:Automatic] := Module[
-  {levels, levelBelow, levelAbove, mastersBelow, feynmanParameter,
-   variableName, factors = {}, batch, boundaryRequests, reductions},
+  {levels, levelAbove, feynmanParameter, factors, batch, coefficients,
+   cacheKey, cached, result},
   levels = Lookup[ftData, "Levels", Missing["NotAvailable"]];
   If[!AssociationQ[levels] || level <= 0 ||
       !KeyExistsQ[levels, level] || !KeyExistsQ[levels, level - 1],
     Return[{}, Module]];
-  levelBelow = levels[level - 1];
   levelAbove = levels[level];
-  mastersBelow = Lookup[levelBelow, "Masters", {}];
   feynmanParameter = Lookup[
     levelAbove, "FeynmanParameter", Missing["NotAvailable"]];
   If[Head[feynmanParameter] =!= Symbol, Return[{}, Module]];
-  variableName = SymbolName[feynmanParameter];
   batch = resolveLevelIBPBatch[ftData, level, suppliedBatch];
   If[batch === $Failed,
     Return[If[suppliedBatch === Automatic, {}, $Failed], Module]];
-  boundaryRequests = batch["BoundaryRequests"];
-  reductions = batch["Reductions"];
-
-  Do[
-    Module[{request, neededVector, ibpCoefficients},
-      request = boundaryRequests[[masterIndex]];
-      neededVector = request["NeededVec"];
-      If[!KeyExistsQ[reductions, neededVector], Continue[]];
-      ibpCoefficients = batch["CoefficientVectors"][neededVector];
-      factors = Join[factors, Flatten[Table[
-        Module[{denominator, factorList},
-          denominator = Denominator[Together[coefficient]];
-          factorList = If[denominator === 1, {},
-            First /@ FactorList[Factor[denominator]]];
-          Select[factorList,
-            !FreeQ[#, symbol_Symbol /;
-              SymbolName[symbol] === variableName] &]
-        ],
-        {coefficient, ibpCoefficients}
-      ]]]
-    ],
-    {masterIndex, Length[mastersBelow]}
-  ];
-  DeleteDuplicates[
+  cacheKey = IntegerString[Hash[{
+      $levelIBPSingularFactorCacheSchema,
+      Lookup[batch, "Key", Missing["NoBatchKey"]],
+      Lookup[batch, "PayloadKey", Missing["NoPayloadKey"]],
+      feynmanParameter}, "SHA256"], 16, 64];
+  cached = Lookup[$levelIBPSingularFactorCache,
+    Key[cacheKey], Missing["NotCached"]];
+  If[ListQ[cached], Return[cached, Module]];
+  coefficients = DeleteDuplicates@Flatten[
+    Values[batch["CoefficientVectors"]]];
+  factors = Flatten[
+    coefficientSingularFactors[#, feynmanParameter] & /@ coefficients];
+  result = DeleteDuplicates[
     DeleteCases[Factor /@ factors, 0 | 1 | -1],
     TrueQ[PossibleZeroQ[Expand[#1 - #2]]] ||
       TrueQ[PossibleZeroQ[Expand[#1 + #2]]] &
-  ]
+  ];
+  AssociateTo[$levelIBPSingularFactorCache, cacheKey -> result];
+  result
 ];
 
 RequiredTransportEpsilonOrder[ftData_Association, level_Integer,

@@ -19,7 +19,8 @@ Module[{topology, ftData, changedFtData, calls = {}, baseline, baselineBatch,
         baselineCalls, batch, optimized, optimizedCalls, keyAgain, changedKey,
         keyAfterGlobalOptionChange, badBatch, tamperedBatch,
         poleBatch, poleBudget, regulatorBatch, fractionalBatch,
-        fractionalBudget,
+        fractionalBudget, singularBatch, singularFactors,
+        singularFactorsCached, singularFactorCacheSize,
         oldReductionCacheOption, oldAutoDetectRestrictions,
         levelReductionSource, runnerSource},
   topology = FeynmanTrick`FIREInterface`DefineTopology[
@@ -90,6 +91,43 @@ Module[{topology, ftData, changedFtData, calls = {}, baseline, baselineBatch,
     optimized === baseline && optimized[[1]] === {} &&
       optimized[[2]] === 1 &&
       optimized[[4]][{0, 0}] === {2}];
+
+  (* FIRE already publishes one rational numerator times one denominator
+     power.  Extract its factors directly, but still remove an exact
+     numerator/denominator cancellation and memoize the deterministic batch
+     result so a private epsilon retry cannot repeat the factorization. *)
+  FeynmanTrick`LevelReduction`Private`$levelIBPSingularFactorCache = <||>;
+  Block[{FeynmanTrick`FIREInterface`ReduceIntegrals},
+    FeynmanTrick`FIREInterface`ReduceIntegrals[_, integrals_List] :=
+      AssociationMap[
+        ((Global`x^2 - 1)/
+          ((Global`x - 1) (Global`x - 2))) Global`G[1, {0, 0}] &,
+        integrals];
+    singularBatch =
+      FeynmanTrick`LevelReduction`PrepareLevelIBPBatch[ftData, 1];
+  ];
+  singularFactors =
+    FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
+      ftData, 1, singularBatch];
+  singularFactorCacheSize = Length[
+    FeynmanTrick`LevelReduction`Private`$levelIBPSingularFactorCache];
+  singularFactorsCached = Block[{
+      FeynmanTrick`LevelReduction`Private`coefficientSingularFactors},
+    FeynmanTrick`LevelReduction`Private`coefficientSingularFactors[___] :=
+      Failure["UnexpectedSingularFactorRecomputation", <||>];
+    FeynmanTrick`LevelReduction`CollectLevelIBPSingularFactors[
+      ftData, 1, singularBatch]];
+  assert["single-rational factor extraction removes exact cancellations",
+    AssociationQ[singularBatch] &&
+      Length[singularFactors] === 1 &&
+      TrueQ[PossibleZeroQ[Expand[First[singularFactors] -
+        (Global`x - 2)]]]];
+  assert["singular factors are memoized by exact batch payload",
+    singularFactorsCached === singularFactors &&
+      singularFactorCacheSize === 1 &&
+      Length[
+        FeynmanTrick`LevelReduction`Private`$levelIBPSingularFactorCache]
+        === 1];
 
   (* Epsilon budgeting is exact bookkeeping, not numerical cleanup.  A tiny
      but nonzero exact pole must deepen the requested frame, analytic

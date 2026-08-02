@@ -396,6 +396,28 @@ int main() {
   const auto certified = request(residual_request(session, local, binding));
   require_ok(certified, "full-parent residual");
 
+  json::array batch_columns;
+  batch_columns.push_back(json::object{
+      {"checkpoint_identity", "scc-full-parent-batch-local-v1"},
+      {"seed", json::object{{"block", 0}, {"run", regular_run(true)},
+                              {"metadata", metadata("scc-batch-seed-v1")}}},
+      {"targets", json::array{json::object{
+          {"block", 1}, {"run", regular_run(false)},
+          {"metadata", metadata("scc-batch-target-v1")}}}}});
+  const auto solved_batch = request(json::object{
+      {"schema", 2}, {"op", "scc.solve_columns"},
+      {"session", session}, {"scc", scc},
+      {"columns", std::move(batch_columns)}, {"threads", 1}});
+  require_ok(solved_batch, "scc.solve_columns");
+  const auto& batch_column =
+      solved_batch.at("results").as_array().front().as_object();
+  const auto& batch_residual =
+      batch_column.at("residual_binding").as_object();
+  const auto& batch_reference =
+      batch_residual.at("binding_reference").as_object();
+  const auto batch_local =
+      std::string(batch_column.at("local").as_string());
+
   auto owner_tamper = residual_request(session, local, binding);
   owner_tamper["owner_signature_identity"] = "attacker-owner";
   const auto owner_tamper_rejected = request(std::move(owner_tamper));
@@ -409,6 +431,10 @@ int main() {
                                   {"session", session},
                                   {"local", intermediate_local}}),
              "intermediate local.release");
+  require_ok(request(json::object{{"schema", 2}, {"op", "local.release"},
+                                  {"session", session},
+                                  {"local", batch_local}}),
+             "batch local.release");
   require_ok(request(json::object{{"schema", 2}, {"op", "scc.release"},
                                   {"session", session}, {"scc", scc}}),
              "scc.release");
@@ -492,7 +518,23 @@ int main() {
       prepared.at("physical_payload_identity") ==
           "de2-physical-ode-scc-full-parent-v1" &&
       solved.at("residual_binding").as_object().at("status") ==
-          "available" && diagnostics.size() == 2 &&
+          "available" &&
+      batch_residual.at("status") == "available" &&
+      batch_residual.if_contains("binding") == nullptr &&
+      batch_column.if_contains("tail_majorant") == nullptr &&
+      batch_column.if_contains("metadata") == nullptr &&
+      batch_column.if_contains("source_operator_identity") == nullptr &&
+      batch_reference.at("schema") ==
+          "diffexp2-owner-bound-residual-reference-v1" &&
+      batch_reference.at("authority") ==
+          "retained-native-exact-residual-owner" &&
+      batch_reference.at("local_checkpoint_identity") ==
+          "scc-full-parent-batch-local-v1" &&
+      batch_reference.at("identity_diagnostics").as_object()
+          .at("physical_payload_identity").as_object()
+          .at("identity_bytes") ==
+          std::string("de2-physical-ode-scc-full-parent-v1").size() &&
+      diagnostics.size() == 2 &&
       diagnostics[1].as_object().at("role") == "particular" &&
       certified.at("verdict") == "pass" && certified.at("dimension") == 2 &&
       certified.at("epsilon_min") == 0 && certified.at("epsilon_max") == 7 &&
@@ -515,6 +557,7 @@ int main() {
               << "V!=I: " << json::serialize(nontrivial_rejected) << '\n'
               << "intermediate: " << json::serialize(intermediate) << '\n'
               << "solved: " << json::serialize(solved) << '\n'
+              << "solved batch: " << json::serialize(solved_batch) << '\n'
               << "certified: " << json::serialize(certified) << '\n'
               << "after release: " << json::serialize(after_release) << '\n'
               << "tampered restore: " << json::serialize(tampered_restore)

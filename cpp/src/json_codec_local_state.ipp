@@ -2135,6 +2135,39 @@ struct OwnerBoundResidualBinding {
         {"supported_scopes",
          json::array{"stored_truncation", "full_local_solution-inconclusive"}}};
   }
+
+  // A physical operator identity can contain the complete cleared q/C
+  // payload.  Repeating all of those exact strings in every result of an SCC
+  // basis batch makes the otherwise opaque response proportional to
+  // (basis dimension) times (operator payload size), and boost::json needs a
+  // second contiguous copy while serializing it.  The retained local and its
+  // equation owner remain the exact authorities.  Batch callers only need a
+  // bounded reference proving which retained binding is attached.
+  json::object public_reference() const {
+    const auto identity_reference = [](const std::string& identity) {
+      return json::object{
+          {"algorithm", "fnv1a64-v1"},
+          {"fingerprint", public_provenance_fingerprint(identity)},
+          {"identity_bytes", identity.size()}};
+    };
+    return json::object{
+        {"schema", "diffexp2-owner-bound-residual-reference-v1"},
+        {"authority", "retained-native-exact-residual-owner"},
+        {"kind", kind},
+        {"capability", capability},
+        {"local_checkpoint_identity", local_checkpoint_identity},
+        {"analytic_metadata", analytic_metadata},
+        {"identity_diagnostics",
+         json::object{
+             {"operator_identity", identity_reference(operator_identity)},
+             {"source_identity", identity_reference(source_identity)},
+             {"owner_signature_identity",
+              identity_reference(owner_signature_identity)},
+             {"physical_payload_identity",
+              identity_reference(physical_payload_identity)},
+             {"provenance_identity",
+              identity_reference(provenance_identity)}}}};
+  }
 };
 
 template <typename Scalar>
@@ -2193,6 +2226,20 @@ OwnerBoundResidualBinding make_owner_bound_residual_binding(
       json::serialize(canonical_json_value(provenance))};
 }
 
+struct StoredLocalLifetimeCounters {
+  std::atomic<std::uint64_t> constructed{0};
+  std::atomic<std::uint64_t> destroyed{0};
+  std::atomic<std::uint64_t> live{0};
+  std::atomic<std::uint64_t> constructed_coefficients{0};
+  std::atomic<std::uint64_t> destroyed_coefficients{0};
+  std::atomic<std::uint64_t> live_coefficients{0};
+};
+
+StoredLocalLifetimeCounters& stored_local_lifetime_counters() {
+  static StoredLocalLifetimeCounters counters;
+  return counters;
+}
+
 class StoredLocalBase {
  public:
   StoredLocalBase(std::string handle, std::string source_chart,
@@ -2207,8 +2254,16 @@ class StoredLocalBase {
         source_operator_identity_bytes_(source_operator_identity_.size()),
         create_parse_ms_(create_parse_ms),
         create_kernel_ms_(create_kernel_ms),
-        column_provenance_(std::move(column_provenance)) {}
-  virtual ~StoredLocalBase() = default;
+        column_provenance_(std::move(column_provenance)) {
+    auto& counters = stored_local_lifetime_counters();
+    counters.constructed.fetch_add(1, std::memory_order_relaxed);
+    counters.live.fetch_add(1, std::memory_order_relaxed);
+  }
+  virtual ~StoredLocalBase() {
+    auto& counters = stored_local_lifetime_counters();
+    counters.destroyed.fetch_add(1, std::memory_order_relaxed);
+    counters.live.fetch_sub(1, std::memory_order_relaxed);
+  }
 
   virtual json::object evaluate(const json::object& request,
                                 int output_digits) = 0;
@@ -2247,6 +2302,7 @@ class StoredLocalBase {
   virtual const std::string& checkpoint_identity() const = 0;
   virtual const char* scalar_domain() const = 0;
   virtual json::object summary() const = 0;
+  virtual json::object opaque_reference_summary() const { return summary(); }
   virtual json::object stats_json() const = 0;
   virtual StoredLocalStats stats() const = 0;
   virtual json::object checkpoint_record(
@@ -2455,6 +2511,20 @@ class StoredLocal final : public StoredLocalBase {
       residual_binding_detail_ =
           "owner-bound residual rejects unresolved symbolic coefficients";
     }
+    lifetime_coefficient_count_ = coefficient_count();
+    auto& counters = stored_local_lifetime_counters();
+    counters.constructed_coefficients.fetch_add(
+        lifetime_coefficient_count_, std::memory_order_relaxed);
+    counters.live_coefficients.fetch_add(
+        lifetime_coefficient_count_, std::memory_order_relaxed);
+  }
+
+  ~StoredLocal() override {
+    auto& counters = stored_local_lifetime_counters();
+    counters.destroyed_coefficients.fetch_add(
+        lifetime_coefficient_count_, std::memory_order_relaxed);
+    counters.live_coefficients.fetch_sub(
+        lifetime_coefficient_count_, std::memory_order_relaxed);
   }
 
   json::object evaluate(const json::object& request,
@@ -3055,6 +3125,50 @@ class StoredLocal final : public StoredLocalBase {
       }
       result["rational_row_line_tail_majorant"] =
           std::move(projected_tail);
+    }
+    return result;
+  }
+
+  json::object opaque_reference_summary() const override {
+    // Do not derive this record from summary().  The single-local summary is
+    // deliberately self-describing and may contain complete exact operator
+    // identities in both the residual and Taylor-tail certificates.  An SCC
+    // batch returns one record per physical basis column, and a Rational-
+    // shadow import repeats the same exchange for every specialized column.
+    // Copying those identities makes a nominally opaque response proportional
+    // to the basis dimension times the complete operator payload.  This is
+    // the bounded wire contract needed to validate and retain an opaque local;
+    // the live local/SCC owners remain the exact authorities for later calls.
+    json::object result{
+        {"local", handle_},
+        {"chart", source_chart_},
+        {"dimension", solution_.dimension},
+        {"epsilon_min", solution_.epsilon.min_power},
+        {"epsilon_max", solution_.epsilon.complete_max},
+        {"taylor_complete_max", solution_.taylor_complete_max},
+        {"sectors", solution_.sectors.size()},
+        {"coefficient_count", coefficient_count()},
+        {"pseudo_hit_count", pseudo_hits_.size()},
+        {"top_valid", encode_validity(top_valid_)},
+        {"checkpoint_identity", solution_.checkpoint_identity},
+        {"create_parse_ms", create_parse_ms_},
+        {"create_kernel_ms", create_kernel_ms_}};
+    if (column_provenance_.has_value()) {
+      result["source_operator_reference"] = source_operator_reference();
+      result["column_provenance"] =
+          column_provenance_->public_reference();
+    }
+    if (residual_binding_.has_value()) {
+      result["residual_binding"] = json::object{
+          {"status", "available"},
+          {"capability", kOwnerBoundPhysicalResidualCapability},
+          {"binding_reference", residual_binding_->public_reference()}};
+    } else {
+      result["residual_binding"] = json::object{
+          {"status", "unsupported"},
+          {"kind", "none"},
+          {"capability", kOwnerBoundPhysicalResidualCapability},
+          {"reason", residual_binding_detail_}};
     }
     return result;
   }
@@ -3775,6 +3889,7 @@ class StoredLocal final : public StoredLocalBase {
   }
 
   LocalSolution<Scalar> solution_;
+  std::uint64_t lifetime_coefficient_count_ = 0;
   slong precision_bits_ = 256;
   std::vector<PseudoHit<Scalar>> pseudo_hits_;
   std::int32_t top_valid_ = kCompleteInfinity;

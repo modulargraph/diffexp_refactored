@@ -60,11 +60,15 @@ RunPersistentTransportArm::usage = "RunPersistentTransportArm[plan,arm,anchor,re
 ContractPersistentTransportObservables::usage = "ContractPersistentTransportObservables[state,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against one retained native transport-arm state without rematching. Each observable has exactly Identity, CheckpointIdentity, IntegrandRows, Epsilon, and TailPolicy; Epsilon has exactly Min, Max, and RequiredCompleteMax. IntegrandRows contains one prepared rational row per retained tile. TailPolicy is \"stored\", \"attempt\", or \"require\": stored never requests tail certification, attempt may remain stored-truncation, and require fails atomically unless every tile aggregates with a certified full-local tail. The result retains input order and returns directly usable opaque line handles; an empty observable list succeeds without publishing lines.";
 ContractPersistentTransportPairObservables::usage = "ContractPersistentTransportPairObservables[lowerState,upperState,observables,checkpointRoot] contracts an ordered list of zero, one, or many scalar observables against exact retained lower/upper states in one native paired request. Each observable has Identity, CheckpointIdentity, LowerIntegrandRows, UpperIntegrandRows, Epsilon, and optionally TailPolicy, DivergentCancellation, and PublicationRelativeTolerance. PublicationRelativeTolerance is the explicit downstream line-output accuracy contract; omission retains the match tolerance for compatibility. DivergentCancellation is the explicit FT-only bounded-relative Acb policy with Mode, RelativeTolerance, and Provenance; omission keeps exact-singleton cancellation. Epsilon has exactly Min, Max, and RequiredCompleteMax. The wrapper accepts no caller signs, arms, points, or rims: native transport.contract_pair always combines -lower+upper. Results retain request order and are opaque paired line handles.";
 BeginPersistentTransportPairObservableStream::usage = "BeginPersistentTransportPairObservableStream[lowerState,upperState,observable,checkpointRoot] begins one bounded-memory native paired contraction for a stored-tail observable. The begin request sends only observable metadata; prepared rows are subsequently supplied one at a time.";
+BeginPersistentRollingTransportPairObservableStream::usage = "BeginPersistentRollingTransportPairObservableStream[plan,anchor,observable,checkpointRoot] begins a stored-tail paired contraction before the march. Each tile is contracted from the current local and only the two terminal locals survive publication.";
+PersistentTransportLocalConsumerEpsilon::usage = "PersistentTransportLocalConsumerEpsilon[local] returns the compact epsilon-source contract used to size a rolling observable row. A terminal factorized local reports its retained physical basis windows and projection shifts rather than the unused materialized proxy window.";
 AddPersistentTransportPairObservableStreamTile::usage = "AddPersistentTransportPairObservableStreamTile[stream,side,tile,row] adds exactly one prepared rational row to a paired contraction stream. side is lower or upper and tile is the zero-based native tile index. Every lower tile must be added in order before every upper tile.";
+AddPersistentRollingTransportPairObservableStreamTile::usage = "AddPersistentRollingTransportPairObservableStreamTile[stream,side,tile,local,row] contracts one exact tile from the current retained local into a rolling paired accumulator. Every lower tile must be added in order before every upper tile.";
 FinishPersistentTransportPairObservableStream::usage = "FinishPersistentTransportPairObservableStream[stream] atomically publishes the completed paired line after every expected lower and upper tile has been added exactly once.";
 AbortPersistentTransportPairObservableStream::usage = "AbortPersistentTransportPairObservableStream[stream] abandons an unfinished paired contraction stream and releases its reserved native line slot without publishing a partial line.";
 ContractPersistentTransportPairObservableStreamed::usage = "ContractPersistentTransportPairObservableStreamed[lowerState,upperState,observable,checkpointRoot] contracts one stored-tail paired observable with a bounded-memory begin/add-tile/finish protocol. Rows are sent strictly lower then upper, one prepared row per native request; any failure or kernel abort attempts to abort the native stream.";
 RunPersistentTransportEndpointBatch::usage = "RunPersistentTransportEndpointBatch[state,observables,checkpointRoot,threads:1] atomically contracts an ordered list of zero, one, or many prepared scalar rows against the final retained local of one native transport-arm state and returns opaque endpoint handles. Distinct rows may be evaluated by the explicitly bounded positive thread count while publication and failure selection retain request order. Each observable has exactly Identity, CheckpointIdentity, IntegrandRow, Epsilon, and PublicationRelativeTolerance; Epsilon has exactly Min, Max, and RequiredCompleteMax. PublicationRelativeTolerance is the explicit downstream accuracy contract and is independent of the producing match tolerance. The retained state and plan derive the arm, endpoint, local coordinate, approach direction, and analytic prescription; callers cannot override them.";
+RunPersistentRollingTransportEndpointBatch::usage = "RunPersistentRollingTransportEndpointBatch[plan,arm,terminalLocal,observables,checkpointRoot,threads:1] applies endpoint rows directly to one rolling march's terminal local. The plan derives the endpoint geometry, approach, and rim; each published endpoint strongly owns only the immutable plan and terminal local, never a whole transport state.";
 PersistentTransportArmStatistics::usage = "PersistentTransportArmStatistics[state] returns the opaque retained arm-state topology, exact provenance, ownership counts, epsilon/refinement contract, final-local handle, and statistics.";
 ReleasePersistentTransportArm::usage = "ReleasePersistentTransportArm[state] releases one public transport-state token. A second release is a loud native error; independently published final locals remain governed by their own tokens.";
 PersistentLineIntegralStatistics::usage = "PersistentLineIntegralStatistics[handle] returns one retained physical-tile integral summary, exact provenance, stored-or-certified-tail scope diagnostics, and export counters.";
@@ -2392,6 +2396,50 @@ persistentTransportPairStreamHandles[stream_Association] := Module[
   <|"Session" -> session, "Stream" -> token,
     "CheckpointIdentity" -> checkpoint|>];
 
+PersistentTransportLocalConsumerEpsilon[local_Association] := Module[
+  {tokens = persistentLocalHandles[local], checkpoint},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  checkpoint = Lookup[local, "checkpoint_identity",
+    Lookup[local, "CheckpointIdentity", None]];
+  If[!persistentNonemptyStringQ[checkpoint],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "transport local-consumer query requires a nonempty local checkpoint identity"|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.local_consumer_epsilon",
+    "session" -> tokens["Session"], "local" -> tokens["Local"],
+    "local_checkpoint_identity" -> checkpoint|>]];
+
+BeginPersistentRollingTransportPairObservableStream[
+    plan_Association, anchor_Association, observable_Association,
+    checkpointRoot_String] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   anchorTokens = persistentLocalHandles[anchor], anchorCheckpoint,
+   normalized},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[anchorTokens], Return[anchorTokens, Module]];
+  anchorCheckpoint = Lookup[anchor, "checkpoint_identity",
+    Lookup[anchor, "CheckpointIdentity", None]];
+  normalized = normalizePersistentTransportPairStreamObservable[
+    observable, None, None];
+  If[FailureQ[normalized], Return[normalized, Module]];
+  If[planTokens["Session"] =!= anchorTokens["Session"] ||
+      !persistentNonemptyStringQ[anchorCheckpoint] ||
+      StringLength[StringTrim[checkpointRoot]] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "rolling paired contraction requires one plan/anchor session and nonempty exact checkpoint identities"|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.contract_pair_rolling_stream_begin",
+    "session" -> planTokens["Session"],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "anchor" -> anchorTokens["Local"],
+    "anchor_checkpoint_identity" -> anchorCheckpoint,
+    "checkpoint_policy" -> <|
+      "schema" ->
+        "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1",
+      "root" -> checkpointRoot|>,
+    "observable" -> normalized|>]];
+
 BeginPersistentTransportPairObservableStream[lowerState_Association,
     upperState_Association, observable_Association,
     checkpointRoot_String] := Module[
@@ -2444,6 +2492,31 @@ AddPersistentTransportPairObservableStreamTile[stream_Association,
     "session" -> tokens["Session"], "stream" -> tokens["Stream"],
     "stream_checkpoint_identity" -> tokens["CheckpointIdentity"],
     "side" -> side, "tile" -> tile, "row" -> row|>]];
+
+AddPersistentRollingTransportPairObservableStreamTile[
+    stream_Association, side_String, tile_Integer,
+    local_Association, row_Association] := Module[
+  {tokens = persistentTransportPairStreamHandles[stream],
+   localTokens = persistentLocalHandles[local], localCheckpoint},
+  If[FailureQ[tokens], Return[tokens, Module]];
+  If[FailureQ[localTokens], Return[localTokens, Module]];
+  localCheckpoint = Lookup[local, "checkpoint_identity",
+    Lookup[local, "CheckpointIdentity", None]];
+  If[!MemberQ[{"lower", "upper"}, side] || tile < 0 ||
+      tokens["Session"] =!= localTokens["Session"] ||
+      !persistentNonemptyStringQ[localCheckpoint] ||
+      !persistentPreparedRationalRowQ[row],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "rolling stream tile addition requires a lower/upper side, nonnegative tile, one current local in the stream session, and one prepared rational row",
+      "Side" -> side, "Tile" -> tile|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.contract_pair_rolling_stream_add_tile",
+    "session" -> tokens["Session"], "stream" -> tokens["Stream"],
+    "stream_checkpoint_identity" -> tokens["CheckpointIdentity"],
+    "side" -> side, "tile" -> tile,
+    "local" -> localTokens["Local"],
+    "local_checkpoint_identity" -> localCheckpoint,
+    "row" -> row|>]];
 
 FinishPersistentTransportPairObservableStream[stream_Association] :=
   Module[{tokens = persistentTransportPairStreamHandles[stream]},
@@ -2664,6 +2737,47 @@ RunPersistentTransportEndpointBatch[state_Association,
       tokens["CheckpointIdentity"],
     "transport_state_provenance_identity" ->
       tokens["ProvenanceIdentity"],
+    "checkpoint_policy" -> <|
+      "schema" ->
+        "diffexp2-deterministic-transport-endpoint-checkpoints-v1",
+      "root" -> checkpointRoot|>,
+    "observables" -> normalized, "threads" -> threads|>]];
+
+RunPersistentRollingTransportEndpointBatch[plan_Association,
+    arm_String, terminalLocal_Association, observables_List,
+    checkpointRoot_String, threads_Integer:1] := Module[
+  {planTokens = persistentTilePlanHandles[plan],
+   localTokens = persistentLocalHandles[terminalLocal],
+   localCheckpoint, normalized, bad, identities, checkpoints},
+  If[FailureQ[planTokens], Return[planTokens, Module]];
+  If[FailureQ[localTokens], Return[localTokens, Module]];
+  localCheckpoint = Lookup[terminalLocal, "checkpoint_identity",
+    Lookup[terminalLocal, "CheckpointIdentity", None]];
+  If[!MemberQ[{"lower", "upper"}, arm] ||
+      planTokens["Session"] =!= localTokens["Session"] ||
+      !persistentNonemptyStringQ[localCheckpoint] ||
+      !TrueQ[1 <= threads <= 64] ||
+      StringLength[StringTrim[checkpointRoot]] == 0,
+    Return[Failure["CppBackend", <|"Detail" ->
+      "rolling endpoint batch requires lower/upper, one plan/local session, nonempty checkpoint identities, and 1 through 64 threads"|>],
+      Module]];
+  normalized = normalizePersistentTransportEndpointObservable /@
+    observables;
+  bad = Select[normalized, FailureQ];
+  If[bad =!= {}, Return[First[bad], Module]];
+  identities = Lookup[normalized, "identity"];
+  checkpoints = Lookup[normalized, "checkpoint_identity"];
+  If[Length[DeleteDuplicates[identities]] =!= Length[identities] ||
+      Length[DeleteDuplicates[checkpoints]] =!= Length[checkpoints],
+    Return[Failure["CppBackend", <|"Detail" ->
+      "rolling endpoint observable identities and checkpoints must be pairwise unique"|>], Module]];
+  RunRequest[<|"schema" -> 2,
+    "op" -> "transport.rolling_endpoint_batch",
+    "session" -> planTokens["Session"],
+    "tile_plan" -> planTokens["TilePlan"],
+    "tile_plan_checkpoint_identity" -> planTokens["CheckpointIdentity"],
+    "arm" -> arm, "local" -> localTokens["Local"],
+    "local_checkpoint_identity" -> localCheckpoint,
     "checkpoint_policy" -> <|
       "schema" ->
         "diffexp2-deterministic-transport-endpoint-checkpoints-v1",

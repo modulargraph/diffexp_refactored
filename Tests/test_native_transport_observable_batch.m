@@ -334,6 +334,7 @@ assert["streamed value accuracy circuit bounds failed shortcuts but retains ever
    receiving basis. *)
 basisOnlyValueCalls = 0; basisOnlyValueBasisCalls = 0;
 basisOnlyCacheDrops = 0;
+basisOnlyPreparedDrops = {};
 basisOnlyValueOldEnvironment =
   Quiet[Environment["DE2_NATIVE_VALUE_HOP_EXECUTION"]];
 basisOnlyValueFixture = Internal`WithLocalSettings[
@@ -342,7 +343,9 @@ basisOnlyValueFixture = Internal`WithLocalSettings[
       DiffExp2`NativeTransport`Private`nativeReceivingBasis =
         Function[{receiver, request, threads, consume, equationOwner},
           basisOnlyValueBasisCalls++;
-          <|"Columns" -> {<|"session" -> "stream-fixture-session",
+          <|"PreparedToken" -> ("basis-only-token-" <>
+              ToString[basisOnlyValueBasisCalls]),
+            "Columns" -> {<|"session" -> "stream-fixture-session",
               "local" -> ("l:basis-only-" <>
                 ToString[basisOnlyValueBasisCalls]),
               "checkpoint_identity" -> ("basis-only-checkpoint-" <>
@@ -361,8 +364,10 @@ basisOnlyValueFixture = Internal`WithLocalSettings[
                 "checkpoint_identity" ->
                   ("basis-only-next-checkpoint-" <> ToString[index])|>,
             "consumed_basis_handles" -> Lookup[basis, "local"]|>],
-      DiffExp2`Solve`DropWolframStaticOperatorCache =
-        Function[Null, basisOnlyCacheDrops++; Null]},
+      DiffExp2`Solve`DropWolframConsumedBasisCaches =
+        Function[Null, basisOnlyCacheDrops++; Null],
+      DiffExp2`CppBackend`ReleasePersistentPreparedToken =
+        Function[token, AppendTo[basisOnlyPreparedDrops, token]; Null]},
     DiffExp2`NativeTransport`Private`nativeStreamTransportArm[
       <|"Session" -> "stream-fixture-session",
         "Anchor" -> streamFixtureAnchor, "Plan" -> <||>, "Threads" -> 1,
@@ -387,7 +392,9 @@ assert["value-aware plan can execute as certified basis-only transport",
   AssociationQ[basisOnlyValueFixture] &&
     Length[basisOnlyValueFixture["tile_sources"]] === 3 &&
     basisOnlyValueCalls === 0 && basisOnlyValueBasisCalls === 2 &&
-    basisOnlyCacheDrops === 2];
+    basisOnlyCacheDrops === 2 &&
+    basisOnlyPreparedDrops === {
+      "basis-only-token-1", "basis-only-token-2"}];
 
 beforeInvalid = sessionStats[];
 duplicate = If[FailureQ[atlas], atlas, catchDE2[
@@ -755,6 +762,19 @@ ownerAtlas = catchDE2[
     system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
     "Integrand" -> {{1 + Global`eps}, x},
     "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+ownerAtlasCompactBeforeRun = AssociationQ[ownerAtlas] &&
+  AssociationQ[Lookup[ownerAtlas, "SourceSystem", None]] &&
+  !KeyExistsQ[ownerAtlas["Lower"], "ChartSystems"] &&
+  !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
+  Length[Lookup[ownerAtlas["Lower"], "RowRecipes", {}]] ===
+    Length[ownerAtlas["Lower", "Plan", "Charts"]] &&
+  Length[Lookup[ownerAtlas["Upper"], "RowRecipes", {}]] ===
+    Length[ownerAtlas["Upper", "Plan", "Charts"]] &&
+  FreeQ[Join[ownerAtlas["Lower", "OwnerRecords"],
+      ownerAtlas["Upper", "OwnerRecords"]],
+    record_Association /; KeyExistsQ[record, "PhysicalPreparation"]];
+assert["deferred atlas retains only one source system and compact hop recipes",
+  ownerAtlasCompactBeforeRun];
 ownerMismatch = If[FailureQ[ownerAtlas], ownerAtlas, catchDE2[
   DiffExp2`NativeTransport`RunNativeTransportObservableBatch[
     ownerAtlas, {observable["limitLower", "owned-mismatch"]}, x,
@@ -775,7 +795,8 @@ assert["owned deferred observable batch streams and compacts caller atlas",
     !KeyExistsQ[ownerAtlas["Lower"], "ChartSystems"] &&
     !KeyExistsQ[ownerAtlas["Upper"], "ChartSystems"] &&
     !KeyExistsQ[ownerRun["Atlas", "Lower"], "ChartSystems"] &&
-    !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"]];
+    !KeyExistsQ[ownerRun["Atlas", "Upper"], "ChartSystems"] &&
+    !KeyExistsQ[ownerRun["Atlas"], "SourceSystem"]];
 assert["owned deferred stream can select deterministic basis-only handoffs",
   AssociationQ[ownerCounters] &&
     Lookup[ownerCounters,
@@ -791,6 +812,72 @@ assert["owned deferred stream can select deterministic basis-only handoffs",
     !KeyExistsQ[ownerRun["Atlas", "Upper"], "OwnerRecords"]];
 If[AssociationQ[ownerRun],
   DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[ownerRun]];
+
+rollingAtlas = catchDE2[
+  DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
+    system, {one}, lowerPlan, streamUpperPlan, "Threads" -> 1,
+    "Integrand" -> {{1 + Global`eps}, x},
+    "TargetCompleteMax" -> 0, "DeferReceivingBases" -> True]];
+rollingRun = If[FailureQ[rollingAtlas], rollingAtlas, catchDE2[
+  DiffExp2`NativeTransport`RunNativeTransportObservableBatchOwned[
+    rollingAtlas, {
+      Append[observable["integrate", "rolling-integral"],
+        "TailPolicy" -> "stored"],
+      Append[observable["integrate", "rolling-integral-2"],
+        "TailPolicy" -> "stored"],
+      observable["limitLower", "rolling-lower"]}, x,
+    "MaxRefinementSteps" -> 1,
+    "ObservableContractionChunkSize" -> 2,
+    "ValueHopExecution" -> False]]];
+rollingCounters = If[AssociationQ[rollingRun],
+  DiffExp2`CppBackend`PersistentSessionCounters[rollingRun["Atlas"]],
+  rollingRun];
+rollingCheckpointPath = FileNameJoin[{$TemporaryDirectory,
+  "de2-native-rolling-observable-batch-" <> ToString[$ProcessID] <>
+    ".checkpoint"}];
+If[FileExistsQ[rollingCheckpointPath],
+  DeleteFile[rollingCheckpointPath]];
+rollingManifest = If[AssociationQ[rollingRun], catchDE2[
+  DiffExp2`NativeTransport`SaveNativeTransportObservableBatchCheckpoint[
+    rollingRun, rollingCheckpointPath,
+    "rolling-native-observable-roundtrip"]], rollingRun];
+rollingRestored = If[AssociationQ[rollingManifest], catchDE2[
+  DiffExp2`NativeTransport`RestoreNativeTransportObservableBatchCheckpoint[
+    rollingManifest]], rollingManifest];
+rollingRestoredExport = If[AssociationQ[rollingRestored], catchDE2[
+  DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
+    rollingRestored, 40]], rollingRestored];
+rollingExport = If[AssociationQ[rollingRun], catchDE2[
+  DiffExp2`NativeTransport`ExportNativeTransportObservableBatch[
+    rollingRun, 40]], rollingRun];
+assert["deferred mixed batch contracts during march without publishing transport states",
+  AssociationQ[rollingRun] && rollingRun["States"] === <||> &&
+    TrueQ[rollingRun["NativeSummary", "March",
+      "rolling_contraction"]] &&
+    AssociationQ[rollingCounters] &&
+    Lookup[rollingCounters, "transport_states", -1] === 0 &&
+    Lookup[rollingCounters, "transport_pair_contractions", -1] >= 2 &&
+    Lookup[rollingCounters, "line_results", -1] === 2 &&
+    Lookup[rollingCounters, "endpoints", -1] === 1 &&
+    rollingRun["NativeSummary", "Pair", "ChunkSize"] === 1 &&
+    rollingRun["NativeSummary", "Pair", "ChunkCount"] === 2 &&
+    AssociationQ[rollingExport] &&
+    Length[Lookup[rollingExport, "ExportedResults", {}]] === 3 &&
+    AssociationQ[rollingManifest] &&
+    Lookup[rollingManifest, "StateHandles", None] === <||> &&
+    AssociationQ[rollingRestoredExport] &&
+    Length[Lookup[rollingRestoredExport,
+      "ExportedResults", {}]] === 3 &&
+    Lookup[rollingRestoredExport, "ExportedResults"][[All, "Value"]] ===
+      Lookup[rollingExport, "ExportedResults"][[All, "Value"]]];
+If[AssociationQ[rollingRestoredExport],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[
+    rollingRestoredExport]];
+If[AssociationQ[rollingExport],
+  DiffExp2`NativeTransport`ReleaseNativeTransportObservableBatch[
+    rollingExport]];
+If[FileExistsQ[rollingCheckpointPath],
+  DeleteFile[rollingCheckpointPath]];
 
 releasedOwnerAtlas = catchDE2[
   DiffExp2`NativeTransport`PrepareNativeRegularIndependentArms[
@@ -828,6 +915,43 @@ assert["stream cache drop removes only completed static operators",
       staticDropGlobalBefore] &&
     SameQ[DiffExp2`Solve`Private`$nativeSCCCompositeCache,
       staticDropSCCBefore]];
+
+consumedDropRegistryBefore =
+  DiffExp2`Solve`Private`$systemClearRegistry;
+consumedDropGlobalBefore =
+  DiffExp2`Solve`Private`$globalClearedCache;
+consumedDropPhysicalBefore =
+  DiffExp2`Solve`Private`$physicalClearedODECache;
+consumedDropSCCBefore =
+  DiffExp2`Solve`Private`$nativeSCCCompositeCache;
+DiffExp2`Solve`Private`$chartClearedCache = <|
+  "completed-regular-basis" -> <|"Payload" -> Range[32]|>|>;
+DiffExp2`Solve`Private`$clearedSymbolicLegacyCache = <|
+  "completed-singular-basis" -> <|"Payload" -> Range[16]|>|>;
+DiffExp2`Solve`Private`$cppStaticOperatorCache = <|
+  "completed-static-basis" -> <|"Payload" -> Range[64]|>|>;
+consumedDropCounters =
+  DiffExp2`Solve`WolframConsumedBasisCacheCounters[];
+DiffExp2`Solve`DropWolframConsumedBasisCaches[];
+assert["consumed basis cache drop is scoped and observable",
+  AssociationQ[consumedDropCounters] &&
+    consumedDropCounters["chart_cleared_entries"] === 1 &&
+    consumedDropCounters["legacy_cleared_entries"] === 1 &&
+    consumedDropCounters["static_operator_entries"] === 1 &&
+    Min[Lookup[consumedDropCounters, {
+      "chart_cleared_bytes", "legacy_cleared_bytes",
+      "static_operator_bytes"}]] > 0 &&
+    DiffExp2`Solve`Private`$chartClearedCache === <||> &&
+    DiffExp2`Solve`Private`$clearedSymbolicLegacyCache === <||> &&
+    DiffExp2`Solve`Private`$cppStaticOperatorCache === <||> &&
+    SameQ[DiffExp2`Solve`Private`$systemClearRegistry,
+      consumedDropRegistryBefore] &&
+    SameQ[DiffExp2`Solve`Private`$globalClearedCache,
+      consumedDropGlobalBefore] &&
+    SameQ[DiffExp2`Solve`Private`$physicalClearedODECache,
+      consumedDropPhysicalBefore] &&
+    SameQ[DiffExp2`Solve`Private`$nativeSCCCompositeCache,
+      consumedDropSCCBefore]];
 
 DiffExp2`Solve`ClearSolveCaches[];
 DiffExp2`CppBackend`ClearPersistentSessions[];

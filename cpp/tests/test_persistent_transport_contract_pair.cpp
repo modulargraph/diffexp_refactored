@@ -145,6 +145,16 @@ json::object prepare_plan(const std::string& session,
       {"arm", one_chart_arm(endpoint, chart)}});
 }
 
+json::object prepare_pair_plan(const std::string& session,
+                               const std::string& checkpoint,
+                               const std::string& chart) {
+  return request(json::object{
+      {"schema", 2}, {"op", "tile.plan"}, {"session", session},
+      {"checkpoint_identity", checkpoint}, {"division_order", 3},
+      {"lower", one_chart_arm("-1/3", chart)},
+      {"upper", one_chart_arm("1/2", chart)}});
+}
+
 json::object run_state(const std::string& session,
                        const json::object& plan,
                        const std::string& plan_checkpoint,
@@ -359,6 +369,29 @@ json::object begin_stream(const std::string& session,
        stream_observable(identity, checkpoint, minimum, maximum)}});
 }
 
+json::object begin_rolling_stream(const std::string& session,
+                                  const json::object& plan,
+                                  const std::string& anchor,
+                                  const std::string& identity,
+                                  const std::string& checkpoint,
+                                  const std::string& checkpoint_root,
+                                  std::int32_t minimum = 0,
+                                  std::int32_t maximum = 0) {
+  return request(json::object{
+      {"schema", 2},
+      {"op", "transport.contract_pair_rolling_stream_begin"},
+      {"session", session}, {"tile_plan", plan.at("tile_plan")},
+      {"tile_plan_checkpoint_identity", plan.at("checkpoint_identity")},
+      {"anchor", anchor},
+      {"anchor_checkpoint_identity", "pair-common-anchor"},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"observable",
+       stream_observable(identity, checkpoint, minimum, maximum)}});
+}
+
 json::object add_stream_tile(const std::string& session,
                              const json::object& stream,
                              const std::string& side,
@@ -370,6 +403,21 @@ json::object add_stream_tile(const std::string& session,
       {"stream_checkpoint_identity",
        stream.at("stream_checkpoint_identity")},
       {"side", side}, {"tile", tile}, {"row", std::move(prepared_row)}});
+}
+
+json::object add_rolling_stream_tile(
+    const std::string& session, const json::object& stream,
+    const std::string& side, std::size_t tile,
+    const std::string& local, json::object prepared_row) {
+  return request(json::object{
+      {"schema", 2},
+      {"op", "transport.contract_pair_rolling_stream_add_tile"},
+      {"session", session}, {"stream", stream.at("stream")},
+      {"stream_checkpoint_identity",
+       stream.at("stream_checkpoint_identity")},
+      {"side", side}, {"tile", tile}, {"local", local},
+      {"local_checkpoint_identity", "pair-common-anchor"},
+      {"row", std::move(prepared_row)}});
 }
 
 json::object finish_stream(const std::string& session,
@@ -408,6 +456,40 @@ json::object export_line(const std::string& session,
       {"schema", 2}, {"op", "integration.export"},
       {"session", session}, {"line", line.at("line")},
       {"checkpoint_identity", line.at("checkpoint_identity")},
+      {"output_digits", 50}});
+}
+
+json::object rolling_endpoint_batch(
+    const std::string& session, const json::object& plan,
+    const std::string& arm, const std::string& local,
+    const std::string& identity, const std::string& checkpoint,
+    const std::string& checkpoint_root) {
+  return request(json::object{
+      {"schema", 2}, {"op", "transport.rolling_endpoint_batch"},
+      {"session", session}, {"tile_plan", plan.at("tile_plan")},
+      {"tile_plan_checkpoint_identity", plan.at("checkpoint_identity")},
+      {"arm", arm}, {"local", local},
+      {"local_checkpoint_identity", "pair-common-anchor"},
+      {"checkpoint_policy", json::object{
+           {"schema",
+            "diffexp2-deterministic-transport-endpoint-checkpoints-v1"},
+           {"root", checkpoint_root}}},
+      {"observables", json::array{json::object{
+           {"identity", identity}, {"checkpoint_identity", checkpoint},
+           {"integrand_row", row(identity + ":row")},
+           {"publication_relative_tolerance", "1e-30"},
+           {"epsilon", json::object{
+                {"min", 0}, {"max", 0},
+                {"required_complete_max", 0}}}}}},
+      {"threads", 1}});
+}
+
+json::object export_endpoint(const std::string& session,
+                             const json::object& endpoint) {
+  return request(json::object{
+      {"schema", 2}, {"op", "endpoint.export"}, {"session", session},
+      {"endpoint", endpoint.at("endpoint")},
+      {"checkpoint_identity", endpoint.at("checkpoint_identity")},
       {"output_digits", 50}});
 }
 
@@ -629,6 +711,198 @@ void regulated_center_primitive_preserves_pair_lower_halo() {
   }
 }
 
+void rolling_stream_contracts_before_state_publication() {
+  const std::string checkpoint =
+      "/tmp/diffexp2-rolling-transport-contract-pair.de2cp";
+  std::remove(checkpoint.c_str());
+  std::string session;
+  std::string restored_session;
+  std::string stage = "session.create";
+  try {
+    const auto created = request(json::object{
+        {"schema", 2}, {"op", "session.create"},
+        {"domain", "rational"}, {"output_digits", 50},
+        {"chart_capacity", 1}, {"local_capacity", 1},
+        {"match_capacity", 1}, {"tile_plan_capacity", 1},
+        {"transport_state_capacity", 1}, {"line_result_capacity", 2},
+        {"endpoint_capacity", 2}});
+    if (created.at("status") != "ok")
+      throw std::runtime_error(
+          "rolling session.create: " + json::serialize(created));
+    session = std::string(created.at("session").as_string());
+    stage = "prepare owners";
+    const auto chart = prepare_anchor_chart(session);
+    const auto anchor = solve_anchor(session, chart);
+    const auto plan = prepare_pair_plan(
+        session, "rolling-pair-plan", chart);
+    const auto stream = begin_rolling_stream(
+        session, plan, anchor, "rolling-pair-observable",
+        "rolling-pair-observable-checkpoint", "rolling-pair-root");
+    stage = "validate begin";
+    if (plan.at("status") != "ok" || stream.at("status") != "ok" ||
+        stream.at("capability") !=
+            "rolling-transport-pair-observable-stream-v1" ||
+        stream.at("lower_tiles") != 1 || stream.at("upper_tiles") != 1 ||
+        stream.at("coefficient_retention") !=
+            "current-and-terminal-only")
+      throw std::runtime_error(
+          "rolling stream did not bind the paired plan exactly: " +
+          json::serialize(stream));
+
+    stage = "add tiles";
+    const auto lower = add_rolling_stream_tile(
+        session, stream, "lower", 0, anchor,
+        row("rolling-pair:lower"));
+    const auto upper = add_rolling_stream_tile(
+        session, stream, "upper", 0, anchor,
+        row("rolling-pair:upper"));
+    if (counter(lower, "retained_row_record_bytes") == 0 ||
+        counter(lower, "retained_tile_diagnostic_bytes") == 0 ||
+        counter(upper, "retained_row_record_bytes") <=
+            counter(lower, "retained_row_record_bytes") ||
+        counter(upper, "retained_tile_diagnostic_bytes") <=
+            counter(lower, "retained_tile_diagnostic_bytes"))
+      throw std::runtime_error(
+          "rolling stream did not report monotonically retained compact byte classes");
+    stage = "finish";
+    const auto finished = finish_stream(session, stream);
+    stage = "validate finish";
+    if (lower.at("status") != "ok" || upper.at("status") != "ok" ||
+        upper.at("next_side") != nullptr ||
+        finished.at("status") != "ok" ||
+        finished.at("capability") !=
+            "rolling-transport-pair-observable-stream-v1" ||
+        finished.at("tile_integrations") != 2 ||
+        finished.at("lines").as_array().size() != 1 ||
+        finished.at("lower").as_object().at("coefficient_retention") !=
+            "terminal-local-only" ||
+        finished.at("upper").as_object().at("coefficient_retention") !=
+            "terminal-local-only")
+      throw std::runtime_error(
+          "rolling stream failed to publish a compact pair: " +
+          json::serialize(finished));
+    const auto line =
+        finished.at("lines").as_array().front().as_object();
+    const auto& conditioning = line.at("conditioning").as_object();
+    for (const auto* side : {"lower_tiles", "upper_tiles"}) {
+      const auto& compact = conditioning.at(side).as_array().front()
+          .as_object().at("value").as_object();
+      if (compact.at("schema") !=
+              "diffexp2-compact-rolling-tile-diagnostic-v1" ||
+          compact.if_contains("entries") != nullptr ||
+          compact.at("coefficients") != 1)
+        throw std::runtime_error(
+            "rolling line retained expanded per-coefficient tile diagnostics");
+    }
+    stage = "export";
+    const auto exported = export_line(session, line);
+    if (exported.at("status") != "ok" ||
+        std::abs(midpoint(exported) - 5.0 / 6.0) > 1e-40)
+      throw std::runtime_error(
+          "rolling stream changed the exact paired value: " +
+          json::serialize(exported));
+
+    stage = "rolling endpoint";
+    const auto endpoint_batch = rolling_endpoint_batch(
+        session, plan, "lower", anchor, "rolling-lower-endpoint",
+        "rolling-lower-endpoint-checkpoint",
+        "rolling-lower-endpoint-root");
+    if (endpoint_batch.at("status") != "ok" ||
+        endpoint_batch.at("capability") !=
+            "rolling-transport-endpoint-batch-v1" ||
+        endpoint_batch.at("coefficient_retention") !=
+            "terminal-local-only" ||
+        endpoint_batch.at("endpoints").as_array().size() != 1)
+      throw std::runtime_error(
+          "rolling terminal-local endpoint batch failed: " +
+          json::serialize(endpoint_batch));
+    const auto endpoint =
+        endpoint_batch.at("endpoints").as_array().front().as_object();
+    const auto endpoint_export = export_endpoint(session, endpoint);
+    if (endpoint_export.at("status") != "ok" ||
+        std::abs(midpoint(endpoint_export) - 1.0) > 1e-40)
+      throw std::runtime_error(
+          "rolling terminal-local endpoint changed its exact value: " +
+          json::serialize(endpoint_export));
+
+    stage = "release owners";
+    (void)request(json::object{
+        {"schema", 2}, {"op", "tile.release"}, {"session", session},
+        {"tile_plan", plan.at("tile_plan")}});
+    (void)request(json::object{
+        {"schema", 2}, {"op", "local.release"}, {"session", session},
+        {"local", anchor}});
+    if (export_line(session, line).at("status") != "ok")
+      throw std::runtime_error(
+          "rolling line did not retain its compact plan/local closure");
+    if (export_endpoint(session, endpoint).at("status") != "ok")
+      throw std::runtime_error(
+          "rolling endpoint did not retain its compact plan/local closure");
+
+    stage = "checkpoint save";
+    const auto saved = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.save"}, {"session", session},
+        {"path", checkpoint},
+        {"checkpoint_identity", "rolling-pair-roundtrip"}});
+    if (saved.at("status") != "ok")
+      throw std::runtime_error(
+          "rolling checkpoint.save: " + json::serialize(saved));
+    (void)request(json::object{
+        {"schema", 2}, {"op", "session.close"}, {"session", session}});
+    session.clear();
+
+    stage = "checkpoint restore";
+    const auto restored = request(json::object{
+        {"schema", 2}, {"op", "checkpoint.restore"},
+        {"path", checkpoint},
+        {"expected_identity", "rolling-pair-roundtrip"}});
+    if (restored.at("status") != "ok")
+      throw std::runtime_error(
+          "rolling checkpoint.restore: " + json::serialize(restored));
+    restored_session = std::string(restored.at("session").as_string());
+    const auto restored_export = export_line(restored_session, line);
+    if (restored_export.at("status") != "ok" ||
+        restored_export.at("value") != exported.at("value"))
+      throw std::runtime_error(
+          "rolling line changed across checkpoint restore: " +
+          json::serialize(restored_export));
+    const auto restored_endpoint_export =
+        export_endpoint(restored_session, endpoint);
+    if (restored_endpoint_export.at("status") != "ok" ||
+        restored_endpoint_export.at("value") !=
+            endpoint_export.at("value"))
+      throw std::runtime_error(
+          "rolling endpoint changed across checkpoint restore: " +
+          json::serialize(restored_endpoint_export));
+    (void)request(json::object{
+        {"schema", 2}, {"op", "session.close"},
+        {"session", restored_session}});
+    restored_session.clear();
+    std::remove(checkpoint.c_str());
+  } catch (const std::exception& error) {
+    if (!session.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"}, {"session", session}});
+    if (!restored_session.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", restored_session}});
+    std::remove(checkpoint.c_str());
+    throw std::runtime_error(
+        "rolling stream stage " + stage + ": " + error.what());
+  } catch (...) {
+    if (!session.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"}, {"session", session}});
+    if (!restored_session.empty())
+      (void)request(json::object{
+          {"schema", 2}, {"op", "session.close"},
+          {"session", restored_session}});
+    std::remove(checkpoint.c_str());
+    throw;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -651,6 +925,7 @@ int main() {
   std::string restored_session;
   try {
     regulated_center_primitive_preserves_pair_lower_halo();
+    rolling_stream_contracts_before_state_publication();
     const auto created = request(json::object{
         {"schema", 2}, {"op", "session.create"},
         {"domain", "rational"}, {"output_digits", 50},

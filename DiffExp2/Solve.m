@@ -34,6 +34,8 @@ WithNativeSCCCompositeCacheReservation::usage = "WithNativeSCCCompositeCacheRese
 ClearSolveCaches::usage = "ClearSolveCaches[] empties the PrepareChart, exact-SCC-structure, exact-clearing, physical-cleared-ODE, rational-multiplier, SolveHomogeneous, and native SCC composite memo caches, then closes persistent native sessions. Called by API`LoadSystem; the SolveHomogeneous cache additionally self-flushes whenever the chart's SystemHash changes and is entry-capped.";
 DropWolframPreparationCaches::usage = "DropWolframPreparationCaches[] drops only Wolfram-side chart/operator/multiplier preparation memo state while preserving every retained native session, chart, SCC, local, match, and tile-plan handle.";
 DropWolframStaticOperatorCache::usage = "DropWolframStaticOperatorCache[] drops only completed Wolfram-side serialized recurrence-operator memo payloads. It preserves original-system clearing registries, chart/SCC preparation, and every retained native handle, so a streamed transport arm may call it after one receiving basis has been consumed.";
+DropWolframConsumedBasisCaches::usage = "DropWolframConsumedBasisCaches[] drops the completed receiving basis's chart-local cleared equation, legacy local clear, and serialized static-operator memo payloads. It deliberately preserves the original-system/global clearing registries, physical q/C payload cache, native SCC preparation cache, and every retained native handle.";
+WolframConsumedBasisCacheCounters::usage = "WolframConsumedBasisCacheCounters[] returns fixed-shape entry and ByteCount diagnostics for the Wolfram caches owned by completed receiving bases, together with entry counts for the preserved global/physical/SCC caches.";
 ODEResidualCheck::usage = "ODEResidualCheck[chartSystem, sol, source, probe] checks the theta-form ODE residual at an interior probe point; loud error above ResidTol.";
 
 Begin["`Private`"];
@@ -3549,7 +3551,8 @@ PrepareNativeRationalRow[cs_Association, sourceShape_Association,
     cvec_List, physicalVar_Symbol, serialization_:Automatic] := Module[
   {d = Lookup[cs, "SystemSize", None], epsWindow, tWindow, dimension,
    shape, field, domain, symbols, inputDigits, t, localExpressions,
-   prepared, active, encodedEntries, identityPayload, identity},
+   prepared, active, encodedEntries, identityPayload, identityJSON,
+   identity},
   epsWindow = Lookup[sourceShape, "EpsWindow", None];
   tWindow = Lookup[sourceShape, "TWindow", None];
   dimension = Lookup[sourceShape, "Dimension", None];
@@ -3592,9 +3595,21 @@ PrepareNativeRationalRow[cs_Association, sourceShape_Association,
     cfg["WorkingPrecision"];
   encodedEntries = Block[{$cppSerializationDomain = domain,
       $cppSerializationSymbols = symbols},
-    Map[<|"column" -> # - 1,
+    Map[Function[index, Module[{entry},
+      entry = <|"column" -> index - 1,
         "multiplier" -> cppPreparedRationalMultiplierJSON[
-          prepared[[#]], inputDigits, cs, True]|> &, active]];
+          prepared[[index]], inputDigits, cs, True]|>;
+      (* ExactExpressionIdentity is a canonical collision certificate, but
+         embedding that complete AST in every retained tile/observable
+         provenance record makes a rolling march grow with the size of the
+         original differential-equation expressions.  SHA-256 of the exact
+         canonical JSON binds the same expression with a fixed-size token;
+         the analytic coefficients in this request remain the execution
+         authority. *)
+      ReplacePart[entry, {"multiplier", "exact_identity"} ->
+        ("sha256:" <> IntegerString[
+          Hash[prepared[[index]]["ExactIdentity"], "SHA256"], 16, 64])]
+      ]], active]];
   identityPayload = <|
     "schema" -> "diffexp2-prepared-rational-local-row-identity-v1",
     "chart" -> <|
@@ -3617,7 +3632,10 @@ PrepareNativeRationalRow[cs_Association, sourceShape_Association,
         "epsilon_shift" -> prepared[[First[#2]]]["EpsilonShift"],
         "center_pole_order" ->
           prepared[[First[#2]]]["CenterPoleOrder"]|> &, cvec]|>;
-  identity = ExportString[identityPayload, "RawJSON", "Compact" -> True];
+  identityJSON = ExportString[
+    identityPayload, "RawJSON", "Compact" -> True];
+  identity = "sha256:" <> IntegerString[
+    Hash[identityJSON, "SHA256"], 16, 64];
   <|"schema" -> "diffexp2-prepared-rational-local-row-v1",
     "columns" -> d, "exact_identity" -> identity,
     "entries" -> encodedEntries|>];
@@ -4189,6 +4207,24 @@ DropWolframPreparationCaches[] := Module[{},
   Null];
 
 DropWolframStaticOperatorCache[] := ($cppStaticOperatorCache = <||>; Null);
+
+WolframConsumedBasisCacheCounters[] := <|
+  "chart_cleared_entries" -> Length[$chartClearedCache],
+  "chart_cleared_bytes" -> ByteCount[$chartClearedCache],
+  "legacy_cleared_entries" -> Length[$clearedSymbolicLegacyCache],
+  "legacy_cleared_bytes" -> ByteCount[$clearedSymbolicLegacyCache],
+  "static_operator_entries" -> Length[$cppStaticOperatorCache],
+  "static_operator_bytes" -> ByteCount[$cppStaticOperatorCache],
+  "system_clear_entries" -> Length[$systemClearRegistry],
+  "global_cleared_entries" -> Length[$globalClearedCache],
+  "physical_ode_entries" -> Length[$physicalClearedODECache],
+  "native_scc_entries" -> Length[$nativeSCCCompositeCache]|>;
+
+DropWolframConsumedBasisCaches[] := Module[{},
+  $chartClearedCache = <||>;
+  $clearedSymbolicLegacyCache = <||>;
+  $cppStaticOperatorCache = <||>;
+  Null];
 
 (* The exact homogeneous work rectangle is needed both by the ordinary
    column builder and by persistent SCC preparation.  Keeping the arithmetic
@@ -7953,6 +7989,13 @@ SolveNativeRegularBasis[cs_Association, req_Association,
       "Detail" -> "retained monolithic regular basis did not bind one complete native chart"|>]];
   <|"Type" -> "DiffExp2NativeRegularBasis",
     "Session" -> First[sessions], "NativeChart" -> First[charts],
+    (* The monolithic recurrence chart exists only to manufacture these
+       columns.  A consuming transport hop can release it after C++ has
+       consumed the columns, but must use the collision-certified token so
+       CppBackend drops both the native chart and its full static-payload
+       certificate. *)
+    "PreparedToken" ->
+      First[prepared]["PersistentMetadata", "PreparedToken"],
     "Columns" -> columns, "Dimension" -> d,
     "Chart" -> <|"Center" -> cs["Center"],
       "ChartMap" -> cs["ChartMap"], "Radius" -> cs["Radius"],

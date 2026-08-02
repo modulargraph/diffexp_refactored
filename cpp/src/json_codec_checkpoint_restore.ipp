@@ -818,7 +818,20 @@ json::object restore_checkpoint(const std::string& path,
           endpoint = restore_checkpoint_transport_endpoint_record(
               item, restored->domain, state_found->second);
         } else if (endpoint_schema ==
-            "diffexp2-retained-plan-bound-endpoint-result-v1") {
+                   "diffexp2-retained-rolling-transport-endpoint-result-v1") {
+          const auto plan_found = restored->tile_plans.find(
+              required_string(source, "tile_plan"));
+          const auto local_found = restored->locals.find(
+              required_string(source, "local"));
+          if (plan_found == restored->tile_plans.end() ||
+              local_found == restored->locals.end())
+            throw std::invalid_argument(
+                "checkpoint rolling transport endpoint lost a strongly owned plan or terminal local");
+          endpoint = restore_checkpoint_rolling_transport_endpoint_record(
+              item, restored->domain, plan_found->second,
+              local_found->second);
+        } else if (endpoint_schema ==
+                   "diffexp2-retained-plan-bound-endpoint-result-v1") {
           const auto plan_found = restored->tile_plans.find(
               required_string(source, "tile_plan"));
           const auto local_found = restored->locals.find(

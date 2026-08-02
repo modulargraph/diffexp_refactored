@@ -486,9 +486,12 @@ restore_checkpoint_planned_endpoint_record(
 }
 
 std::shared_ptr<StoredEndpointResult>
-restore_checkpoint_transport_endpoint_record(
+restore_checkpoint_transport_endpoint_record_from_terminal(
     const json::value& raw, const std::string& expected_domain,
-    const std::shared_ptr<StoredTransportArmState>& state) {
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local,
+    const std::shared_ptr<StoredTransportArmState>& state,
+    bool rolling) {
   const auto& object = as_object(
       raw, "checkpoint retained transport endpoint");
   require_exact_keys(
@@ -498,14 +501,17 @@ restore_checkpoint_transport_endpoint_record(
        "cancellation_mode", "analytic_metadata", "result", "elapsed_ms",
        "runtime_stats"},
       "checkpoint retained transport endpoint");
-  if (required_string(object, "schema") !=
-      "diffexp2-retained-transport-endpoint-result-v1")
+  const auto schema = required_string(object, "schema");
+  if (schema != (rolling
+          ? "diffexp2-retained-rolling-transport-endpoint-result-v1"
+          : "diffexp2-retained-transport-endpoint-result-v1"))
     throw std::invalid_argument(
         "unsupported retained transport endpoint checkpoint schema");
-  if (!state || (expected_domain != "rational" && expected_domain != "acb") ||
-      std::string(state->final_local()->scalar_domain()) != expected_domain)
+  if (!plan || !local || (!rolling && !state) ||
+      (expected_domain != "rational" && expected_domain != "acb") ||
+      std::string(local->scalar_domain()) != expected_domain)
     throw std::invalid_argument(
-        "checkpoint transport endpoint lost its numeric state owner");
+        "checkpoint transport endpoint lost its numeric terminal owner");
   const auto handle = required_string(object, "handle");
   const auto checkpoint_identity = required_string(
       object, "checkpoint_identity");
@@ -516,10 +522,15 @@ restore_checkpoint_transport_endpoint_record(
     throw std::invalid_argument(
         "checkpoint transport endpoint contains an empty identity");
 
-  const auto binding = resolve_transport_endpoint_binding(state);
   const auto& source = as_object(
       object.at("source"), "checkpoint transport endpoint source");
-  auto expected_source = binding.source;
+  const auto binding = rolling
+      ? resolve_transport_endpoint_binding(
+            plan, required_string(source, "arm"), local)
+      : resolve_transport_endpoint_binding(state);
+  auto expected_source = rolling
+      ? rolling_transport_endpoint_source(binding, plan, local)
+      : binding.source;
   const auto& observable = as_object(
       source.at("observable"), "checkpoint transport endpoint observable");
   require_exact_keys(observable, {"identity", "checkpoint_identity"},
@@ -540,7 +551,7 @@ restore_checkpoint_transport_endpoint_record(
       required_string(prepared_row, "exact_identity"))
     throw std::invalid_argument(
         "checkpoint transport endpoint row identity is stale");
-  const auto final_summary = state->final_local()->summary();
+  const auto final_summary = local->summary();
   validate_prepared_rational_row_structure(
       prepared_row,
       as_u32(final_summary.at("dimension"),
@@ -564,7 +575,7 @@ restore_checkpoint_transport_endpoint_record(
   if (expected_domain == "rational") {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<Rational>>(
-            state->final_local());
+            local);
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Rational final local");
@@ -574,7 +585,7 @@ restore_checkpoint_transport_endpoint_record(
   } else {
     const auto typed =
         std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
-            state->final_local());
+            local);
     if (!typed)
       throw std::invalid_argument(
           "checkpoint transport endpoint lost its Acb final local");
@@ -614,8 +625,7 @@ restore_checkpoint_transport_endpoint_record(
       object.at("analytic_metadata"),
       "checkpoint transport endpoint analytic metadata");
   validate_checkpoint_exact_analytic_metadata(analytic_metadata);
-  if (analytic_metadata !=
-      state->final_local()->exact_analytic_metadata())
+  if (analytic_metadata != local->exact_analytic_metadata())
     throw std::invalid_argument(
         "checkpoint transport endpoint analytic metadata differs from its retained final local");
   const auto provenance = transport_endpoint_provenance(
@@ -681,13 +691,16 @@ restore_checkpoint_transport_endpoint_record(
                      "checkpoint transport endpoint runtime stats");
   auto endpoint = std::make_shared<StoredEndpointResult>(
       handle, checkpoint_identity, provenance_identity,
-      state->final_local()->handle(), state->final_local()->source_chart(),
-      state->final_local()->source_operator_identity(),
-      state->final_local()->checkpoint_identity(),
-      state->final_local()->scalar_domain(), approach_direction,
+      local->handle(), local->source_chart(),
+      local->source_operator_identity(),
+      local->checkpoint_identity(),
+      local->scalar_domain(), approach_direction,
       std::nullopt, "exact-or-acb-singleton",
       std::move(analytic_metadata), std::move(result), elapsed_ms,
-      source, binding.rim, nullptr, nullptr, state);
+      source, binding.rim,
+      rolling ? plan : nullptr,
+      rolling ? local : nullptr,
+      rolling ? nullptr : state);
   endpoint->restore_runtime_stats(
       as_u64(stats.at("exports"),
              "checkpoint transport endpoint exports"),
@@ -695,6 +708,27 @@ restore_checkpoint_transport_endpoint_record(
           stats.at("export_ms"),
           "checkpoint transport endpoint export time"));
   return endpoint;
+}
+
+std::shared_ptr<StoredEndpointResult>
+restore_checkpoint_transport_endpoint_record(
+    const json::value& raw, const std::string& expected_domain,
+    const std::shared_ptr<StoredTransportArmState>& state) {
+  if (!state)
+    throw std::invalid_argument(
+        "checkpoint transport endpoint lost its state owner");
+  return restore_checkpoint_transport_endpoint_record_from_terminal(
+      raw, expected_domain, state->plan_owner(), state->final_local(),
+      state, false);
+}
+
+std::shared_ptr<StoredEndpointResult>
+restore_checkpoint_rolling_transport_endpoint_record(
+    const json::value& raw, const std::string& expected_domain,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  return restore_checkpoint_transport_endpoint_record_from_terminal(
+      raw, expected_domain, plan, local, nullptr, true);
 }
 
 std::size_t checkpoint_size_t(const json::value& raw, const char* label);

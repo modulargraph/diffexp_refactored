@@ -39,6 +39,10 @@ Do[replayed[[n + 1]] = Together[(
 
 ok = row["schema"] === "diffexp2-prepared-rational-local-row-v1" &&
   TrueQ[DiffExp2`CppBackend`Private`persistentPreparedRationalRowQ[row]] &&
+  StringMatchQ[row["exact_identity"],
+    "sha256:" ~~ Repeated[HexadecimalCharacter, {64}]] &&
+  StringMatchQ[multiplier["exact_identity"],
+    "sha256:" ~~ Repeated[HexadecimalCharacter, {64}]] &&
   Sort[Keys[multiplier]] === Sort[{"epsilon_shift", "center_pole_order",
     "analytic_coefficients", "exact_identity", "proven_zero"}] &&
   Length[multiplier["analytic_coefficients"]] === 3 &&

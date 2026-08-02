@@ -178,6 +178,18 @@ assert["framed_fallback_is_published_under_frame_independent_owner",
 If[AssociationQ[lightBasis],
   Scan[DiffExp2`CppBackend`ReleasePersistentLocal,
     lightBasis["Columns"]]];
+lightPreparedRelease = If[AssociationQ[lightBasis],
+  DiffExp2`CppBackend`ReleasePersistentPreparedToken[
+    lightBasis["PreparedToken"]], lightBasis];
+afterLightPreparedRelease = If[AssociationQ[lightOwner],
+  sessionStats[lightOwner["Session"]], <||>];
+assert["consumed_regular_basis_token_releases_transient_recurrence_chart",
+  AssociationQ[lightBasis] &&
+    StringQ[Lookup[lightBasis, "PreparedToken", None]] &&
+    lightPreparedRelease === Null &&
+    Lookup[afterLightPreparedRelease, "charts", -1] === 0 &&
+    Lookup[afterLightPreparedRelease, "locals", -1] === 0 &&
+    Lookup[afterLightPreparedRelease, "regular_equation_owners", -1] === 1];
 tamperedOwner = If[AssociationQ[lightOwner], Join[lightOwner, <|
   "PhysicalPreparation" -> Join[lightOwner["PhysicalPreparation"], <|
     "Request" -> Join[request, <|"TOrder" -> request["TOrder"] + 1|>]|>]|>],

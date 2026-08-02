@@ -2079,7 +2079,8 @@ EndpointLimitResult terminal_factorized_endpoint_limit(
   return result;
 }
 
-std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
+std::shared_ptr<StoredEndpointResult>
+build_transport_endpoint_row_from_terminal_local(
     const std::string& endpoint_handle,
     const std::string& checkpoint_identity,
     const std::string& observable_identity,
@@ -2091,14 +2092,16 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
     const std::string& projected_handle,
     const std::string& projected_checkpoint_identity,
     const std::string& domain, slong precision_bits,
-    const std::shared_ptr<StoredTransportArmState>& state,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& source,
+    const std::shared_ptr<StoredPlannedMatchHop>& terminal_match,
+    const std::shared_ptr<StoredTransportArmState>& transport_owner,
     const ResolvedTransportEndpointBinding& binding) {
   if (endpoint_handle.empty() || checkpoint_identity.empty() ||
       observable_identity.empty() || projected_handle.empty() ||
-      projected_checkpoint_identity.empty() || !state)
+      projected_checkpoint_identity.empty() || !plan || !source)
     throw std::invalid_argument(
-        "transport endpoint row lost an identity or retained state owner");
-  const auto& source = state->final_local();
+        "transport endpoint row lost an identity, plan, or terminal local owner");
   const auto source_summary = source->summary();
   const auto started = std::chrono::steady_clock::now();
   validate_prepared_rational_row_structure(
@@ -2112,9 +2115,8 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   std::shared_ptr<StoredLocalBase> projected;
   const bool terminal_factorized =
       domain == "acb" &&
-      state->terminal_factorized_match() != nullptr &&
-      state->terminal_factorized_match()
-          ->has_terminal_acb_factorization();
+      terminal_match != nullptr &&
+      terminal_match->has_terminal_acb_factorization();
   if (!terminal_factorized) {
     if (domain == "rational") {
       const auto typed =
@@ -2143,7 +2145,7 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   EndpointLimitResult result;
   if (terminal_factorized) {
     result = terminal_factorized_endpoint_limit(
-        *state->terminal_factorized_match(), row,
+        *terminal_match, row,
         epsilon_contract, publication_relative_tolerance, binding,
         checkpoint_identity + ":terminal-factorized");
   } else if (binding.centered) {
@@ -2169,7 +2171,9 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
   const auto analytic_metadata = terminal_factorized
       ? source->exact_analytic_metadata()
       : projected->exact_analytic_metadata();
-  auto endpoint_source = binding.source;
+  auto endpoint_source = transport_owner
+      ? binding.source
+      : rolling_transport_endpoint_source(binding, plan, source);
   endpoint_source["observable"] = json::object{
       {"identity", observable_identity},
       {"checkpoint_identity", checkpoint_identity}};
@@ -2192,7 +2196,36 @@ std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
       source->scalar_domain(), binding.approach_direction, std::nullopt,
       "exact-or-acb-singleton", std::move(analytic_metadata),
       std::move(result), elapsed_ms, std::move(endpoint_source),
-      binding.rim, nullptr, nullptr, state);
+      binding.rim,
+      transport_owner ? nullptr : plan,
+      transport_owner ? nullptr : source,
+      transport_owner);
+}
+
+std::shared_ptr<StoredEndpointResult> build_transport_endpoint_row(
+    const std::string& endpoint_handle,
+    const std::string& checkpoint_identity,
+    const std::string& observable_identity,
+    const json::object& row,
+    const ObservableEpsilonContract& epsilon_contract,
+    const json::object& epsilon_record,
+    const Magnitude& publication_relative_tolerance,
+    const std::string& publication_relative_tolerance_text,
+    const std::string& projected_handle,
+    const std::string& projected_checkpoint_identity,
+    const std::string& domain, slong precision_bits,
+    const std::shared_ptr<StoredTransportArmState>& state,
+    const ResolvedTransportEndpointBinding& binding) {
+  if (!state)
+    throw std::invalid_argument(
+        "transport endpoint row requires a retained state");
+  return build_transport_endpoint_row_from_terminal_local(
+      endpoint_handle, checkpoint_identity, observable_identity, row,
+      epsilon_contract, epsilon_record, publication_relative_tolerance,
+      publication_relative_tolerance_text, projected_handle,
+      projected_checkpoint_identity, domain, precision_bits,
+      state->plan_owner(), state->final_local(),
+      state->terminal_factorized_match(), state, binding);
 }
 
 WholeArmEpsilonContract parse_whole_arm_epsilon_contract(
@@ -2994,6 +3027,44 @@ json::object encode_transport_line_value_diagnostics(
            {"max", result.epsilon.complete_max}}},
       {"dimension", result.dimension},
       {"entries", std::move(entries)}};
+}
+
+// A rolling stream needs enough per-tile information to localize a bad
+// contribution, but retaining one JSON object for every epsilon coefficient
+// of every observable defeats the coefficient-streaming memory contract.
+// The completed arm/pair still publishes full coefficient-wise conditioning;
+// historical tiles retain only this bounded diagnostic summary.
+json::object encode_compact_transport_line_value_diagnostics(
+    const StoredLineIntegral& line) {
+  const auto& result = line.value;
+  if (result.dimension == 0)
+    throw std::logic_error(
+        "compact transport line-value diagnostics lost their scalar dimension");
+  double max_abs_upper_approx = 0.0;
+  std::uint64_t contains_zero = 0;
+  std::uint64_t coefficients = 0;
+  for (std::int64_t raw_power = result.epsilon.min_power;
+       raw_power <= result.epsilon.complete_max; ++raw_power) {
+    const auto power = static_cast<std::int32_t>(raw_power);
+    for (std::uint32_t component = 0; component < result.dimension;
+         ++component) {
+      const auto& value = result.at(power, component);
+      max_abs_upper_approx = std::max(
+          max_abs_upper_approx,
+          Magnitude::upper_abs(value).approximate_upper());
+      if (value.contains_zero()) ++contains_zero;
+      ++coefficients;
+    }
+  }
+  return json::object{
+      {"schema", "diffexp2-compact-rolling-tile-diagnostic-v1"},
+      {"epsilon", json::object{
+           {"min", result.epsilon.min_power},
+           {"max", result.epsilon.complete_max}}},
+      {"dimension", result.dimension},
+      {"coefficients", coefficients},
+      {"contains_zero", contains_zero},
+      {"max_abs_upper_approx", max_abs_upper_approx}};
 }
 
 json::object encode_transport_pair_conditioning_diagnostics(
@@ -4072,21 +4143,22 @@ compute_terminal_composed_adjoint_diagnostic(
 
 StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
     slong precision_bits,
-    const std::shared_ptr<StoredTransportArmState>& state,
+    const std::shared_ptr<StoredPlannedMatchHop>& terminal_match,
+    std::size_t expected_tile_count,
     const json::object& prepared_row,
     const RetainedArmPlan& arm, const std::string& arm_name,
     std::size_t tile_index,
     const ObservableEpsilonContract& epsilon_contract,
     const std::optional<BoundedDivergentCancellation>&
         divergent_cancellation) {
-  if (!state || !state->terminal_factorized_match() ||
-      tile_index + 1 != state->tile_sources().size() ||
+  if (!terminal_match ||
+      tile_index + 1 != expected_tile_count ||
       tile_index >= arm.exact.tiles.size())
     throw std::invalid_argument(
         "terminal factorized line integration lost its final tile or match owner");
   AcbPrecisionLease lease(precision_bits);
   ComplexBall::set_precision(precision_bits);
-  const auto& match = *state->terminal_factorized_match();
+  const auto& match = *terminal_match;
   if (!match.has_terminal_acb_factorization())
     throw std::invalid_argument(
         "terminal factorized line integration has no certified Acb factorization");
@@ -4764,6 +4836,24 @@ StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
   return result;
 }
 
+StoredLineIntegral integrate_transport_terminal_factorized_acb_row_tile(
+    slong precision_bits,
+    const std::shared_ptr<StoredTransportArmState>& state,
+    const json::object& prepared_row,
+    const RetainedArmPlan& arm, const std::string& arm_name,
+    std::size_t tile_index,
+    const ObservableEpsilonContract& epsilon_contract,
+    const std::optional<BoundedDivergentCancellation>&
+        divergent_cancellation) {
+  if (!state)
+    throw std::invalid_argument(
+        "terminal factorized line integration lost its transport state");
+  return integrate_transport_terminal_factorized_acb_row_tile(
+      precision_bits, state->terminal_factorized_match(),
+      state->tile_sources().size(), prepared_row, arm, arm_name, tile_index,
+      epsilon_contract, divergent_cancellation);
+}
+
 void require_transport_line_publication_accuracy(
     const StoredLineIntegral& line,
     const ObservableEpsilonContract& epsilon,
@@ -4805,6 +4895,41 @@ void require_transport_line_publication_accuracy(
             component, request_index, power,
             publication.required_additional_digits);
     }
+}
+
+std::shared_ptr<StoredLineResult>
+build_rolling_transport_observable_line_from_result(
+    const std::string& handle, const std::string& checkpoint_identity,
+    const std::string& arm_name, json::object interval,
+    json::object aggregate_record,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& terminal,
+    StoredLineIntegral result, double elapsed_ms) {
+  if (handle.empty() || checkpoint_identity.empty() || !plan || !terminal)
+    throw std::invalid_argument(
+        "rolling transport observable line lost an identity or compact owner");
+  json::object provenance{
+      {"schema", "diffexp2-retained-native-line-aggregate-v1"},
+      {"checkpoint_identity", checkpoint_identity},
+      {"arm", arm_name},
+      {"interval", std::move(interval)},
+      {"source", json::object{
+           {"tile_plan", plan->handle()},
+           {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+           {"locals", line_aggregate_source_records({terminal})}}},
+      {"aggregate", std::move(aggregate_record)},
+      {"epsilon", json::object{{"min", result.value.epsilon.min_power},
+                                {"max", result.value.epsilon.complete_max}}},
+      {"scope", line_integration_scope_name(result.scope)},
+      {"error_guarantee",
+       error_guarantee_name(result.value.error.guarantee)}};
+  const auto provenance_identity = json::serialize(
+      canonical_json_value(provenance));
+  return std::make_shared<StoredLineResult>(
+      handle, checkpoint_identity, provenance_identity, std::move(result),
+      elapsed_ms, plan,
+      std::vector<std::shared_ptr<StoredLocalBase>>{terminal},
+      std::move(provenance));
 }
 
 class TransportPairObservableStream final {
@@ -4871,6 +4996,70 @@ class TransportPairObservableStream final {
     }
   }
 
+  // Rolling mode contracts a tile while it is still the current march
+  // local.  It therefore owns the immutable plan and common anchor, but not
+  // a coefficient-bearing transport state containing every historical
+  // source.  Only the two terminal locals are retained when the stream is
+  // finished so the published line keeps a compact exact owner closure.
+  TransportPairObservableStream(
+      std::string handle, std::string stream_checkpoint_identity,
+      std::string line_handle, std::string checkpoint_root,
+      std::string domain, slong precision_bits,
+      std::shared_ptr<StoredTilePlan> plan,
+      std::shared_ptr<StoredLocalBase> anchor,
+      std::string identity, std::string checkpoint_identity,
+      ObservableEpsilonContract epsilon, json::object epsilon_record,
+      TransportTailPolicy tail_policy,
+      std::optional<BoundedDivergentCancellation> divergent_cancellation,
+      std::optional<Magnitude> publication_relative_tolerance)
+      : handle_(std::move(handle)),
+        stream_checkpoint_identity_(
+            std::move(stream_checkpoint_identity)),
+        line_handle_(std::move(line_handle)),
+        checkpoint_root_(std::move(checkpoint_root)),
+        domain_(std::move(domain)), precision_bits_(precision_bits),
+        rolling_plan_(std::move(plan)), rolling_anchor_(std::move(anchor)),
+        identity_(std::move(identity)),
+        checkpoint_identity_(std::move(checkpoint_identity)),
+        epsilon_(epsilon), epsilon_record_(std::move(epsilon_record)),
+        tail_policy_(tail_policy),
+        divergent_cancellation_(std::move(divergent_cancellation)),
+        publication_relative_tolerance_(
+            std::move(publication_relative_tolerance)),
+        rolling_(true) {
+    if (handle_.empty() || stream_checkpoint_identity_.empty() ||
+        line_handle_.empty() || checkpoint_root_.empty() ||
+        identity_.empty() || checkpoint_identity_.empty() ||
+        !rolling_plan_ || !rolling_anchor_)
+      throw std::invalid_argument(
+          "rolling transport-pair stream identities or owners cannot be empty");
+    if (domain_ != "rational" && domain_ != "acb")
+      throw std::invalid_argument(
+          "rolling transport-pair stream requires a numeric session domain");
+    if (std::string(rolling_anchor_->scalar_domain()) != domain_)
+      throw std::invalid_argument(
+          "rolling transport-pair anchor changed coefficient domain");
+    if (tail_policy_ != TransportTailPolicy::Stored)
+      throw std::invalid_argument(
+          "rolling transport-pair streaming currently requires stored tails");
+    if (divergent_cancellation_.has_value() && domain_ != "acb")
+      throw std::invalid_argument(
+          "bounded divergent cancellation is restricted to Acb rolling streams");
+    const auto& lower = rolling_plan_->arm("lower").exact;
+    const auto& upper = rolling_plan_->arm("upper").exact;
+    if (lower.direction != -1 || upper.direction != 1 ||
+        lower.from.str() != upper.from.str())
+      throw std::invalid_argument(
+          "rolling transport-pair plan has incompatible exact arms");
+    expected_tiles_ = {lower.tiles.size(), upper.tiles.size()};
+    for (std::size_t side = 0; side < 2; ++side) {
+      if (expected_tiles_[side] == 0)
+        throw std::invalid_argument(
+            "rolling transport-pair arm has no exact tiles");
+      row_records_[side].reserve(expected_tiles_[side]);
+    }
+  }
+
   const std::string& handle() const { return handle_; }
   const std::string& stream_checkpoint_identity() const {
     return stream_checkpoint_identity_;
@@ -4882,6 +5071,9 @@ class TransportPairObservableStream final {
   const std::string& line_handle() const { return line_handle_; }
   const std::string& checkpoint_root() const { return checkpoint_root_; }
   const auto& states() const { return states_; }
+  bool rolling() const { return rolling_; }
+  const auto& rolling_plan() const { return rolling_plan_; }
+  const auto& rolling_terminals() const { return rolling_terminals_; }
   const auto& expected_tiles() const { return expected_tiles_; }
   const auto& next_tiles() const { return next_tiles_; }
   const auto& epsilon() const { return epsilon_; }
@@ -4891,6 +5083,58 @@ class TransportPairObservableStream final {
 
   json::object add_tile(std::size_t side, std::size_t tile_index,
                         const json::object& prepared_row) {
+    if (rolling_)
+      throw std::invalid_argument(
+          "rolling transport-pair stream requires an explicit current local");
+    const std::string arm_name = side == 0 ? "lower" : "upper";
+    if (side > 1)
+      throw std::invalid_argument(
+          "transport-pair stream tile side is invalid");
+    const auto source = states_[side]->tile_sources().at(tile_index);
+    const auto terminal_match =
+        tile_index + 1 == expected_tiles_[side]
+        ? states_[side]->terminal_factorized_match()
+        : std::shared_ptr<StoredPlannedMatchHop>{};
+    return add_tile_from_source(side, tile_index, prepared_row, source,
+                                terminal_match, arm_name,
+                                states_[side]->plan_owner());
+  }
+
+  json::object add_rolling_tile(
+      std::size_t side, std::size_t tile_index,
+      const std::shared_ptr<StoredLocalBase>& source,
+      const json::object& prepared_row) {
+    if (!rolling_)
+      throw std::invalid_argument(
+          "state-backed transport-pair stream does not accept rolling locals");
+    if (side > 1 || !source ||
+        std::string(source->scalar_domain()) != domain_)
+      throw std::invalid_argument(
+          "rolling transport-pair tile lost its numeric source local");
+    const std::string arm_name = side == 0 ? "lower" : "upper";
+    std::shared_ptr<StoredPlannedMatchHop> terminal_match;
+    if (tile_index + 1 == expected_tiles_[side]) {
+      if (const auto erased = source->terminal_factorized_owner();
+          erased != nullptr)
+        terminal_match =
+            std::static_pointer_cast<StoredPlannedMatchHop>(erased);
+    }
+    auto response = add_tile_from_source(
+        side, tile_index, prepared_row, source, terminal_match, arm_name,
+        rolling_plan_);
+    if (tile_index + 1 == expected_tiles_[side])
+      rolling_terminals_[side] = source;
+    return response;
+  }
+
+ private:
+  json::object add_tile_from_source(
+      std::size_t side, std::size_t tile_index,
+      const json::object& prepared_row,
+      const std::shared_ptr<StoredLocalBase>& source,
+      const std::shared_ptr<StoredPlannedMatchHop>& terminal_match,
+      const std::string& arm_name,
+      const std::shared_ptr<StoredTilePlan>& plan) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (status_ == Status::Poisoned)
       throw std::invalid_argument(
@@ -4912,56 +5156,62 @@ class TransportPairObservableStream final {
       const auto started = std::chrono::steady_clock::now();
       StoredLineIntegral tile;
       std::unique_ptr<AcbPrecisionLease> acb_lease;
+      if (!plan || !source)
+        throw std::invalid_argument(
+            "transport-pair stream tile lost its plan or source owner");
+      const auto& arm = plan->arm(arm_name);
       if (domain_ == "acb") {
         acb_lease = std::make_unique<AcbPrecisionLease>(precision_bits_);
         ComplexBall::set_precision(precision_bits_);
-        const std::string arm_name =
-            side == 0 ? "lower" : "upper";
-        const auto& arm =
-            states_[side]->plan_owner()->arm(arm_name);
         if (tile_index + 1 == expected_tiles_[side] &&
-            states_[side]->terminal_factorized_match() !=
-                nullptr) {
+            terminal_match != nullptr) {
           tile =
               integrate_transport_terminal_factorized_acb_row_tile(
-                  precision_bits_, states_[side], prepared_row,
+                  precision_bits_, terminal_match, expected_tiles_[side],
+                  prepared_row,
                   arm, arm_name, tile_index, epsilon_,
                   divergent_cancellation_);
         } else {
-          const auto source =
+          const auto typed_source =
               std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(
-                  states_[side]->tile_sources().at(tile_index));
-          if (!source)
+                  source);
+          if (!typed_source)
             throw std::logic_error(
                 "transport-pair stream Acb source changed coefficient domain");
           tile = integrate_transport_stored_row_tile<ComplexBall>(
-              precision_bits_, source, prepared_row, arm,
+              precision_bits_, typed_source, prepared_row, arm,
               arm_name, tile_index, epsilon_,
               divergent_cancellation_);
         }
       } else {
-        const auto source =
+        const auto typed_source =
             std::dynamic_pointer_cast<StoredLocal<Rational>>(
-                states_[side]->tile_sources().at(tile_index));
-        if (!source)
+                source);
+        if (!typed_source)
           throw std::logic_error(
               "transport-pair stream Rational source changed coefficient domain");
         tile = integrate_transport_stored_row_tile<Rational>(
-            precision_bits_, source, prepared_row,
-            states_[side]->plan_owner()->arm(
-                side == 0 ? "lower" : "upper"),
-            side == 0 ? "lower" : "upper", tile_index, epsilon_,
+            precision_bits_, typed_source, prepared_row,
+            arm, arm_name, tile_index, epsilon_,
             divergent_cancellation_);
       }
       accumulators_[side].add(tile);
-      tile_values_[side].push_back(json::object{
+      json::object tile_value{
           {"tile", tile_index},
-          {"value", encode_transport_line_value_diagnostics(tile)}});
+          {"value", rolling_
+               ? encode_compact_transport_line_value_diagnostics(tile)
+               : encode_transport_line_value_diagnostics(tile)}};
       const auto row_identity = required_string(
           prepared_row, "exact_identity");
-      row_records_[side].push_back(json::object{
+      json::object row_record{
           {"tile", tile_index}, {"exact_identity", row_identity},
-          {"entries", compact_prepared_row_entry_facts(prepared_row)}});
+          {"entries", compact_prepared_row_entry_facts(prepared_row)}};
+      retained_tile_diagnostic_bytes_[side] +=
+          json::serialize(tile_value).size();
+      retained_row_record_bytes_[side] +=
+          json::serialize(row_record).size();
+      tile_values_[side].push_back(std::move(tile_value));
+      row_records_[side].push_back(std::move(row_record));
       ++next_tiles_[side];
       const auto elapsed_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - started).count();
@@ -4979,12 +5229,20 @@ class TransportPairObservableStream final {
                ? json::value(next_tiles_[0])
                : next_tiles_[1] < expected_tiles_[1]
                    ? json::value(next_tiles_[1]) : json::value(nullptr)},
+          {"retained_row_record_bytes",
+           retained_row_record_bytes_[0] +
+               retained_row_record_bytes_[1]},
+          {"retained_tile_diagnostic_bytes",
+           retained_tile_diagnostic_bytes_[0] +
+               retained_tile_diagnostic_bytes_[1]},
           {"elapsed_ms", elapsed_ms}};
     } catch (...) {
       status_ = Status::Poisoned;
       throw;
     }
   }
+
+ public:
 
   FinishResult finish() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -5002,6 +5260,89 @@ class TransportPairObservableStream final {
     const auto finish_started = std::chrono::steady_clock::now();
     const auto observable_root = checkpoint_root_ + ":observable:1";
     std::array<std::shared_ptr<StoredLineResult>, 2> arm_lines;
+    if (rolling_) {
+      if (!rolling_plan_ || !rolling_terminals_[0] ||
+          !rolling_terminals_[1])
+        throw std::logic_error(
+            "rolling transport-pair stream lost a terminal compact owner");
+      for (std::size_t side = 0; side < 2; ++side) {
+        const std::string arm_name = side == 0 ? "lower" : "upper";
+        const auto& exact = rolling_plan_->arm(arm_name).exact;
+        const auto arm_checkpoint = observable_root + ":" + arm_name +
+                                    ":rolling-scratch";
+        json::object arm_record{
+            {"kind", "rolling-transport-observable-arm"},
+            {"combination", "sum-physical-tiles"},
+            {"request_index", 0},
+            {"observable_identity", identity_ + ":" + arm_name},
+            {"observable_checkpoint_identity", arm_checkpoint},
+            {"output_epsilon_contract", epsilon_record_},
+            {"tail_policy", transport_tail_policy_name(tail_policy_)},
+            {"projection_mode",
+             transport_projection_mode_name(tail_policy_)},
+            {"divergent_cancellation",
+             divergent_cancellation_.has_value()
+                 ? json::value(encode_bounded_divergent_cancellation(
+                       *divergent_cancellation_))
+                 : json::value(
+                       json::object{{"mode", "exact-singleton"}})},
+            {"rows", row_records_[side]},
+            {"tile_count", expected_tiles_[side]},
+            {"coefficient_retention", "terminal-local-only"}};
+        arm_lines[side] =
+            build_rolling_transport_observable_line_from_result(
+                "private:" + arm_checkpoint + ":aggregate",
+                arm_checkpoint, arm_name,
+                json::object{{"from_exact", exact.from.str()},
+                             {"to_exact", exact.to.str()}},
+                std::move(arm_record), rolling_plan_,
+                rolling_terminals_[side],
+                accumulators_[side].finish(
+                    "rolling native transport observable aggregate"),
+                arm_integration_ms_[side]);
+      }
+      const auto& lower_exact = rolling_plan_->arm("lower").exact;
+      const auto& upper_exact = rolling_plan_->arm("upper").exact;
+      json::object pair_record{
+          {"kind", "rolling-transport-observable-pair"},
+          {"combination", "negative-lower-plus-upper"},
+          {"no_remarching", true}, {"no_rematching", true},
+          {"request_index", 0},
+          {"observable_identity", identity_},
+          {"observable_checkpoint_identity", checkpoint_identity_},
+          {"output_epsilon_contract", epsilon_record_},
+          {"tail_policy", transport_tail_policy_name(tail_policy_)},
+          {"lower_rows", row_records_[0]},
+          {"upper_rows", row_records_[1]},
+          {"lower_tiles", expected_tiles_[0]},
+          {"upper_tiles", expected_tiles_[1]},
+          {"coefficient_retention", "two-terminal-locals-only"}};
+      auto line = build_retained_line_aggregate(
+          line_handle_, checkpoint_identity_, "combined",
+          json::object{{"from_exact", lower_exact.to.str()},
+                       {"anchor_exact", lower_exact.from.str()},
+                       {"to_exact", upper_exact.to.str()}},
+          std::move(pair_record), rolling_plan_,
+          {rolling_terminals_[0], rolling_terminals_[1]},
+          {arm_lines[0], arm_lines[1]}, {-1, 1},
+          elapsed_milliseconds(finish_started));
+      if (line->result().value.epsilon.complete_max <
+          epsilon_.required_complete_max)
+        throw std::domain_error(
+            "rolling transport-pair aggregate does not cover its required epsilon maximum");
+      FinishResult output;
+      output.line = std::move(line);
+      output.tiles = expected_tiles_;
+      output.arm_integration_ms = arm_integration_ms_;
+      output.conditioning = encode_transport_pair_conditioning_diagnostics(
+          arm_lines[0]->result(), arm_lines[1]->result(),
+          output.line->result(), std::move(tile_values_[0]),
+          std::move(tile_values_[1]));
+      output.elapsed_ms = arm_integration_ms_[0] +
+          arm_integration_ms_[1] + elapsed_milliseconds(finish_started);
+      status_ = Status::Finished;
+      return output;
+    }
     for (std::size_t side = 0; side < 2; ++side) {
       const std::string arm_name = side == 0 ? "lower" : "upper";
       const auto arm_identity = identity_ + ":" + arm_name;
@@ -5105,6 +5446,9 @@ class TransportPairObservableStream final {
   std::string domain_;
   slong precision_bits_ = 256;
   std::array<std::shared_ptr<StoredTransportArmState>, 2> states_;
+  std::shared_ptr<StoredTilePlan> rolling_plan_;
+  std::shared_ptr<StoredLocalBase> rolling_anchor_;
+  std::array<std::shared_ptr<StoredLocalBase>, 2> rolling_terminals_;
   std::string identity_;
   std::string checkpoint_identity_;
   ObservableEpsilonContract epsilon_;
@@ -5117,7 +5461,10 @@ class TransportPairObservableStream final {
   std::array<StreamingStoredLineAccumulator, 2> accumulators_;
   std::array<json::array, 2> tile_values_;
   std::array<json::array, 2> row_records_;
+  std::array<std::size_t, 2> retained_tile_diagnostic_bytes_{0, 0};
+  std::array<std::size_t, 2> retained_row_record_bytes_{0, 0};
   std::array<double, 2> arm_integration_ms_{0.0, 0.0};
+  bool rolling_ = false;
   Status status_ = Status::Active;
   std::mutex mutex_;
 };

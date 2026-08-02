@@ -115,6 +115,7 @@ assert["regular_basis_hoists_immutable_preparation_once",
     recordedOwner === equationOwner && unitMatrix === IdentityMatrix[d]];
 assert["regular_basis_reports_native_parallel_batch_and_owner_handles",
   basis["NativeChart"] === "eq:basis" &&
+    basis["PreparedToken"] === "operator" &&
     Lookup[basis["Columns"], "BasisIndex", {}] === Range[d] &&
     basis["NativeSummary", "worker_threads"] === 3 &&
     TrueQ[basis["NativeSummary", "atomic_retention"]] &&

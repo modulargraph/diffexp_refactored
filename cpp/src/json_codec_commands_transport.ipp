@@ -4122,6 +4122,199 @@
         {"elapsed_ms", contraction_ms}};
   }
 
+  if (operation == "transport.local_consumer_epsilon") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "local",
+         "local_checkpoint_identity"},
+        "native transport.local_consumer_epsilon request");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(
+          required_string(root, "local"));
+      if (found == session->locals.end() ||
+          required_string(root, "local_checkpoint_identity") !=
+              found->second->checkpoint_identity())
+        throw std::invalid_argument(
+            "transport local-consumer epsilon binding is stale");
+      local = found->second;
+    }
+    const bool terminal_factorized =
+        local->terminal_factorized_owner() != nullptr;
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", "transport-local-consumer-epsilon-v1"},
+        {"local", local->handle()},
+        {"local_checkpoint_identity", local->checkpoint_identity()},
+        {"consumer_epsilon",
+         transport_local_consumer_epsilon_contract(local)},
+        {"terminal_factorized_match", terminal_factorized},
+        {"json_coefficients", 0}};
+  }
+
+  if (operation == "transport.contract_pair_rolling_stream_begin") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "tile_plan",
+         "tile_plan_checkpoint_identity", "anchor",
+         "anchor_checkpoint_identity", "checkpoint_policy", "observable"},
+        "native transport.contract_pair_rolling_stream_begin request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "rolling transport-pair streaming requires rational or Acb coefficients");
+    const auto& checkpoint_policy = as_object(
+        root.at("checkpoint_policy"),
+        "rolling transport-pair checkpoint policy");
+    require_exact_keys(checkpoint_policy, {"schema", "root"},
+                       "rolling transport-pair checkpoint policy");
+    if (required_string(checkpoint_policy, "schema") !=
+        "diffexp2-deterministic-transport-pair-contraction-checkpoints-v1")
+      throw std::invalid_argument(
+          "unsupported rolling transport-pair checkpoint policy schema");
+    const auto checkpoint_root = required_string(checkpoint_policy, "root");
+    if (checkpoint_root.empty())
+      throw std::invalid_argument(
+          "rolling transport-pair checkpoint root cannot be empty");
+
+    const auto& observable = as_object(
+        root.at("observable"), "rolling transport-pair observable");
+    const bool has_divergent_cancellation =
+        observable.if_contains("divergent_cancellation") != nullptr;
+    const bool has_publication_tolerance =
+        observable.if_contains("publication_relative_tolerance") != nullptr;
+    if (has_divergent_cancellation && has_publication_tolerance)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "divergent_cancellation", "publication_relative_tolerance"},
+          "rolling transport-pair observable");
+    else if (has_divergent_cancellation)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "divergent_cancellation"},
+          "rolling transport-pair observable");
+    else if (has_publication_tolerance)
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy",
+           "publication_relative_tolerance"},
+          "rolling transport-pair observable");
+    else
+      require_exact_keys(
+          observable,
+          {"identity", "checkpoint_identity", "epsilon", "tail_policy"},
+          "rolling transport-pair observable");
+    const auto identity = required_string(observable, "identity");
+    const auto observable_checkpoint =
+        required_string(observable, "checkpoint_identity");
+    if (identity.empty() || observable_checkpoint.empty())
+      throw std::invalid_argument(
+          "rolling transport-pair observable identities cannot be empty");
+    const auto epsilon = parse_observable_epsilon_contract(
+        observable.at("epsilon"),
+        "rolling transport-pair output epsilon contract");
+    const auto epsilon_record = as_object(
+        observable.at("epsilon"),
+        "rolling transport-pair output epsilon contract");
+    const auto tail_policy = parse_transport_tail_policy(
+        observable.at("tail_policy"),
+        "rolling transport-pair tail policy");
+    if (tail_policy != TransportTailPolicy::Stored)
+      throw std::invalid_argument(
+          "rolling transport-pair streaming currently supports only stored tails");
+    std::optional<BoundedDivergentCancellation> divergent_cancellation;
+    if (const auto* policy =
+            observable.if_contains("divergent_cancellation")) {
+      if (session->domain != "acb")
+        throw std::invalid_argument(
+            "bounded divergent cancellation is restricted to Acb rolling streams");
+      divergent_cancellation = parse_bounded_divergent_cancellation(
+          *policy, "rolling transport-pair divergent-cancellation policy");
+    }
+    std::optional<Magnitude> publication_relative_tolerance;
+    if (has_publication_tolerance) {
+      const auto text = required_string(
+          observable, "publication_relative_tolerance");
+      publication_relative_tolerance = Magnitude::decimal(text);
+      if (text.empty() || !publication_relative_tolerance->is_finite() ||
+          publication_relative_tolerance->is_zero() ||
+          Magnitude::one() <= *publication_relative_tolerance)
+        throw std::invalid_argument(
+            "rolling transport-pair publication tolerance must be finite and strictly between zero and one");
+    }
+
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> anchor;
+    std::shared_ptr<TransportPairObservableStream> stream;
+    std::string stream_handle;
+    std::string stream_checkpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto plan_found = session->tile_plans.find(
+          required_string(root, "tile_plan"));
+      if (plan_found == session->tile_plans.end() ||
+          required_string(root, "tile_plan_checkpoint_identity") !=
+              plan_found->second->checkpoint_identity())
+        throw std::invalid_argument(
+            "rolling transport-pair tile-plan binding is stale");
+      plan = plan_found->second;
+      const auto anchor_found = session->locals.find(
+          required_string(root, "anchor"));
+      if (anchor_found == session->locals.end() ||
+          required_string(root, "anchor_checkpoint_identity") !=
+              anchor_found->second->checkpoint_identity())
+        throw std::invalid_argument(
+            "rolling transport-pair anchor binding is stale");
+      anchor = anchor_found->second;
+      if (session->line_results.size() +
+              session->pending_line_integrations >=
+          session->line_result_capacity)
+        throw std::invalid_argument(
+            "persistent line-result capacity is exhausted by rolling transport-pair contraction");
+      if (session->next_transport_pair_stream ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          session->next_line_result ==
+              std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error(
+            "rolling transport-pair handle counter overflow");
+      stream_handle = "rolling-pair-stream:" + session->handle + ":" +
+          std::to_string(session->next_transport_pair_stream++);
+      stream_checkpoint = checkpoint_root + ":stream";
+      const auto line_handle =
+          "line:" + std::to_string(session->next_line_result++);
+      stream = std::make_shared<TransportPairObservableStream>(
+          stream_handle, stream_checkpoint, line_handle, checkpoint_root,
+          session->domain, session->precision_bits, plan, anchor, identity,
+          observable_checkpoint, epsilon, epsilon_record, tail_policy,
+          divergent_cancellation, publication_relative_tolerance);
+      if (!session->transport_pair_streams.emplace(
+              stream_handle, stream).second)
+        throw std::logic_error(
+            "rolling transport-pair handle collided at publication");
+      ++session->pending_line_integrations;
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"capability", "rolling-transport-pair-observable-stream-v1"},
+        {"stream", stream_handle},
+        {"stream_checkpoint_identity", stream_checkpoint},
+        {"observable_identity", identity},
+        {"observable_checkpoint_identity", observable_checkpoint},
+        {"lower_tiles", stream->expected_tiles()[0]},
+        {"upper_tiles", stream->expected_tiles()[1]},
+        {"next_side", "lower"}, {"next_tile", 0},
+        {"tail_policy", "stored"},
+        {"atomic_publication", true},
+        {"coefficient_retention", "current-and-terminal-only"},
+        {"checkpoint_policy", checkpoint_policy}};
+  }
+
   if (operation == "transport.contract_pair_stream_begin") {
     require_exact_keys(
         root,
@@ -4333,6 +4526,106 @@
         {"checkpoint_policy", checkpoint_policy}};
   }
 
+  if (operation == "transport.contract_pair_rolling_stream_add_tile") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "stream",
+         "stream_checkpoint_identity", "side", "tile", "local",
+         "local_checkpoint_identity", "row"},
+        "native transport.contract_pair_rolling_stream_add_tile request");
+    const auto stream_handle = required_string(root, "stream");
+    const auto stream_checkpoint =
+        required_string(root, "stream_checkpoint_identity");
+    const auto side_name = required_string(root, "side");
+    const std::size_t side = side_name == "lower" ? 0 :
+        side_name == "upper" ? 1 : 2;
+    if (side > 1)
+      throw std::invalid_argument(
+          "rolling transport-pair tile side must be lower or upper");
+    const auto tile = static_cast<std::size_t>(
+        as_u32(root.at("tile"),
+               "rolling transport-pair tile index"));
+    const auto local_handle = required_string(root, "local");
+    const auto local_checkpoint =
+        required_string(root, "local_checkpoint_identity");
+    const auto& row = as_object(
+        root.at("row"), "rolling transport-pair prepared row");
+    std::shared_ptr<TransportPairObservableStream> stream;
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto stream_found =
+          session->transport_pair_streams.find(stream_handle);
+      if (stream_found == session->transport_pair_streams.end())
+        throw std::invalid_argument(
+            "unknown, aborted, or finished rolling transport-pair stream");
+      stream = stream_found->second;
+      if (!stream->rolling() ||
+          stream_checkpoint != stream->stream_checkpoint_identity())
+        throw std::invalid_argument(
+            "rolling transport-pair stream binding is stale or has the wrong mode");
+      const auto local_found = session->locals.find(local_handle);
+      if (local_found == session->locals.end() ||
+          local_checkpoint != local_found->second->checkpoint_identity())
+        throw std::invalid_argument(
+            "rolling transport-pair current-local binding is stale");
+      local = local_found->second;
+    }
+    json::object progress;
+    try {
+      progress = stream->add_rolling_tile(side, tile, local, row);
+    } catch (const MatchingArithmeticError& error) {
+      if (error.code ==
+          MatchingArithmeticErrorCode::TerminalOutputInconclusive)
+        return json::object{
+            {"status", "error"}, {"id", "CPP"},
+            {"reason", "terminal_output_ball_inconclusive"},
+            {"retryable_level_accuracy", true},
+            {"request_index", 0},
+            {"failure_functional",
+             error.row.has_value()
+                 ? json::value(*error.row) : json::value(nullptr)},
+            {"failure_epsilon",
+             error.epsilon_power.has_value()
+                 ? json::value(*error.epsilon_power)
+                 : json::value(nullptr)},
+            {"required_additional_digits",
+             error.required_additional_digits.has_value()
+                 ? json::value(*error.required_additional_digits)
+                 : json::value(nullptr)},
+            {"side", side_name}, {"tile", tile},
+            {"detail", error.what()}};
+      if (error.code !=
+              MatchingArithmeticErrorCode::InsufficientCompleteWindow ||
+          !error.row.has_value() || *error.row == 0)
+        throw;
+      return json::object{
+          {"status", "error"}, {"id", "CPP"},
+          {"reason", "acb_match_residual_inconclusive"},
+          {"retryable_epsilon_reservoir", true},
+          {"retryable_matching_clearance", false},
+          {"required_additional_epsilon_orders", *error.row},
+          {"side", side_name}, {"tile", tile},
+          {"common_complete_max",
+           error.epsilon_power.has_value()
+               ? json::value(*error.epsilon_power)
+               : json::value(nullptr)},
+          {"detail", error.what()}};
+    }
+    progress["status"] = "ok";
+    progress["session"] = session->handle;
+    progress["capability"] =
+        "rolling-transport-pair-observable-stream-v1";
+    progress["stream"] = stream_handle;
+    progress["stream_checkpoint_identity"] = stream_checkpoint;
+    progress["native_retained"] = true;
+    progress["json_coefficients"] = 0;
+    progress["atomic_publication"] = true;
+    return progress;
+  }
+
   if (operation == "transport.contract_pair_stream_add_tile") {
     require_exact_keys(
         root,
@@ -4430,8 +4723,11 @@
     const auto stream_handle = required_string(root, "stream");
     const auto stream_checkpoint = required_string(
         root, "stream_checkpoint_identity");
-    const auto prefix = "pair-stream:" + session->handle + ":";
-    if (stream_handle.rfind(prefix, 0) != 0)
+    const auto state_prefix = "pair-stream:" + session->handle + ":";
+    const auto rolling_prefix =
+        "rolling-pair-stream:" + session->handle + ":";
+    if (stream_handle.rfind(state_prefix, 0) != 0 &&
+        stream_handle.rfind(rolling_prefix, 0) != 0)
       throw std::invalid_argument(
           "transport-pair stream belongs to a different session");
     std::shared_ptr<TransportPairObservableStream> stream;
@@ -4568,8 +4864,10 @@
       if (session->closed)
         throw std::invalid_argument(
             "persistent solver session closed during streamed transport-pair contraction");
-      states[0]->require_contraction_counter_capacity(1);
-      states[1]->require_contraction_counter_capacity(1);
+      if (!stream->rolling()) {
+        states[0]->require_contraction_counter_capacity(1);
+        states[1]->require_contraction_counter_capacity(1);
+      }
       if (session->total_transport_contractions >
               std::numeric_limits<std::uint64_t>::max() - 2 ||
           session->total_transport_observables >
@@ -4587,8 +4885,10 @@
               finished.line->handle(), finished.line).second)
         throw std::logic_error(
             "streamed transport-pair line handle collided during publication");
-      states[0]->note_contraction_success(1);
-      states[1]->note_contraction_success(1);
+      if (!stream->rolling()) {
+        states[0]->note_contraction_success(1);
+        states[1]->note_contraction_success(1);
+      }
       session->total_transport_contractions += 2;
       session->total_transport_observables += 2;
       ++session->total_transport_pair_contractions;
@@ -4603,7 +4903,9 @@
           finished.arm_integration_ms[1];
       for (std::size_t side = 0; side < 2; ++side)
         for (std::size_t tile = 0; tile < finished.tiles[side]; ++tile)
-          states[side]->plan_owner()->note_integration();
+          (stream->rolling() ? stream->rolling_plan()
+                             : states[side]->plan_owner())
+              ->note_integration();
     } catch (...) {
       if (reservation_live) release_reservation();
       throw;
@@ -4628,24 +4930,42 @@
         {"lower_tiles", finished.tiles[0]},
         {"upper_tiles", finished.tiles[1]},
         {"elapsed_ms", finished.elapsed_ms}});
+    json::object lower_summary{
+        {"tiles", finished.tiles[0]},
+        {"elapsed_ms", finished.arm_integration_ms[0]}};
+    json::object upper_summary{
+        {"tiles", finished.tiles[1]},
+        {"elapsed_ms", finished.arm_integration_ms[1]}};
+    if (stream->rolling()) {
+      const auto& terminals = stream->rolling_terminals();
+      lower_summary["terminal_local"] =
+          compact_transport_local_reference(terminals[0]);
+      upper_summary["terminal_local"] =
+          compact_transport_local_reference(terminals[1]);
+      lower_summary["coefficient_retention"] = "terminal-local-only";
+      upper_summary["coefficient_retention"] = "terminal-local-only";
+    } else {
+      lower_summary["transport_state"] = states[0]->handle();
+      lower_summary["checkpoint_identity"] =
+          states[0]->checkpoint_identity();
+      lower_summary["provenance_identity"] =
+          states[0]->provenance_identity();
+      upper_summary["transport_state"] = states[1]->handle();
+      upper_summary["checkpoint_identity"] =
+          states[1]->checkpoint_identity();
+      upper_summary["provenance_identity"] =
+          states[1]->provenance_identity();
+    }
     return json::object{
         {"status", "ok"}, {"session", session->handle},
-        {"capability", kRetainedTransportPairStreamCapability},
+        {"capability", stream->rolling()
+             ? "rolling-transport-pair-observable-stream-v1"
+             : kRetainedTransportPairStreamCapability},
         {"native_retained", true}, {"json_coefficients", 0},
         {"stream", stream_handle},
         {"stream_checkpoint_identity", stream_checkpoint},
-        {"lower", json::object{
-             {"transport_state", states[0]->handle()},
-             {"checkpoint_identity", states[0]->checkpoint_identity()},
-             {"provenance_identity", states[0]->provenance_identity()},
-             {"tiles", finished.tiles[0]},
-             {"elapsed_ms", finished.arm_integration_ms[0]}}},
-        {"upper", json::object{
-             {"transport_state", states[1]->handle()},
-             {"checkpoint_identity", states[1]->checkpoint_identity()},
-             {"provenance_identity", states[1]->provenance_identity()},
-             {"tiles", finished.tiles[1]},
-             {"elapsed_ms", finished.arm_integration_ms[1]}}},
+        {"lower", std::move(lower_summary)},
+        {"upper", std::move(upper_summary)},
         {"combination", "negative-lower-plus-upper"},
         {"observables", 1}, {"lines", std::move(output_lines)},
         {"tile_integrations", tile_integrations},
@@ -5480,9 +5800,28 @@
         {"elapsed_ms", pair_wall_ms}};
   }
 
-  if (operation == "transport.endpoint_batch") {
+  if (operation == "transport.endpoint_batch" ||
+      operation == "transport.rolling_endpoint_batch") {
+    const bool rolling_endpoint =
+        operation == "transport.rolling_endpoint_batch";
     const bool has_threads = root.if_contains("threads") != nullptr;
-    if (has_threads)
+    if (rolling_endpoint && has_threads)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan",
+           "tile_plan_checkpoint_identity", "arm", "local",
+           "local_checkpoint_identity", "checkpoint_policy",
+           "observables", "threads"},
+          "native transport.rolling_endpoint_batch request");
+    else if (rolling_endpoint)
+      require_exact_keys(
+          root,
+          {"schema", "op", "session", "tile_plan",
+           "tile_plan_checkpoint_identity", "arm", "local",
+           "local_checkpoint_identity", "checkpoint_policy",
+           "observables"},
+          "native transport.rolling_endpoint_batch request");
+    else if (has_threads)
       require_exact_keys(
           root,
           {"schema", "op", "session", "transport_state",
@@ -5508,7 +5847,14 @@
     if (requested_threads == 0)
       throw std::invalid_argument(
           "native transport endpoint-batch threads must be positive");
-    const auto state_handle = required_string(root, "transport_state");
+    const auto state_handle = rolling_endpoint
+        ? std::string() : required_string(root, "transport_state");
+    const auto plan_handle = rolling_endpoint
+        ? required_string(root, "tile_plan") : std::string();
+    const auto local_handle = rolling_endpoint
+        ? required_string(root, "local") : std::string();
+    const auto requested_arm = rolling_endpoint
+        ? required_string(root, "arm") : std::string();
     const auto& checkpoint_policy = as_object(
         root.at("checkpoint_policy"),
         "native transport endpoint-batch checkpoint policy");
@@ -5589,6 +5935,9 @@
         {static_cast<std::size_t>(requested_threads),
          observable_count, kMaxPersistentBatchThreads});
     std::shared_ptr<StoredTransportArmState> state;
+    std::shared_ptr<StoredTilePlan> plan;
+    std::shared_ptr<StoredLocalBase> source;
+    std::shared_ptr<StoredPlannedMatchHop> terminal_match;
     ResolvedTransportEndpointBinding binding;
     bool reservation_live = false;
     const auto require_session_counter_capacity = [&]() {
@@ -5607,35 +5956,69 @@
       std::lock_guard<std::mutex> lock(session->mutex);
       if (session->closed)
         throw std::invalid_argument("persistent solver session is closed");
-      const auto found = session->transport_states.find(state_handle);
-      if (found == session->transport_states.end())
+      if (rolling_endpoint) {
+        const auto plan_found = session->tile_plans.find(plan_handle);
+        if (plan_found == session->tile_plans.end() ||
+            required_string(root, "tile_plan_checkpoint_identity") !=
+                plan_found->second->checkpoint_identity())
+          throw std::invalid_argument(
+              "rolling transport endpoint-batch plan binding is stale");
+        plan = plan_found->second;
+        const auto local_found = session->locals.find(local_handle);
+        if (local_found == session->locals.end() ||
+            required_string(root, "local_checkpoint_identity") !=
+                local_found->second->checkpoint_identity())
+          throw std::invalid_argument(
+              "rolling transport endpoint-batch terminal-local binding is stale");
+        source = local_found->second;
+        if (requested_arm != "lower" && requested_arm != "upper")
+          throw std::invalid_argument(
+              "rolling transport endpoint-batch arm must be lower or upper");
+        binding = resolve_transport_endpoint_binding(
+            plan, requested_arm, source);
+        if (const auto erased = source->terminal_factorized_owner();
+            erased != nullptr)
+          terminal_match =
+              std::static_pointer_cast<StoredPlannedMatchHop>(erased);
+      } else {
+        const auto found = session->transport_states.find(state_handle);
+        if (found == session->transport_states.end())
+          throw std::invalid_argument(
+              "unknown or released native transport-arm state for endpoint batch");
+        state = found->second;
+        if (required_string(root,
+                            "transport_state_checkpoint_identity") !=
+                state->checkpoint_identity() ||
+            required_string(root,
+                            "transport_state_provenance_identity") !=
+                state->provenance_identity())
+          throw std::invalid_argument(
+              "native transport endpoint-batch state binding is stale");
+        plan = state->plan_owner();
+        source = state->final_local();
+        terminal_match = state->terminal_factorized_match();
+        binding = resolve_transport_endpoint_binding(state);
+        state->require_endpoint_batch_counter_capacity(observable_count);
+      }
+      if (!source || std::string(source->scalar_domain()) !=
+                         session->domain)
         throw std::invalid_argument(
-            "unknown or released native transport-arm state for endpoint batch");
-      state = found->second;
-      if (required_string(root, "transport_state_checkpoint_identity") !=
-              state->checkpoint_identity() ||
-          required_string(root, "transport_state_provenance_identity") !=
-              state->provenance_identity())
-        throw std::invalid_argument(
-            "native transport endpoint-batch state binding is stale");
-      if (std::string(state->final_local()->scalar_domain()) !=
-          session->domain)
-        throw std::invalid_argument(
-            "native transport endpoint-batch state domain differs from its session");
-      binding = resolve_transport_endpoint_binding(state);
-      state->require_endpoint_batch_counter_capacity(observable_count);
+            "native transport endpoint-batch source domain differs from its session");
       require_session_counter_capacity();
       const auto source_dimension = as_u32(
-          state->final_local()->summary().at("dimension"),
+          source->summary().at("dimension"),
           "transport endpoint source dimension");
       for (const auto& observable : pending_observables) {
         validate_prepared_rational_row_structure(
             observable.row, source_dimension,
             "native transport endpoint prepared row");
+        const auto available_complete_max = rolling_endpoint
+            ? retained_local_complete_max(source)
+            : state->public_required_complete_max();
         if (observable.epsilon.required_complete_max >
-            state->public_required_complete_max())
+            available_complete_max)
           throw std::invalid_argument(
-              "native transport endpoint required epsilon maximum exceeds the state public target");
+              "native transport endpoint required epsilon maximum exceeds its terminal source target");
       }
       if (observable_count > session->endpoint_capacity -
                                  std::min(
@@ -5693,7 +6076,7 @@
     std::vector<std::exception_ptr> failures(observable_count);
     const auto build_endpoint = [&](std::size_t index) {
       const auto& observable = pending_observables[index];
-      endpoints[index] = build_transport_endpoint_row(
+      endpoints[index] = build_transport_endpoint_row_from_terminal_local(
           observable.endpoint_handle, observable.checkpoint_identity,
           observable.identity, observable.row, observable.epsilon,
           observable.epsilon_record,
@@ -5701,7 +6084,8 @@
           observable.publication_relative_tolerance_text,
           observable.projected_handle,
           observable.projected_checkpoint_identity, session->domain,
-          session->precision_bits, state, binding);
+          session->precision_bits, plan, source, terminal_match,
+          state, binding);
     };
     if (worker_count == 1) {
       for (std::size_t index = 0; index < observable_count; ++index) {
@@ -5786,7 +6170,8 @@
       if (session->closed)
         throw std::invalid_argument(
             "persistent solver session closed during transport endpoint batch");
-      state->require_endpoint_batch_counter_capacity(observable_count);
+      if (!rolling_endpoint)
+        state->require_endpoint_batch_counter_capacity(observable_count);
       require_session_counter_capacity();
       if (observable_count > session->endpoint_capacity -
                                  std::min(
@@ -5812,7 +6197,8 @@
           session->endpoints.erase(handle);
         throw;
       }
-      state->note_endpoint_batch_success(observable_count);
+      if (!rolling_endpoint)
+        state->note_endpoint_batch_success(observable_count);
       ++session->total_transport_endpoint_batches;
       session->total_transport_endpoint_rows += observable_count;
       session->total_transport_endpoint_batch_ms += operation_ms;
@@ -5841,17 +6227,14 @@
           {"centered", binding.centered},
           {"elapsed_ms", endpoint->elapsed_ms()}});
     }
-    return json::object{
+    json::object response{
         {"status", "ok"}, {"session", session->handle},
-        {"capability", kRetainedTransportEndpointBatchCapability},
+        {"capability", rolling_endpoint
+             ? "rolling-transport-endpoint-batch-v1"
+             : kRetainedTransportEndpointBatchCapability},
         {"native_retained", true}, {"json_coefficients", 0},
         {"requested_observable_threads", requested_threads},
         {"observable_worker_threads", worker_count},
-        {"transport_state", state->handle()},
-        {"transport_state_checkpoint_identity",
-         state->checkpoint_identity()},
-        {"transport_state_provenance_identity",
-         state->provenance_identity()},
         {"arm", binding.arm},
         {"endpoint_exact", binding.source.at("endpoint_exact")},
         {"local_endpoint_exact", binding.local_end.str()},
@@ -5865,4 +6248,19 @@
         {"atomic_publication", true}, {"compact_outputs", true},
         {"checkpoint_policy", checkpoint_policy},
         {"elapsed_ms", operation_ms}};
+    if (rolling_endpoint) {
+      response["tile_plan"] = plan->handle();
+      response["tile_plan_checkpoint_identity"] =
+          plan->checkpoint_identity();
+      response["terminal_local"] =
+          compact_transport_local_reference(source);
+      response["coefficient_retention"] = "terminal-local-only";
+    } else {
+      response["transport_state"] = state->handle();
+      response["transport_state_checkpoint_identity"] =
+          state->checkpoint_identity();
+      response["transport_state_provenance_identity"] =
+          state->provenance_identity();
+    }
+    return response;
   }

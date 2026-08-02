@@ -476,7 +476,11 @@ json::object run_session_command(const json::object& root) {
             "Rational-shadow specialization produced a duplicate local handle");
       ++session->total_local_solves;
     }
-    auto response = imported->summary();
+    // This operation transfers only an opaque retained-local handle.  The
+    // complete exact Rational-shadow and physical-tail identities remain
+    // owned by the imported local and its paired SCC; returning them for
+    // every basis column made specialization spend minutes copying JSON.
+    auto response = imported->opaque_reference_summary();
     response["status"] = "ok";
     response["session"] = session->handle;
     response["scc"] = target->handle();

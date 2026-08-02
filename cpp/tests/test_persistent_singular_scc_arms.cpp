@@ -1454,6 +1454,17 @@ int main() {
     if (imported_terminal.at("status") != "ok")
       throw std::runtime_error("terminal Rational-shadow import: " +
                                json::serialize(imported_terminal));
+    if (imported_terminal.if_contains("tail_majorant") != nullptr ||
+        imported_terminal.if_contains("metadata") != nullptr ||
+        imported_terminal.if_contains("source_operator_identity") != nullptr ||
+        imported_terminal.at("column_provenance").as_object().at("schema") !=
+            "diffexp2-retained-scc-column-reference-v1" ||
+        imported_terminal.at("residual_binding").as_object()
+                .at("binding_reference").as_object().at("schema") !=
+            "diffexp2-owner-bound-residual-reference-v1")
+      throw std::runtime_error(
+          "terminal Rational-shadow import exposed an unbounded local summary: " +
+          json::serialize(imported_terminal));
     const auto correlated_singular =
         std::string(imported_terminal.at("local").as_string());
     const auto foreign_singular = solve_singular_column(

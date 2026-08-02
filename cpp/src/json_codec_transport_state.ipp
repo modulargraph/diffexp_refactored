@@ -3969,6 +3969,67 @@ class StoredPlannedMatchHop final : public StoredMatchBase {
       terminal_composed_taylor_order_floor_{0};
 };
 
+json::object transport_local_consumer_epsilon_contract(
+    const std::shared_ptr<StoredLocalBase>& source,
+    std::shared_ptr<StoredPlannedMatchHop> terminal_match = nullptr) {
+  if (!source)
+    throw std::invalid_argument(
+        "transport consumer epsilon contract requires one retained local");
+  const auto source_summary = source->summary();
+  const auto source_window = json::object{
+      {"min", source_summary.at("epsilon_min")},
+      {"max", source_summary.at("epsilon_max")}};
+  if (!terminal_match) {
+    if (const auto erased = source->terminal_factorized_owner();
+        erased != nullptr)
+      terminal_match =
+          std::static_pointer_cast<StoredPlannedMatchHop>(erased);
+  }
+
+  json::array consumer_sources;
+  std::int32_t output_min_shift = 0;
+  auto basis_min_power = as_i32(
+      source_summary.at("epsilon_min"),
+      "transport tile source epsilon minimum");
+  std::int32_t projection_weight_min_power = 0;
+  if (terminal_match && terminal_match->has_terminal_acb_factorization()) {
+    const auto physical_basis =
+        terminal_match->terminal_acb_basis_owners();
+    consumer_sources.reserve(physical_basis.size());
+    std::optional<std::int32_t> physical_min_power;
+    for (const auto& physical_source : physical_basis) {
+      const auto physical_summary = physical_source->summary();
+      const auto minimum = as_i32(
+          physical_summary.at("epsilon_min"),
+          "terminal physical source epsilon minimum");
+      if (!physical_min_power.has_value() ||
+          minimum < *physical_min_power)
+        physical_min_power = minimum;
+      consumer_sources.push_back(json::object{
+          {"min", physical_summary.at("epsilon_min")},
+          {"max", physical_summary.at("epsilon_max")}});
+    }
+    if (!physical_min_power.has_value())
+      throw std::logic_error(
+          "terminal factorized consumer has no physical source minimum");
+    output_min_shift =
+        terminal_match->terminal_acb_factorized_input_min_power();
+    basis_min_power = local_algebra_detail::checked_i32(
+        static_cast<std::int64_t>(*physical_min_power) +
+            output_min_shift,
+        "terminal factorized basis conservative epsilon minimum");
+    projection_weight_min_power =
+        terminal_match->terminal_acb_transformed_weight_min_power();
+  } else {
+    consumer_sources.push_back(source_window);
+  }
+  return json::object{
+      {"sources", std::move(consumer_sources)},
+      {"output_min_shift", output_min_shift},
+      {"basis_min_power", basis_min_power},
+      {"projection_weight_min_power", projection_weight_min_power}};
+}
+
 class StoredTransportArmState {
  public:
   StoredTransportArmState(
@@ -4144,53 +4205,12 @@ class StoredTransportArmState {
           {"min", source_summary.at("epsilon_min")},
           {"max", source_summary.at("epsilon_max")}};
       tile_source_epsilon.push_back(source_window);
-
-      json::array consumer_sources;
-      std::int32_t output_min_shift = 0;
-      auto basis_min_power =
-          as_i32(source_summary.at("epsilon_min"),
-                 "transport tile source epsilon minimum");
-      std::int32_t projection_weight_min_power = 0;
-      if (terminal_factorized_match_ != nullptr &&
-          tile + 1 == tile_sources_.size()) {
-        const auto physical_basis =
-            terminal_factorized_match_->terminal_acb_basis_owners();
-        consumer_sources.reserve(physical_basis.size());
-        std::optional<std::int32_t> physical_min_power;
-        for (const auto& physical_source : physical_basis) {
-          const auto physical_summary = physical_source->summary();
-          const auto minimum =
-              as_i32(physical_summary.at("epsilon_min"),
-                     "terminal physical source epsilon minimum");
-          if (!physical_min_power.has_value() ||
-              minimum < *physical_min_power)
-            physical_min_power = minimum;
-          consumer_sources.push_back(json::object{
-              {"min", physical_summary.at("epsilon_min")},
-              {"max", physical_summary.at("epsilon_max")}});
-        }
-        if (!physical_min_power.has_value())
-          throw std::logic_error(
-              "terminal factorized consumer has no physical source minimum");
-        output_min_shift =
-            terminal_factorized_match_
-                ->terminal_acb_factorized_input_min_power();
-        basis_min_power = local_algebra_detail::checked_i32(
-            static_cast<std::int64_t>(*physical_min_power) +
-                output_min_shift,
-            "terminal factorized basis conservative epsilon minimum");
-        projection_weight_min_power =
-            terminal_factorized_match_
-                ->terminal_acb_transformed_weight_min_power();
-      } else {
-        consumer_sources.push_back(source_window);
-      }
-      tile_consumer_epsilon.push_back(json::object{
-          {"sources", std::move(consumer_sources)},
-          {"output_min_shift", output_min_shift},
-          {"basis_min_power", basis_min_power},
-          {"projection_weight_min_power",
-           projection_weight_min_power}});
+      tile_consumer_epsilon.push_back(
+          transport_local_consumer_epsilon_contract(
+              source,
+              tile + 1 == tile_sources_.size()
+                  ? terminal_factorized_match_
+                  : nullptr));
     }
     return json::object{
         {"transport_state", handle_},
@@ -5054,12 +5074,12 @@ struct ResolvedTransportEndpointBinding {
 };
 
 ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
-    const std::shared_ptr<StoredTransportArmState>& state) {
-  if (!state)
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::string& arm_name,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  if (!plan || !local)
     throw std::invalid_argument(
-        "transport endpoint binding requires a retained arm state");
-  const auto& plan = state->plan_owner();
-  const auto& arm_name = state->arm_name();
+        "transport endpoint binding requires a retained plan and terminal local");
   const auto& arm = plan->arm(arm_name);
   if (arm.exact.tiles.empty() || arm.charts.empty())
     throw std::invalid_argument(
@@ -5080,7 +5100,6 @@ ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
   if (!(mapped_endpoint == arm.exact.to))
     throw std::invalid_argument(
         "transport endpoint final local coordinate does not map to its exact physical endpoint");
-  const auto& local = state->final_local();
   if (!local || local->source_chart() != final_chart.handle)
     throw std::invalid_argument(
         "transport endpoint final local does not name its final retained chart");
@@ -5097,10 +5116,6 @@ ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
   binding.rim = exact_plan_rim(
       final_chart.prescriptions, final_chart.geometry.scale);
   binding.source = json::object{
-      {"transport_state", json::object{
-           {"handle", state->handle()},
-           {"checkpoint_identity", state->checkpoint_identity()},
-           {"provenance_identity", state->provenance_identity()}}},
       {"tile_plan", json::object{
            {"handle", plan->handle()},
            {"checkpoint_identity", plan->checkpoint_identity()},
@@ -5125,6 +5140,53 @@ ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
       {"prescriptions", encode_plan_prescriptions(
            final_chart.prescriptions)}};
   return binding;
+}
+
+ResolvedTransportEndpointBinding resolve_transport_endpoint_binding(
+    const std::shared_ptr<StoredTransportArmState>& state) {
+  if (!state)
+    throw std::invalid_argument(
+        "transport endpoint binding requires a retained arm state");
+  auto binding = resolve_transport_endpoint_binding(
+      state->plan_owner(), state->arm_name(), state->final_local());
+  binding.source["transport_state"] = json::object{
+      {"handle", state->handle()},
+      {"checkpoint_identity", state->checkpoint_identity()},
+      {"provenance_identity", state->provenance_identity()}};
+  return binding;
+}
+
+json::object rolling_transport_endpoint_source(
+    const ResolvedTransportEndpointBinding& binding,
+    const std::shared_ptr<StoredTilePlan>& plan,
+    const std::shared_ptr<StoredLocalBase>& local) {
+  if (!plan || !local)
+    throw std::invalid_argument(
+        "rolling transport endpoint source requires retained plan/local owners");
+  const auto& source = binding.source;
+  return json::object{
+      {"binding_mode", "rolling-terminal-local"},
+      {"tile_plan", plan->handle()},
+      {"tile_plan_checkpoint_identity", plan->checkpoint_identity()},
+      {"tile_plan_provenance_identity", plan->provenance_identity()},
+      {"arm", binding.arm},
+      {"endpoint_exact", source.at("endpoint_exact")},
+      {"direction", source.at("direction")},
+      {"final_tile", source.at("final_tile")},
+      {"final_chart_index", source.at("final_chart_index")},
+      {"final_chart", source.at("final_chart")},
+      {"final_chart_identity", source.at("final_chart_identity")},
+      {"local_endpoint_exact", binding.local_end.str()},
+      {"centered", binding.centered},
+      {"approach_direction", binding.approach_direction},
+      {"derived_rim", binding.rim.has_value()
+           ? json::value(*binding.rim) : json::value(nullptr)},
+      {"local", local->handle()},
+      {"chart", local->source_chart()},
+      {"source_operator_identity", local->source_operator_identity()},
+      {"checkpoint_identity", local->checkpoint_identity()},
+      {"coefficient_domain", local->scalar_domain()},
+      {"prescriptions", source.at("prescriptions")}};
 }
 
 void validate_prepared_rational_row_structure(

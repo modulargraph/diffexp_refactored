@@ -413,6 +413,12 @@ class StoredEndpointResult {
   }
   bool transport_bound() const { return transport_owner_ != nullptr; }
   bool direct_plan_bound() const { return plan_bound(); }
+  bool rolling_transport_bound() const {
+    if (!plan_bound()) return false;
+    const auto* mode = planned_source_->if_contains("binding_mode");
+    return mode != nullptr && mode->is_string() &&
+        mode->as_string() == "rolling-terminal-local";
+  }
   bool derived_plan_bound() const { return planned_source_.has_value(); }
   const std::shared_ptr<StoredTilePlan>& plan_owner() const {
     return plan_owner_;
@@ -441,6 +447,8 @@ class StoredEndpointResult {
         {"endpoint", handle_},
         {"capability", transport_bound()
              ? kRetainedTransportEndpointBatchCapability
+             : rolling_transport_bound()
+             ? "rolling-transport-endpoint-batch-v1"
              : direct_plan_bound()
              ? kRetainedPlannedEndpointLimitCapability
              : kRetainedEndpointLimitCapability},
@@ -514,6 +522,8 @@ class StoredEndpointResult {
     json::object record{
         {"schema", transport_bound()
              ? "diffexp2-retained-transport-endpoint-result-v1"
+             : rolling_transport_bound()
+             ? "diffexp2-retained-rolling-transport-endpoint-result-v1"
              : direct_plan_bound()
              ? "diffexp2-retained-plan-bound-endpoint-result-v1"
              : "diffexp2-retained-endpoint-result-v2"},

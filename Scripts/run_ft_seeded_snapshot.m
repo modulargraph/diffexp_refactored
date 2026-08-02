@@ -8,6 +8,12 @@
      FT_SEEDED_PREP_SNAPSHOT=/absolute/path/example_digest.mx
      FT_EXAMPLES=one-built-in-example
 
+   A validated FT_FAMILY_REQUEST_FILE/FT_FAMILY_REQUEST_ID pair may select a
+   custom family instead of FT_EXAMPLES.  This is useful when a source-only
+   preparation-contract change invalidates the cache filename but the exact
+   topology, output selection, FIRE runtime, and prepared reductions remain
+   unchanged.
+
    This runner deliberately performs one attempt.  A structured epsilon retry
    is returned to the caller instead of silently changing the experiment. *)
 
@@ -27,12 +33,15 @@ SetDirectory[repoRoot];
 SetEnvironment["FT_RUNNER_DEFINITIONS_ONLY" -> "1"];
 Get[FileNameJoin[{repoRoot, "Scripts", "run_ft_stepwise2.m"}]];
 
-seededExample = StringTrim[Environment["FT_EXAMPLES"]];
-If[seededExample == "" || StringContainsQ[seededExample, ","],
-  Print["FT_EXAMPLES must select exactly one built-in example"];
+seededCustomQ = AssociationQ[ft2FamilyRequest];
+seededExample = If[seededCustomQ, ft2FamilyRunName,
+  StringTrim[Environment["FT_EXAMPLES"]]];
+If[!seededCustomQ &&
+    (seededExample == "" || StringContainsQ[seededExample, ","]),
+  Print["FT_EXAMPLES must select exactly one built-in example when no custom family request is supplied"];
   Exit[2]];
 seededPrivateHaloText =
-  StringTrim[Environment["FT_SEEDED_MATCHING_PRIVATE_HALOS"]];
+  StringTrim[envOrDefault["FT_SEEDED_MATCHING_PRIVATE_HALOS", ""]];
 seededPrivateHaloParts =
   StringTrim /@ StringSplit[seededPrivateHaloText, ","];
 seededPrivateHalos = Which[
@@ -58,9 +67,14 @@ If[!AssociationQ[seededPayload] ||
   Print["seeded preparation snapshot is malformed or incomplete"];
   Exit[2]];
 
-seededContractKeys = {
+seededContractKeys = Join[{
   "Example", "Topology", "CombinationSequence", "DimensionExpression",
-  "PreparationConfiguration"};
+  "NumericalPoint", "PreparationConfiguration", "FIRERuntime"},
+  If[seededCustomQ, {
+    "CustomFamilyPreparationSchema", "FamilyID", "PipelineRequestID",
+    "OutputSelectionMode", "OutputSelection", "AllSelectionRequestID",
+    "OutputResolutionID", "ResolvedOutputSelection",
+    "ResolvedOutputRequests"}, {}]];
 seededPrepKey = Lookup[seededPayload, "Key", None];
 If[!IntegerQ[seededPrepKey],
   Print["seeded preparation snapshot has no integer preparation key"];
@@ -89,6 +103,8 @@ seededLoadPreparedFT[file_String, contract_Association] := Module[
 loadPreparedFT[file_String, contract_Association] :=
   seededLoadPreparedFT[file, contract];
 
-seededResult = runExample[seededExample, None, seededPrivateHalos];
+seededResult = If[seededCustomQ,
+  runExample[seededExample, ft2FamilyRequest, seededPrivateHalos],
+  runExample[seededExample, None, seededPrivateHalos]];
 Print["SEEDED RESULT ", InputForm[seededResult]];
 Exit[If[TrueQ[seededResult], 0, 1]];

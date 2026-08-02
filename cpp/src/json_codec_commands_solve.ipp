@@ -839,7 +839,11 @@
     json::array responses;
     responses.reserve(columns.size());
     for (auto& column : columns) {
-      auto response = column.local->summary();
+      // Every column strongly retains the same exact physical equation
+      // owner.  Return bounded references here; serializing the complete
+      // owner-bound residual identity once per column can otherwise require
+      // gigabytes even though no coefficient tensor crosses the bridge.
+      auto response = column.local->opaque_reference_summary();
       response["status"] = "ok";
       response["session"] = session->handle;
       response["scc"] = composite->handle();
@@ -1774,6 +1778,19 @@
     // do not call stats_json()/summary() here: retained derivations may contain
     // complete local tensors and can be many gigabytes in a large transport.
     std::lock_guard<std::mutex> lock(session->mutex);
+    std::uint64_t visible_local_coefficients = 0;
+    std::uint64_t visible_local_shared_owners = 0;
+    std::uint64_t maximum_visible_local_shared_owners = 0;
+    for (const auto& [ignored, local] : session->locals) {
+      (void)ignored;
+      if (!local) continue;
+      visible_local_coefficients += local->stats().coefficient_count;
+      const auto owners = static_cast<std::uint64_t>(local.use_count());
+      visible_local_shared_owners += owners;
+      maximum_visible_local_shared_owners =
+          std::max(maximum_visible_local_shared_owners, owners);
+    }
+    const auto& local_lifetimes = stored_local_lifetime_counters();
     return json::object{
         {"status", "ok"},
         {"session", session->handle},
@@ -1784,6 +1801,25 @@
         {"regular_equation_owners",
          session->regular_equation_owners.size()},
         {"locals", session->locals.size()},
+        {"visible_local_coefficients", visible_local_coefficients},
+        {"visible_local_shared_owners", visible_local_shared_owners},
+        {"maximum_visible_local_shared_owners",
+         maximum_visible_local_shared_owners},
+        {"process_local_objects_constructed",
+         local_lifetimes.constructed.load(std::memory_order_relaxed)},
+        {"process_local_objects_destroyed",
+         local_lifetimes.destroyed.load(std::memory_order_relaxed)},
+        {"process_local_objects_live",
+         local_lifetimes.live.load(std::memory_order_relaxed)},
+        {"process_local_coefficients_constructed",
+         local_lifetimes.constructed_coefficients.load(
+             std::memory_order_relaxed)},
+        {"process_local_coefficients_destroyed",
+         local_lifetimes.destroyed_coefficients.load(
+             std::memory_order_relaxed)},
+        {"process_local_coefficients_live",
+         local_lifetimes.live_coefficients.load(
+             std::memory_order_relaxed)},
         {"matches", session->matches.size()},
         {"endpoints", session->endpoints.size()},
         {"tile_plans", session->tile_plans.size()},

@@ -1,0 +1,42 @@
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --version
+  OUTPUT_VARIABLE version RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.1.0")
+  message(FATAL_ERROR "Version command failed: ${version}")
+endif()
+set(request "${DIFFEXP_SOURCE_DIR}/examples/logarithm.json")
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" series "${request}"
+  OUTPUT_VARIABLE from_file ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT errors STREQUAL "")
+  message(FATAL_ERROR "File request failed: ${errors}")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" series - INPUT_FILE "${request}"
+  OUTPUT_VARIABLE from_stdin ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT from_file STREQUAL from_stdin)
+  message(FATAL_ERROR "File/stdin responses differ: ${errors}")
+endif()
+string(JSON coefficient GET "${from_stdin}" coefficients 3 0 1)
+if(NOT coefficient STREQUAL "1/3")
+  message(FATAL_ERROR "Exact logarithm coefficient changed: ${coefficient}")
+endif()
+string(JSON schema GET "${from_stdin}" schema)
+if(NOT schema STREQUAL "DiffExp.TaylorSeries/v1")
+  message(FATAL_ERROR "Unexpected series schema: ${schema}")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" series -
+  INPUT_FILE "${DIFFEXP_SOURCE_DIR}/LICENSE"
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(status EQUAL 0 OR NOT output STREQUAL "" OR errors STREQUAL "")
+  message(FATAL_ERROR "Invalid JSON was not rejected cleanly")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft not-a-family --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON error_status GET "${output}" status)
+if(status EQUAL 0 OR NOT error_status STREQUAL "error")
+  message(FATAL_ERROR "FT failure is not a JSON error: ${output}")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" backend-info
+  OUTPUT_VARIABLE output RESULT_VARIABLE status)
+string(JSON standalone GET "${output}" standalone_cpp)
+if(NOT status EQUAL 0 OR NOT standalone)
+  message(FATAL_ERROR "Backend is not standalone C++")
+endif()

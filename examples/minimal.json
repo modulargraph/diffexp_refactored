@@ -1,0 +1,8 @@
+{
+  "matrix": [["1/(x-2)"]],
+  "boundary": [["1/2"]],
+  "center": "0",
+  "taylor_order": 8,
+  "epsilon_low": 0,
+  "epsilon_high": 0
+}

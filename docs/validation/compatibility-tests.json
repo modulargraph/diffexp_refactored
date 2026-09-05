@@ -1,0 +1,269 @@
+{
+  "package": "DiffExp",
+  "version": "2.1.0",
+  "status": "pass",
+  "tests": [
+    {
+      "name": "kernel.test_adjoint_observable",
+      "status": "run",
+      "seconds": 0.445781
+    },
+    {
+      "name": "kernel.test_artifact_manifest",
+      "status": "run",
+      "seconds": 0.78317
+    },
+    {
+      "name": "kernel.test_correlation",
+      "status": "run",
+      "seconds": 0.6855
+    },
+    {
+      "name": "kernel.test_immutable_recursive_cache",
+      "status": "run",
+      "seconds": 0.689945
+    },
+    {
+      "name": "kernel.test_integration",
+      "status": "run",
+      "seconds": 0.693441
+    },
+    {
+      "name": "kernel.test_json_codec",
+      "status": "run",
+      "seconds": 0.687007
+    },
+    {
+      "name": "kernel.test_line_integration",
+      "status": "run",
+      "seconds": 0.692022
+    },
+    {
+      "name": "kernel.test_local_algebra",
+      "status": "run",
+      "seconds": 0.704313
+    },
+    {
+      "name": "kernel.test_local_solution",
+      "status": "run",
+      "seconds": 0.685893
+    },
+    {
+      "name": "kernel.test_matching",
+      "status": "run",
+      "seconds": 0.835378
+    },
+    {
+      "name": "kernel.test_path_planner",
+      "status": "run",
+      "seconds": 0.707832
+    },
+    {
+      "name": "kernel.test_persistent_acb_local_match",
+      "status": "run",
+      "seconds": 0.69511
+    },
+    {
+      "name": "kernel.test_persistent_algebraic_tile_plan",
+      "status": "run",
+      "seconds": 0.940799
+    },
+    {
+      "name": "kernel.test_persistent_analytic_prescription",
+      "status": "run",
+      "seconds": 0.916948
+    },
+    {
+      "name": "kernel.test_persistent_checkpoint",
+      "status": "run",
+      "seconds": 1.04009
+    },
+    {
+      "name": "kernel.test_persistent_checkpoint_deferred_state",
+      "status": "run",
+      "seconds": 0.93798
+    },
+    {
+      "name": "kernel.test_persistent_endpoint_limit",
+      "status": "run",
+      "seconds": 0.812937
+    },
+    {
+      "name": "kernel.test_persistent_local",
+      "status": "run",
+      "seconds": 0.930845
+    },
+    {
+      "name": "kernel.test_persistent_local_match",
+      "status": "run",
+      "seconds": 0.941152
+    },
+    {
+      "name": "kernel.test_persistent_local_solve_batch",
+      "status": "run",
+      "seconds": 0.923886
+    },
+    {
+      "name": "kernel.test_persistent_matched_tail_majorant",
+      "status": "run",
+      "seconds": 0.991688
+    },
+    {
+      "name": "kernel.test_persistent_owner_bound_residual",
+      "status": "run",
+      "seconds": 1.00813
+    },
+    {
+      "name": "kernel.test_persistent_parallel_arms",
+      "status": "run",
+      "seconds": 1.08412
+    },
+    {
+      "name": "kernel.test_persistent_phase_planned_match",
+      "status": "run",
+      "seconds": 1.04386
+    },
+    {
+      "name": "kernel.test_persistent_plan_match_hop",
+      "status": "run",
+      "seconds": 0.932231
+    },
+    {
+      "name": "kernel.test_persistent_planned_endpoint",
+      "status": "run",
+      "seconds": 0.931327
+    },
+    {
+      "name": "kernel.test_persistent_rational_row",
+      "status": "run",
+      "seconds": 0.923482
+    },
+    {
+      "name": "kernel.test_persistent_rational_row_tail",
+      "status": "run",
+      "seconds": 0.905113
+    },
+    {
+      "name": "kernel.test_persistent_regular_equation_owner",
+      "status": "run",
+      "seconds": 0.826615
+    },
+    {
+      "name": "kernel.test_persistent_scc_owner_bound_residual",
+      "status": "run",
+      "seconds": 0.853331
+    },
+    {
+      "name": "kernel.test_persistent_scc_plan_match",
+      "status": "run",
+      "seconds": 0.856696
+    },
+    {
+      "name": "kernel.test_persistent_scc_prepare",
+      "status": "run",
+      "seconds": 0.867501
+    },
+    {
+      "name": "kernel.test_persistent_scc_pseudo_compensation",
+      "status": "run",
+      "seconds": 0.921144
+    },
+    {
+      "name": "kernel.test_persistent_scc_solve_block_column",
+      "status": "run",
+      "seconds": 0.916358
+    },
+    {
+      "name": "kernel.test_persistent_scc_solve_column",
+      "status": "run",
+      "seconds": 0.90693
+    },
+    {
+      "name": "kernel.test_persistent_scc_solve_singular_column",
+      "status": "run",
+      "seconds": 0.915751
+    },
+    {
+      "name": "kernel.test_persistent_scc_spectral_frames",
+      "status": "run",
+      "seconds": 0.92121
+    },
+    {
+      "name": "kernel.test_persistent_single_arm_tile_plan",
+      "status": "run",
+      "seconds": 0.893146
+    },
+    {
+      "name": "kernel.test_persistent_singular_scc_arms",
+      "status": "run",
+      "seconds": 6.48004
+    },
+    {
+      "name": "kernel.test_persistent_tail_majorant",
+      "status": "run",
+      "seconds": 0.934574
+    },
+    {
+      "name": "kernel.test_persistent_tile_line",
+      "status": "run",
+      "seconds": 0.473695
+    },
+    {
+      "name": "kernel.test_persistent_transport_contract_pair",
+      "status": "run",
+      "seconds": 0.54255
+    },
+    {
+      "name": "kernel.test_persistent_transport_endpoint_batch",
+      "status": "run",
+      "seconds": 0.506849
+    },
+    {
+      "name": "kernel.test_persistent_transport_run_arms",
+      "status": "run",
+      "seconds": 1.42422
+    },
+    {
+      "name": "kernel.test_physical_ode_evolution",
+      "status": "run",
+      "seconds": 0.365058
+    },
+    {
+      "name": "kernel.test_protocol_contract",
+      "status": "run",
+      "seconds": 0.367746
+    },
+    {
+      "name": "kernel.test_recurrence",
+      "status": "run",
+      "seconds": 0.499651
+    },
+    {
+      "name": "kernel.test_scc_formal_completeness",
+      "status": "run",
+      "seconds": 0.375192
+    },
+    {
+      "name": "kernel.test_session_solve_many",
+      "status": "run",
+      "seconds": 0.490777
+    },
+    {
+      "name": "kernel.test_singular_indicial",
+      "status": "run",
+      "seconds": 0.35638
+    },
+    {
+      "name": "kernel.test_singular_tail_majorant",
+      "status": "run",
+      "seconds": 0.649671
+    },
+    {
+      "name": "kernel.test_tail_majorant",
+      "status": "run",
+      "seconds": 0.708476
+    }
+  ],
+  "count": 52,
+  "note": "Optional extracted C++ runtime; the Mathematica wrapper does not use it."
+}

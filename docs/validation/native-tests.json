@@ -1,0 +1,465 @@
+{
+  "package": "DiffExp",
+  "version": "2.1.0",
+  "status": "pass",
+  "count": 91,
+  "original_groups": 9,
+  "wall_seconds": 889.2,
+  "tests": [
+    {
+      "name": "frontend",
+      "status": "run",
+      "seconds": 0.21894
+    },
+    {
+      "name": "data_geometry",
+      "status": "run",
+      "seconds": 0.220723
+    },
+    {
+      "name": "tadpole_bubble",
+      "status": "run",
+      "seconds": 0.246809
+    },
+    {
+      "name": "ibp",
+      "status": "run",
+      "seconds": 0.33437
+    },
+    {
+      "name": "sunrise_ibp",
+      "status": "run",
+      "seconds": 0.548465
+    },
+    {
+      "name": "deepest_beta",
+      "status": "run",
+      "seconds": 0.405618
+    },
+    {
+      "name": "sunrise_pipeline",
+      "status": "run",
+      "seconds": 3.37433
+    },
+    {
+      "name": "frobenius",
+      "status": "run",
+      "seconds": 0.242976
+    },
+    {
+      "name": "certified_tail",
+      "status": "run",
+      "seconds": 0.243696
+    },
+    {
+      "name": "certified_bubble",
+      "status": "run",
+      "seconds": 0.333836
+    },
+    {
+      "name": "banana_oracle",
+      "status": "run",
+      "seconds": 2.97275
+    },
+    {
+      "name": "henn_observables",
+      "status": "run",
+      "seconds": 0.268103
+    },
+    {
+      "name": "certified_deepest_beta",
+      "status": "run",
+      "seconds": 1.6919
+    },
+    {
+      "name": "merge_pullback",
+      "status": "run",
+      "seconds": 0.263586
+    },
+    {
+      "name": "fuchsify",
+      "status": "run",
+      "seconds": 0.245374
+    },
+    {
+      "name": "affine_frobenius",
+      "status": "run",
+      "seconds": 0.248072
+    },
+    {
+      "name": "epsilon_gauge",
+      "status": "run",
+      "seconds": 0.237146
+    },
+    {
+      "name": "laurent_transport",
+      "status": "run",
+      "seconds": 0.361774
+    },
+    {
+      "name": "affine_matching",
+      "status": "run",
+      "seconds": 0.472454
+    },
+    {
+      "name": "direct_examples",
+      "status": "run",
+      "seconds": 0.431412
+    },
+    {
+      "name": "singular_transport",
+      "status": "run",
+      "seconds": 0.39229
+    },
+    {
+      "name": "fire_native",
+      "status": "run",
+      "seconds": 1.44417
+    },
+    {
+      "name": "level_preparation",
+      "status": "run",
+      "seconds": 0.427847
+    },
+    {
+      "name": "recursion_graph",
+      "status": "run",
+      "seconds": 0.535546
+    },
+    {
+      "name": "artifact_store",
+      "status": "run",
+      "seconds": 0.268055
+    },
+    {
+      "name": "certified_rational_transport",
+      "status": "run",
+      "seconds": 0.301528
+    },
+    {
+      "name": "gaussian_boundary",
+      "status": "run",
+      "seconds": 0.585206
+    },
+    {
+      "name": "level_cache",
+      "status": "run",
+      "seconds": 0.341558
+    },
+    {
+      "name": "scalar_functional",
+      "status": "run",
+      "seconds": 1.77047
+    },
+    {
+      "name": "recursion_leaf",
+      "status": "run",
+      "seconds": 1.77075
+    },
+    {
+      "name": "fire_session",
+      "status": "run",
+      "seconds": 0.261493
+    },
+    {
+      "name": "recursion_pipeline",
+      "status": "run",
+      "seconds": 27.2215
+    },
+    {
+      "name": "fire_batch_cache",
+      "status": "run",
+      "seconds": 0.435908
+    },
+    {
+      "name": "box_oracle",
+      "status": "run",
+      "seconds": 0.222158
+    },
+    {
+      "name": "henn_boundary",
+      "status": "run",
+      "seconds": 0.217469
+    },
+    {
+      "name": "causal",
+      "status": "run",
+      "seconds": 0.222953
+    },
+    {
+      "name": "causal_contour",
+      "status": "run",
+      "seconds": 0.248015
+    },
+    {
+      "name": "pentagon_oracle",
+      "status": "run",
+      "seconds": 0.227496
+    },
+    {
+      "name": "affine_operator",
+      "status": "run",
+      "seconds": 0.256276
+    },
+    {
+      "name": "adjoint_transport",
+      "status": "run",
+      "seconds": 0.234327
+    },
+    {
+      "name": "linear_boundary",
+      "status": "run",
+      "seconds": 0.235472
+    },
+    {
+      "name": "polynomial_transport",
+      "status": "run",
+      "seconds": 0.244705
+    },
+    {
+      "name": "henn_scalar_leaf",
+      "status": "run",
+      "seconds": 2.87851
+    },
+    {
+      "name": "box_bubble_oracle",
+      "status": "run",
+      "seconds": 0.26559
+    },
+    {
+      "name": "double_box_oracle",
+      "status": "run",
+      "seconds": 0.246062
+    },
+    {
+      "name": "box_triangle_oracle",
+      "status": "run",
+      "seconds": 0.524893
+    },
+    {
+      "name": "fire_checkpoint",
+      "status": "run",
+      "seconds": 0.254703
+    },
+    {
+      "name": "adjoint_scaling",
+      "status": "run",
+      "seconds": 0.684062
+    },
+    {
+      "name": "endpoint_gauge",
+      "status": "run",
+      "seconds": 0.257621
+    },
+    {
+      "name": "scalar_accumulator",
+      "status": "run",
+      "seconds": 2.28869
+    },
+    {
+      "name": "affine_large",
+      "status": "run",
+      "seconds": 1.10463
+    },
+    {
+      "name": "fire_backward_checkpoint",
+      "status": "run",
+      "seconds": 0.291721
+    },
+    {
+      "name": "affine_finite_lag",
+      "status": "run",
+      "seconds": 0.31099
+    },
+    {
+      "name": "conditioned_adjoint",
+      "status": "run",
+      "seconds": 0.317142
+    },
+    {
+      "name": "cached_affine",
+      "status": "run",
+      "seconds": 0.338269
+    },
+    {
+      "name": "factored_transport",
+      "status": "run",
+      "seconds": 0.274798
+    },
+    {
+      "name": "factored_pipeline",
+      "status": "run",
+      "seconds": 45.6286
+    },
+    {
+      "name": "pipeline_preflight",
+      "status": "run",
+      "seconds": 9.96989
+    },
+    {
+      "name": "centered_adjoint",
+      "status": "run",
+      "seconds": 0.450312
+    },
+    {
+      "name": "prepared_stage",
+      "status": "run",
+      "seconds": 0.28318
+    },
+    {
+      "name": "adjoint_checkpoint",
+      "status": "run",
+      "seconds": 0.612185
+    },
+    {
+      "name": "modular_reconstruction",
+      "status": "run",
+      "seconds": 0.289426
+    },
+    {
+      "name": "fire_modular",
+      "status": "run",
+      "seconds": 0.278774
+    },
+    {
+      "name": "univariate_rational",
+      "status": "run",
+      "seconds": 0.312918
+    },
+    {
+      "name": "cached_affine_columns",
+      "status": "run",
+      "seconds": 0.433182
+    },
+    {
+      "name": "affine_endpoint_domain",
+      "status": "run",
+      "seconds": 0.571465
+    },
+    {
+      "name": "original_mpl",
+      "status": "run",
+      "seconds": 16.6087
+    },
+    {
+      "name": "original_henn_nonplanar",
+      "status": "run",
+      "seconds": 146.965
+    },
+    {
+      "name": "original_planar.1loop",
+      "status": "run",
+      "seconds": 22.8833
+    },
+    {
+      "name": "original_planar.zmz",
+      "status": "run",
+      "seconds": 457.192
+    },
+    {
+      "name": "original_planar.mzz",
+      "status": "run",
+      "seconds": 395.067
+    },
+    {
+      "name": "original_planar.zzz",
+      "status": "run",
+      "seconds": 338.409
+    },
+    {
+      "name": "singular_transport.original",
+      "status": "run",
+      "seconds": 3.28948
+    },
+    {
+      "name": "original_banana_equal.historical32",
+      "status": "run",
+      "seconds": 5.06178
+    },
+    {
+      "name": "original_banana_unequal.routes",
+      "status": "run",
+      "seconds": 81.5785
+    },
+    {
+      "name": "fire_modular.external",
+      "status": "run",
+      "seconds": 2.02589
+    },
+    {
+      "name": "fire_native.external",
+      "status": "run",
+      "seconds": 1.84187
+    },
+    {
+      "name": "level_preparation.external",
+      "status": "run",
+      "seconds": 7.24213
+    },
+    {
+      "name": "recursion_graph.external",
+      "status": "run",
+      "seconds": 0.880437
+    },
+    {
+      "name": "fuchsify.external",
+      "status": "run",
+      "seconds": 6.08634
+    },
+    {
+      "name": "affine_frobenius.external",
+      "status": "run",
+      "seconds": 6.44076
+    },
+    {
+      "name": "affine_matching.external",
+      "status": "run",
+      "seconds": 0.378506
+    },
+    {
+      "name": "fire_session.external",
+      "status": "run",
+      "seconds": 0.306554
+    },
+    {
+      "name": "fire_batch_cache.external",
+      "status": "run",
+      "seconds": 0.292407
+    },
+    {
+      "name": "fire_checkpoint.external",
+      "status": "run",
+      "seconds": 2.20958
+    },
+    {
+      "name": "fire_backward_checkpoint.external",
+      "status": "run",
+      "seconds": 19.7865
+    },
+    {
+      "name": "henn_observables.ancillary",
+      "status": "run",
+      "seconds": 0.272437
+    },
+    {
+      "name": "merge_pullback.ancillary",
+      "status": "run",
+      "seconds": 0.240267
+    },
+    {
+      "name": "henn_boundary.ancillary",
+      "status": "run",
+      "seconds": 0.346876
+    },
+    {
+      "name": "cli.interface",
+      "status": "run",
+      "seconds": 0.327531
+    },
+    {
+      "name": "mathematica.interface",
+      "status": "run",
+      "seconds": 2.98472
+    }
+  ]
+}

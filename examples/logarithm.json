@@ -1,0 +1,8 @@
+{
+  "matrix": [["eps/(1-x)"]],
+  "boundary": [["1", "0", "0", "0", "0"]],
+  "center": "0",
+  "taylor_order": 12,
+  "epsilon_low": 0,
+  "epsilon_high": 4
+}

@@ -1,30 +1,6 @@
-# Mathematica
-*.nb
-*.mx
-*.wl~
-FrontEnd/*
-Examples/OriginalDiffExp/Data/
-
-# macOS
+/build*/
+/install/
+/examples/original/Data/
 .DS_Store
-.AppleDouble
-.LSOverride
-
-# Claude
-.claude/
-
-# Temporary files
+*.mx
 *.tmp
-*~
-
-# Python
-__pycache__/
-*.py[cod]
-
-# External packages (cloned repos)
-kira/
-Dependencies/
-Papers/
-
-# Local compiled backend artifacts
-build/

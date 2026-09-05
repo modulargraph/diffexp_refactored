@@ -1,0 +1,28 @@
+name: Native C++ package
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: brew install cmake pkgconf flint boost
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDIFFEXP_BUILD_KERNEL_RUNTIME=OFF
+      - name: Build
+        run: cmake --build build -j2
+      - name: Test native core and CLI
+        run: ctest --test-dir build --output-on-failure -j2
+      - name: Install and test external CMake consumer
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/diffexp-install"
+          cmake -S tests/consumer -B build-consumer -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/diffexp-install"
+          cmake --build build-consumer -j2
+          build-consumer/consumer

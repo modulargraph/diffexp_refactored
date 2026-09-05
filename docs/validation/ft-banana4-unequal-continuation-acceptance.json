@@ -1,0 +1,143 @@
+{
+  "schema": "diffexp3-ft-example-acceptance-v1",
+  "status": "pass",
+  "absolute_threshold": "1e-20",
+  "comparison_is_numerical_acceptance_not_certification": true,
+  "family": "banana4_unequal",
+  "requested_epsilon_high": 0,
+  "method": "adjoint",
+  "resources": {
+    "endpoint_order": 32,
+    "ordinary_order": 80,
+    "working_bits": 384,
+    "leaf_digits": 28,
+    "graph_timeout_seconds": 600,
+    "max_refinements": 8,
+    "max_conditioning_halvings": 12
+  },
+  "exact_seconds": 0.178840792,
+  "levels": 4,
+  "numerical_seconds": 2783.080923458,
+  "ft_taylor_tail_certified": false,
+  "reported_ft_radii_include_omitted_tails": false,
+  "reference_kind": "independent certified coordinate-space Bessel epsilon-zero coefficient",
+  "oracle_evaluations": 4105,
+  "oracle_analytic_queries": 324,
+  "reference_seconds": 0.760850541,
+  "reference_coefficient_enclosures_certified": true,
+  "forbidden_pole_absolute_threshold": "1e-20",
+  "comparisons": [
+    {
+      "epsilon_order": 0,
+      "ft": {
+        "real": "[28.6471675002335701630167055405033591695048469 +/- 4.95e-44]",
+        "imaginary": "[+/- 2.62e-44]"
+      },
+      "solver_real_arithmetic_radius_exponent": "-144",
+      "solver_imaginary_arithmetic_radius_exponent": "-144",
+      "radius_exponent_meaning": "radius is strictly less than2^exponent, or exactly zero; omitted tails excluded",
+      "reference": {
+        "real": "[28.64716750023357016301670554050335917 +/- 7.83e-36]",
+        "imaginary": "0"
+      },
+      "difference": {
+        "real": "[+/- 7.41e-36]",
+        "imaginary": "[+/- 2.62e-44]"
+      },
+      "pass": true
+    }
+  ],
+  "forbidden_pole_audit": [
+    {
+      "epsilon_order": -10,
+      "coefficient": {
+        "real": "[+/- 6.46e-150]",
+        "imaginary": "[+/- 6.46e-150]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -9,
+      "coefficient": {
+        "real": "[+/- 1.61e-145]",
+        "imaginary": "[+/- 1.61e-145]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -8,
+      "coefficient": {
+        "real": "[+/- 2.94e-87]",
+        "imaginary": "[+/- 2.94e-87]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -7,
+      "coefficient": {
+        "real": "[+/- 7.32e-83]",
+        "imaginary": "[+/- 7.32e-83]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -6,
+      "coefficient": {
+        "real": "[+/- 7.31e-80]",
+        "imaginary": "[+/- 7.31e-80]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -5,
+      "coefficient": {
+        "real": "[+/- 1.40e-64]",
+        "imaginary": "[+/- 1.40e-64]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -4,
+      "coefficient": {
+        "real": "[3.794232020755e-49 +/- 5.54e-62]",
+        "imaginary": "[1.8751005184112e-48 +/- 7.41e-62]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -3,
+      "coefficient": {
+        "real": "[-7.40717339596e-48 +/- 7.21e-60]",
+        "imaginary": "[-2.719173656569e-47 +/- 7.55e-60]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -2,
+      "coefficient": {
+        "real": "[-2.253697683965689e-42 +/- 4.75e-58]",
+        "imaginary": "[1.92038220757e-46 +/- 5.93e-58]"
+      },
+      "pass": true
+    },
+    {
+      "epsilon_order": -1,
+      "coefficient": {
+        "real": "[-2.92e-43 +/- 8.54e-46]",
+        "imaginary": "[+/- 1.60e-45]"
+      },
+      "pass": true
+    }
+  ],
+  "epsilon_low": -10,
+  "epsilon_high": 0,
+  "exact_systems_built": 0,
+  "exact_systems_reused": 3,
+  "total_seconds": 2784.020953833,
+  "provenance": {
+    "kind": "recorded_pre_rename_numerical_acceptance",
+    "source_report": "ft-banana4-unequal-continuation-acceptance.json",
+    "rerun_for_rename": false,
+    "note": "Mathematical code retained; C++ namespace and package layout changed for publication. Local paths and process metadata omitted."
+  }
+}

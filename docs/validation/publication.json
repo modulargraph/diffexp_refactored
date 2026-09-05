@@ -1,0 +1,44 @@
+{
+  "package": "DiffExp",
+  "version": "2.1.0",
+  "date": "2026-09-05",
+  "status": "pass",
+  "platform": "macOS ARM64",
+  "compiler": "AppleClang 21.0.0",
+  "flint": "3.4.0",
+  "wolfram_kernel": "15.0.0",
+  "validation": {
+    "clean_source_build_without_tests": "pass",
+    "external_installed_cpp_consumer": "pass",
+    "mathematica_process_wrapper": "pass",
+    "installed_wrapper_autodiscovery": "pass",
+    "installed_wrapper_sunrise_json": "pass; reused exact cache with FIRE unavailable",
+    "original_download_scripts": "pass; all 27 downloaded/reference files match the data used by the regression suite",
+    "compatibility_runtime_tests": {
+      "passed": 52,
+      "failed": 0,
+      "report": "compatibility-tests.json"
+    },
+    "cli_with_compatibility_runtime": "pass",
+    "native_and_original_suite": {
+      "passed": 91,
+      "failed": 0,
+      "original_groups": 9,
+      "wall_seconds": 889.2,
+      "report": "native-tests.json"
+    },
+    "final_cli_and_wrapper_after_packaging_fixes": "2/2 pass; also checked against the installed package"
+  },
+  "source_migration": "source-migration.json",
+  "scientific_scope": {
+    "banana4": "Previously accepted equal and unequal four-loop finite parts retained; no expensive rerun for renaming.",
+    "henn_all108": "Frozen by user request. Not an accepted full FT reconstruction.",
+    "general_recursive_tails": "Omitted endpoint/transport tails are not included in arithmetic intervals."
+  },
+  "artifacts": {
+    "native_executable_sha256": "705d1e9e5396db4813e095f7953e4aecc18a11cc9bb0ee7d6321a9111f3641e7",
+    "mathematica_wrapper_sha256": "e53fa2f6cb20a238dd5f498f219237d9dda4ebb855590d9c094b314c424ff913",
+    "installed_native_executable_matches": true,
+    "installed_wrapper_matches": true
+  }
+}

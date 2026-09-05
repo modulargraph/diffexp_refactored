@@ -1,68 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
 
-- Added a public Feynman-trick reconstruction of the 108-component Henn
-  nonplanar double-pentagon boundary, including declared irreducible-numerator
-  family slots, sequential single-license execution, and a direct comparison
-  with the hash-pinned paper ancillary data. Exact algebraic shared-anchor
-  normalization now uses the existing contained-rational native bridge.
-  Scalar requests are partitioned by their actual positive-denominator
-  support, so absent lines no longer create artificial endpoint levels.
-  Deepest-boundary and per-level continuation signs are separate typed plan
-  settings; the maintained Henn component uses the paper's lower boundary rim
-  and explicit projected contour orientations. A fresh-checkpoint,
-  deadline-controlled opt-in timing gate guards the complete four-level
-  numerical path.
-  Multilevel ladders can select one exact anchor per level, preventing a
-  repeated scalar anchor from landing on diagonal singular loci; finite-Taylor
-  matching retries now recognize a later failing handoff or a materially
-  smaller same-handoff midpoint defect as progress, while still stopping
-  bounded retries that do not improve.
-- Reproduced every example notebook in the pinned public DiffExp revision:
-  the Henn and one-mass canonical pentagons, multiple polylogarithms, and
-  both equal- and unequal-mass Banana endpoints, with hash-pinned inputs,
-  saved-reference checks, and opt-in timing gates.
-- Parallelized explicitly bounded terminal endpoint batches while preserving
-  atomic, request-ordered publication. The 15-component unequal-mass Banana
-  terminal projection fell from about 494 to 208 seconds on the development
-  machine.
-- Serialized exact analytic-regulator reciprocals as explicit polynomial
-  quotients, matching FLINT's rational-function input grammar.
-- Bound deferred native value-handoff accuracy to the observable run's
-  matching target, preventing low-digit transports from silently performing
-  high-precision tail-certificate retries.
-- Upgraded Feynman-trick preparation to FIRE 7.1 with finite-field Zippel
-  sampling, multiprime MPI execution, exact rational reconstruction, and an
-  explicitly selectable Classical parity backend.
-- Added source/runtime-bound modular caches, atomic completion markers and
-  locks, exact-artifact validation, process-tree timeouts, independent basis
-  probes, and strict table-coverage checks.
-- Expanded basis discovery with first-shell dotted and numerator seeds, fixing
-  request-dependent sunrise masters; real bubble and sunrise reductions now
-  agree exactly between Classical and modular FIRE7.
+- Publish the standalone C++20 rewrite previously developed as DiffExp3.
+- Retain series recurrences, regular-singular matching, Feynman-trick recursion,
+  native FIRE/FIRE7p integration and verified durable checkpoints.
+- Preserve shared-boundary correlations across recursion levels; both four-loop
+  banana examples pass independent finite-part comparisons.
+- Add a small Mathematica `RunProcess` wrapper and JSON CLI output. Remove the
+  former Mathematica/LibraryLink application from the current repository tree.
+- Install as CMake package `DiffExp`, target `DiffExp::core`, namespace `diffexp`,
+  executable `diffexp`, version 2.1.0.
+- Keep all original example groups as opt-in data comparisons. Full Henn
+  108-component FT reconstruction remains experimental and frozen.
 
-## 2.0.0 — 2026-07-11
-
-- Replaced the strategy/fallback stack with one strict finite-width recurrence
-  solver for ordinary, regular-singular, resonant, logarithmic, fractional,
-  and inhomogeneous sectors.
-- Added the C++20/FLINT recurrence backend and made it the release default,
-  while retaining an explicit Wolfram reference backend for parity checks.
-- Preserved exact local `x^(a+b eps) Log[x]^p` sectors through transport,
-  endpoint limits, and analytically regularized line integration.
-- Restored the classic coupled segmentation geometry, including complex-root
-  projections and matching at `+1/DivisionOrder` and
-  `-1/DivisionOrder` in adjacent regular charts.
-- Added a stable `DiffExp2`` umbrella API, named result schemas, closed-form
-  regular boundary preparation, inspectable segments, and piecewise
-  evaluation.
-- Added a typed Feynman-trick facade with prepared FIRE caches, atomic ladder
-  checkpoints, strict subprocess settings, and safe invocation-local IBP
-  batching.
-- Added unequal-mass banana comparisons, independent Bessel oracles, and
-  focused Wolfram/C++ parity, analytic-regulator, and edge-case tests.
-
-This is a source-incompatible major release. See
-[Docs/Migration.md](Docs/Migration.md) for the DiffExp 1 mapping and current
-limitations.
+This is an API break from 2.0. Existing cache format identifiers retain their
+working-name versions. The old application remains available in Git history.

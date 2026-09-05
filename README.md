@@ -1,210 +1,131 @@
-# DiffExp 2
+# DiffExp 2.1
 
-> **Beta:** DiffExp 2 is under active development. Interfaces, checkpoint
-> formats, and numerical guarantees may still change; independently validate
-> important results before relying on them in production or publication.
+DiffExp 2.1 computes dimensionally regulated Feynman integrals with series
+recurrences and recursive Feynman-parameter integration. The mathematical
+backend is a standalone C++20 package built on FLINT/Arb. Mathematica users can
+call the same executable through a small `RunProcess` wrapper.
 
-DiffExp 2 transports local recurrence solutions of differential systems for
-dimensionally regularized Feynman integrals. It keeps exact local behavior
+This is the C++ rewrite developed under the working name **DiffExp3**. It replaces
+the 2.0 application at the repository root. The former implementation remains
+in Git history; its Mathematica API is not source-compatible with this version.
 
-```text
-x^(a + b eps) Log[x]^p
-```
+The numerical checks include both four-loop banana examples and all nine
+original DiffExp example groups. The full 108-component Henn Feynman-trick
+boundary reconstruction is **experimental and frozen**; it is not a completed
+example. Transport from the published Henn boundary and reconstruction of its
+first canonical component have passed separately.
 
-through transport, matching, endpoint limits, and analytic regularization.
-The C++20/FLINT recurrence backend is the release default; Wolfram Language
-retains exact singularity analysis, branch control, matching, integration,
-and validation. Selecting either backend is strict: failures never trigger a
-silent fallback to the other implementation.
+## Build
 
-## Verified speedups over DiffExp 1
+Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and pkg-config.
+The tested platform is macOS; the recursive FIRE process provider uses POSIX
+facilities. Mathematica is optional. FIRE7 or FIRE7p is needed for larger cold
+IBP reductions, but not for building or running the basic examples.
 
-On the July 2026 development machine, DiffExp 2 is substantially faster on
-the original pentagon benchmarks while reproducing their saved reference
-values:
-
-| Example | DiffExp 1 | DiffExp 2 | Speedup | Maximum error |
-| --- | ---: | ---: | ---: | ---: |
-| nonplanar pentagon | 49.77 s | 6.84 s | 7.28× | `1.73e-12` |
-| planar pentagon (one loop) | 85.56 s | 28.58 s | 2.99× | `3.60e-12` |
-| planar pentagon (`zmz`) | 1391.14 s | 156.76 s | 8.87× | `2.18e-11` |
-| planar pentagon (`mzz`) | 992.46 s | 143.04 s | 6.94× | `3.23e-11` |
-| planar pentagon (`zzz`) | 1670.66 s | 174.18 s | 9.59× | `2.48e-11` |
-| unequal-mass Banana | 320.64 s | 211.15 s | 1.52× | `1.98e-14` |
-
-The comparisons use like-for-like endpoints and numerical scopes; timings
-remain machine-dependent. The equal-mass Banana also transports directly
-along the prescribed real path through the regular-singular points
-`t=0,4,16` in about 19 seconds. Its saved DiffExp 1 timing continued to a
-different endpoint, so it is not presented as a speedup ratio. Reproduction
-commands, settings, and the slower generic weight-20 MPL case are documented
-in [Original DiffExp example recovery](Docs/OriginalDiffExpExamples.md).
-
-## Quick start
-
-Build the compiled backend as described in
-[Installation](Docs/Installation.md), then load the root package:
-
-```mathematica
-repo = "/absolute/path/to/diffexp2";
-Get[FileNameJoin[{repo, "DiffExp2.m"}]];
-
-DiffExp2`LoadConfiguration[
-  "WorkingPrecision" -> 100,
-  "ExpansionOrder" -> 30,
-  "EpsilonOrder" -> 2
-];
-
-x = Global`x;
-sys = DiffExp2`LoadSystem[
-  <|"Matrix" -> {{1/(x - 2)}}, "Variable" -> x|>
-];
-
-boundary = DiffExp2`PrepareBoundary[{1/2}];
-
-result = DiffExp2`TransportEndpoint[
-  sys,
-  boundary,
-  0,
-  1
-];
-
-DiffExp2`EpsilonCoefficient[result, 0]
-(* {1/4} *)
-
-DiffExp2`EpsilonExpression[result, Global`eps]
-(* {1/4} *)
-```
-
-The root `DiffExp2.m` loader installs the stable umbrella API and
-selects the compiled backend by default.
-
-## Feynman trick
-
-Load the root Feynman-trick package to plan or run one validated example:
-
-```mathematica
-Get[FileNameJoin[{repo, "FeynmanTrick.m"}]];
-
-plan = FeynmanTrick`PipelinePlan["bubble"];
-result = FeynmanTrick`RunIntegrationPipeline[plan];
-```
-
-The facade runs the tested ladder in a clean Wolfram subprocess, uses FIRE
-7.1 finite-field sampling and rational reconstruction by default, reuses
-prepared FIRE data and atomic ladder checkpoints, and returns named plan,
-process, or result records. Install FIRE at
-`Dependencies/fire/FIRE7/FIRE7` or pass `"FIREPath"` explicitly. The current
-process facade requires
-`/usr/bin/env`, so it is supported on macOS and Linux. Direct DiffExp 2
-transport is not subject to that platform restriction.
-
-User-defined families use the same facade. Family data must be exact; the
-second argument selects one integral, an ordered list of integrals, or `All`
-to discover every supported level-zero FIRE master at execution:
-
-```mathematica
-family = <|
-  "Name" -> "massive_bubble_custom",
-  "LoopMomenta" -> {l},
-  "ExternalMomenta" -> {p},
-  "Propagators" -> {1 - l^2, 3/2 - (l - p)^2},
-  "Replacements" -> {p^2 -> s},
-  "NumericalPoint" -> {s -> -1},
-  "Dimension" -> 2 - 2 FeynmanTrick`FTeps
-|>;
-
-selected = FeynmanTrick`RunIntegrationPipeline[
-  family,
-  {{1, 1}},
-  "EpsilonOrder" -> 2
-];
-
-allMasters = FeynmanTrick`RunIntegrationPipeline[
-  family,
-  All,
-  "EpsilonOrder" -> 2
-];
-
-allMasters["Outputs"][[All, {"Master", "Coefficients"}]]
-```
-
-`All` performs deterministic first-shell master discovery on a cold run and
-caches the resolved ordered basis. Because FIRE master lists are
-request-dependent, arbitrary families requiring deeper dots or numerators
-should use explicit targets while this beta policy is extended.
-`PipelinePlan[family, targets]` exposes the exact,
-content-addressed request without starting FIRE. `All` discovery rejects
-undeclared FIRE-added numerator slots. Explicit families may instead declare
-known irreducible slots with `"NumeratorPositions" -> {...}`; those slots are
-excluded from the FT merge sequence and accept only nonpositive powers.
-Merge-position numerators, incomplete merge sequences, and currently unwired
-custom branch or kinematic-assumption fields fail before numerical transport
-rather than being ignored.
-
-The same public facade is available from the command line:
+On macOS, dependencies can be installed with Homebrew:
 
 ```sh
-DE2_CPP_THREADS=4 \
-wolframscript -script Examples/FeynmanTrick/RunExample.m bubble
+brew install cmake pkgconf flint boost
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build -j2
+build/diffexp --version
+build/diffexp series examples/logarithm.json
+build/diffexp bubble
 ```
 
-See [Feynman Trick](Docs/FeynmanTrick.md) for registry names, numerical
-settings, plan inspection, cache controls, and checkpoint resumption.
-The maintained
-[Henn double-pentagon boundary example](Examples/FeynmanTrick/README.md#henn-double-pentagon-boundary)
-uses the same interface to reconstruct and compare a published canonical
-boundary component, with an opt-in `--all` mode for all 108 components.
+`bubble` uses the specialized certified recurrence. General recursion uses `ft`.
+Large Feynman-trick examples are opt-in and are never started by the default
+test suite. To build and run tests, use the commands in
+[validation](docs/validation.md#reproduce-the-release-checks).
 
-## Capabilities
+Install the executable, C++ headers and Mathematica wrapper with:
 
-- exact epsilon-rational systems at ordinary and regular-singular points;
-- canonical dlog systems with algebraic letters, including square roots;
-- finite-width recurrences, resonances, log sectors, fractional powers, and
-  inhomogeneous sources;
-- exact real-line segmentation with complex-root projections and explicit
-  `+i0`/`-i0` prescriptions;
-- inspectable line segments and piecewise evaluation;
-- exact sector-aware endpoint limits and analytically regularized line
-  integrals;
-- FIRE preparation and recursive Feynman-trick integration;
-- strict Wolfram/C++ recurrence parity tests and parallel native solves.
+```sh
+cmake --install build --prefix /your/prefix
+```
 
-## Documentation
+CMake consumers use `find_package(DiffExp 2.1 CONFIG REQUIRED)` and link
+`DiffExp::core`. Public headers are under `diffexp/`, with namespace `diffexp`.
+See [the consumer example](tests/consumer) and [architecture](docs/architecture.md).
 
-- [Installation](Docs/Installation.md)
-- [Quick Start](Docs/QuickStart.md)
-- [API Reference](Docs/API.md)
-- [Direct Solver](Docs/DirectSolver.md)
-- [Feynman Trick](Docs/FeynmanTrick.md)
-- [Analytic Continuation](Docs/AnalyticContinuation.md)
-- [Verified Results](Docs/Results.md)
-- [Original DiffExp Examples](Docs/OriginalDiffExpExamples.md)
-- [Migration from DiffExp 1](Docs/Migration.md)
-- [C++ Backend](Docs/CppBackend.md)
-- [Release Manifest](Docs/ReleaseManifest.md)
-- [Citation](Docs/Citation.md)
-- [Changelog](CHANGELOG.md)
+## Mathematica
 
-## Current limitations
+Build once, then load the wrapper from the repository:
 
-- The differential matrix must be exact and rational in the line variable
-  and epsilon. `LoadSystem` rejects non-integer powers with a
-  variable-dependent base, such as `Sqrt[x]`. Exact algebraic constants,
-  singular locations, and local exponents are a different case and are not
-  rejected merely for being algebraic. Systems already supplied in canonical
-  dlog form can instead use `LoadCanonicalSystem`, whose letters may be
-  algebraic.
-- Indicial eigenvalues must be affine in epsilon, `a + b eps`.
-- There is no dedicated plotting command. Use `LineSegments` or
-  `PiecewiseSolution` with the plotting style appropriate to the application.
-- FIRE is required only to prepare new Feynman-trick families. Transporting
-  an existing exact differential matrix does not require FIRE.
+```wl
+Get["/path/to/DiffExp2.1/DiffExp.m"];
+DiffExpBackendInfo[]
 
-DiffExp 2 is the recurrence-based successor to
-[DiffExp](https://gitlab.com/hiddingm/diffexp).
+result = DiffExpSeries[<|
+  "matrix" -> {{"eps/(1-x)"}},
+  "boundary" -> {{"1", "0", "0"}},
+  "center" -> "0", "taylor_order" -> 8,
+  "epsilon_low" -> 0, "epsilon_high" -> 2
+|>];
+result["coefficients"][[4, 1, 2]]  (* "1/3": x^3 eps^1 *)
+```
 
-## License
+The wrapper finds `build/diffexp` automatically. For another build or installed
+executable, set `$DiffExpExecutable = "/your/prefix/bin/diffexp"`.
+The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`.
 
-Copyright 2024–2026 Martijn Hidding. DiffExp 2 is free software distributed
-under the [GNU General Public License, version 3 or later](LICENSE).
+Every call launches one process, passes ordinary command arguments and, when
+needed, JSON on stdin. There are no LibraryLink libraries, persistent native
+handles, or Mathematica-side reductions. Exact coefficients and arbitrary
+precision intervals remain strings; returned text is never evaluated as code.
+See [the wrapper guide](docs/mathematica.md) and [runnable example](examples/Mathematica.wl).
+
+## Feynman-trick recursion
+
+```sh
+build/diffexp ft sunrise --fire /path/to/FIRE7 --cache /path/to/cache --json
+build/diffexp ft banana4 --fire /path/to/FIRE7 --cache /path/to/cache --json
+build/diffexp ft banana4_unequal --fire /path/to/FIRE7 --cache /path/to/cache --json
+```
+
+The same command from Mathematica:
+
+```wl
+DiffExpFeynmanTrick["sunrise", {
+  "--fire", "/path/to/FIRE7", "--cache", "/path/to/cache",
+  "--epsilon-order", "0"
+}]
+```
+
+`--json` returns one JSON object on stdout, with progress on stderr. Coefficients
+are ordered by component, then epsilon power, beginning at `epsilon_low`.
+Each complex coefficient has `real` and `imaginary` Arb interval strings.
+`omitted_tails_certified` reports whether omitted series tails are enclosed.
+General recursive results currently return `false`: their arithmetic intervals
+alone are not certified bounds for the full integral.
+
+Use `prepare FAMILY` to prepare the exact recursion without numerical evaluation.
+Use `--fire-prime /path/to/FIRE7p` for native modular reconstruction. Completed
+exact reductions and endpoint columns are stored under `--cache` and verified
+on reuse. Persistent numerical continuation also retains completed arms.
+
+`--method adjoint|factored|auto|values` selects the transport method; the default
+is `adjoint`. Numerical defaults are endpoint order 32, ordinary order 80,
+384 working bits and 28 leaf digits. Preparation has finite budgets, adjustable
+with `--fire-seconds`, `--level-seconds` and `--total-seconds`. These bound exact
+preparation, not the duration of the full numerical calculation.
+Run `build/diffexp --help` for the remaining options.
+
+## Examples and validation
+
+See [validation and limitations](docs/validation.md) for the tested families,
+precision scope and Banana4 reference comparisons. The [example guide](docs/examples.md)
+describes the original-data downloads and the opt-in FT acceptance runner.
+
+The default build uses the new native core. The extracted prepared-input
+compatibility runtime is available with `-DDIFFEXP_BUILD_KERNEL_RUNTIME=ON`
+for inherited regression tests; the Mathematica wrapper does not use it.
+
+Some serialized cache and diagnostic schema identifiers retain the old
+`DiffExp3` working name to preserve saved artifacts. They are format versions,
+not a dependency on another package.
+
+## License and citation
+
+GPL-3.0-or-later. See [LICENSE](LICENSE), [CITATION.cff](CITATION.cff), and the
+[method references](docs/citation.md).

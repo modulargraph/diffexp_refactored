@@ -1,0 +1,2351 @@
+  if (operation == "regular_equation.prepare") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "capability", "key", "identity",
+         "dimension", "geometry", "physical_ode",
+         "relative_accuracy_max_exact"},
+        "frame-independent regular equation-owner request");
+    if (required_string(root, "capability") !=
+        kFrameIndependentRegularEquationOwnerCapability)
+      throw std::invalid_argument(
+          "unsupported frame-independent regular equation-owner capability");
+    const auto key = required_string(root, "key");
+    const auto identity = required_string(root, "identity");
+    if (!identity.starts_with("de2-equation-"))
+      throw std::invalid_argument(
+          "regular equation owner identity must be a de2-equation token");
+    const auto dimension = as_u32(
+        root.at("dimension"), "regular equation-owner dimension");
+    if (dimension == 0)
+      throw std::invalid_argument(
+          "regular equation-owner dimension must be positive");
+    const auto geometry_record = canonical_chart_geometry_record(
+        root.at("geometry"));
+    const auto relative_accuracy_text = required_string(
+        root, "relative_accuracy_max_exact");
+    const Rational relative_accuracy_max(relative_accuracy_text);
+    if (relative_accuracy_max.sign() <= 0 ||
+        !(relative_accuracy_max < Rational(1)) ||
+        relative_accuracy_max.str() != relative_accuracy_text)
+      throw std::invalid_argument(
+          "regular equation-owner relative-accuracy contract must be a canonical exact rational strictly between zero and one");
+    const auto signature = json::serialize(canonical_json_value(
+        json::object{
+            {"capability", root.at("capability")},
+            {"domain", session->domain},
+            {"precision_bits", session->precision_bits},
+            {"symbols", encode_strings(session->symbols)},
+            {"session_analytic", json::parse(session->analytic_identity)},
+            {"identity", root.at("identity")},
+            {"dimension", root.at("dimension")},
+            {"geometry", json::parse(geometry_record)},
+            {"relative_accuracy_max_exact", relative_accuracy_text},
+            {"physical_ode", root.at("physical_ode")}}));
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (const auto found =
+              session->regular_equation_owner_handles_by_key.find(key);
+          found != session->regular_equation_owner_handles_by_key.end()) {
+        const auto owner = session->regular_equation_owners.at(
+            found->second);
+        if (owner->signature() != signature)
+          throw std::invalid_argument(
+              "regular equation-owner cache key collision with unequal exact identity");
+        return json::object{
+            {"status", "ok"}, {"session", session->handle},
+            {"equation_owner", owner->handle()}, {"reused", true},
+            {"capability", kFrameIndependentRegularEquationOwnerCapability},
+            {"identity", owner->exact_identity()},
+            {"dimension", owner->dimension()},
+            {"owner_signature_identity",
+             owner->owner_signature_identity()},
+            {"physical_payload_identity",
+             owner->physical_payload_identity()}};
+      }
+      if (session->regular_equation_owners.size() >=
+          session->chart_capacity)
+        throw std::invalid_argument(
+            "persistent regular equation-owner capacity is exhausted");
+    }
+
+    std::string owner_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      owner_handle = "eq:" +
+          std::to_string(session->next_regular_equation_owner++);
+    }
+    const auto parse_owner = [&]<typename Scalar>()
+        -> std::shared_ptr<RegularPhysicalEquationOwnerBase> {
+      std::unique_ptr<AcbPrecisionLease> acb_lease;
+      if constexpr (std::is_same_v<Scalar, ComplexBall>) {
+        acb_lease = std::make_unique<AcbPrecisionLease>(
+            session->precision_bits);
+        ComplexBall::set_precision(session->precision_bits);
+      }
+      std::unique_lock<std::recursive_mutex> symbolic_lock;
+      if constexpr (std::is_same_v<Scalar, SymbolicRational>) {
+        symbolic_lock =
+            std::unique_lock<std::recursive_mutex>(symbolic_run_mutex());
+        SymbolicRational::configure(session->symbols);
+      }
+      auto equation = parse_prepared_physical_ode<Scalar>(
+          root.at("physical_ode"), dimension, false);
+      if (!equation->owner_signature_identity.starts_with(
+              "de2-equation-") ||
+          equation->owner_signature_identity != identity)
+        throw std::invalid_argument(
+            "regular physical q/C payload names a different equation owner identity");
+      const auto& q0 = equation->q_lags.front();
+      if (!equation->c_lags.front().empty() || q0.zero ||
+          q0.valuation != 0 || q0.numerator.empty() ||
+          q0.denominator.empty() ||
+          ScalarTraits<Scalar>::is_zero(q0.numerator.front()) ||
+          ScalarTraits<Scalar>::is_zero(q0.denominator.front()))
+        throw std::invalid_argument(
+            "regular physical equation owner requires an ordinary center: C(t=0,epsilon) must vanish structurally and q(t=0,epsilon) must be formally invertible at epsilon zero");
+      return make_retained_typed_shared<Scalar,
+          RegularPhysicalEquationOwner<Scalar>>(
+              owner_handle, key, identity, signature, geometry_record,
+              std::move(equation), session->precision_bits,
+              relative_accuracy_text);
+    };
+    std::shared_ptr<RegularPhysicalEquationOwnerBase> owner;
+    if (session->domain == "rational")
+      owner = parse_owner.template operator()<Rational>();
+    else if (session->domain == "acb")
+      owner = parse_owner.template operator()<ComplexBall>();
+    else
+      owner = parse_owner.template operator()<SymbolicRational>();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during regular equation-owner preparation");
+      if (const auto found =
+              session->regular_equation_owner_handles_by_key.find(key);
+          found != session->regular_equation_owner_handles_by_key.end()) {
+        const auto existing = session->regular_equation_owners.at(
+            found->second);
+        if (existing->signature() != owner->signature())
+          throw std::invalid_argument(
+              "concurrent regular equation-owner cache key collision with unequal exact identity");
+        owner = existing;
+      } else {
+        session->regular_equation_owners.emplace(owner->handle(), owner);
+        session->regular_equation_owner_handles_by_key.emplace(
+            key, owner->handle());
+      }
+    }
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"equation_owner", owner->handle()},
+        {"reused", owner->handle() != owner_handle},
+        {"capability", kFrameIndependentRegularEquationOwnerCapability},
+        {"identity", owner->exact_identity()},
+        {"dimension", owner->dimension()},
+        {"owner_signature_identity", owner->owner_signature_identity()},
+        {"physical_payload_identity", owner->physical_payload_identity()}};
+  }
+
+  if (operation == "chart.prepare") {
+    const auto key = required_string(root, "key");
+    const auto identity = required_string(root, "identity");
+    const auto& problem = as_object(root.at("problem"), "prepared problem");
+    const auto problem_domain = required_string(problem, "domain");
+    if (problem_domain != session->domain)
+      throw std::invalid_argument(
+          "prepared problem domain differs from its solver session");
+    if (session->domain == "acb" &&
+        as_i64(problem.at("precision_bits"), "precision bits") !=
+            session->precision_bits)
+      throw std::invalid_argument(
+          "prepared problem precision differs from its solver session");
+    if (session->domain == "symbolic" &&
+        parse_symbols(problem) != session->symbols)
+      throw std::invalid_argument(
+          "prepared problem regulator field differs from its solver session");
+    const auto analytic = root.if_contains("analytic")
+        ? root.at("analytic") : json::value(nullptr);
+    std::optional<std::string> geometry_record;
+    std::optional<std::string> principal_matrix_record;
+    std::optional<std::string> native_scc_capabilities;
+    std::optional<std::string> regular_value_relative_accuracy_max_exact;
+    if (analytic.is_object()) {
+      const auto& analytic_object = analytic.as_object();
+      if (const auto* geometry = analytic_object.if_contains("geometry"))
+        geometry_record = canonical_chart_geometry_record(*geometry);
+      if (const auto* principal =
+              analytic_object.if_contains("principal_matrix"))
+        principal_matrix_record = parse_exact_parent_matrix(
+            *principal, as_u32(problem.at("d"), "dimension"),
+            "prepared chart principal matrix").canonical_record;
+      if (const auto* capabilities =
+              analytic_object.if_contains("native_scc_capabilities"))
+        native_scc_capabilities =
+            canonical_native_scc_capabilities(*capabilities);
+      if (const auto* raw_accuracy = analytic_object.if_contains(
+              "regular_value_relative_accuracy_max_exact")) {
+        if (!raw_accuracy->is_string())
+          throw std::invalid_argument(
+              "prepared chart regular-value relative-accuracy contract must be an exact rational string");
+        const auto accuracy_text = std::string(raw_accuracy->as_string());
+        const Rational accuracy(accuracy_text);
+        if (accuracy.sign() <= 0 || !(accuracy < Rational(1)) ||
+            accuracy.str() != accuracy_text)
+          throw std::invalid_argument(
+              "prepared chart regular-value relative-accuracy contract must be a canonical exact rational strictly between zero and one");
+        regular_value_relative_accuracy_max_exact = accuracy_text;
+      }
+    }
+    json::object combined_analytic;
+    combined_analytic["session"] = json::parse(session->analytic_identity);
+    combined_analytic["chart"] = analytic;
+    auto scc = validate_scc_certificate(
+        root.at("scc"), as_u32(problem.at("d"), "dimension"));
+    auto signature = static_problem_signature(
+        problem, combined_analytic, scc, identity);
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (const auto found = session->handles_by_key.find(key);
+          found != session->handles_by_key.end()) {
+        const auto chart = session->charts.at(found->second);
+        if (chart->signature() != signature)
+          throw std::invalid_argument(
+              "persistent chart cache key collision with unequal exact identity");
+        return json::object{{"status", "ok"}, {"chart", chart->handle()},
+                            {"reused", true},
+                            {"dimension", chart->dimension()},
+                            {"frame_base", chart->frame_base()},
+                            {"frame_width", chart->frame_width()},
+                            {"d0_inverse_mode", chart->d0_inverse_mode()}};
+      }
+      if (session->charts.size() >= session->chart_capacity)
+        throw std::invalid_argument("persistent chart capacity is exhausted");
+    }
+    std::string chart_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      chart_handle = "c:" + std::to_string(session->next_chart++);
+    }
+    std::shared_ptr<PreparedChartBase> chart;
+    if (session->domain == "rational")
+      chart = parse_prepared_chart<Rational>(
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
+          std::move(scc), std::move(signature));
+    else if (session->domain == "acb")
+      chart = parse_prepared_chart<ComplexBall>(
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
+          std::move(scc), std::move(signature));
+    else
+      chart = parse_prepared_chart<SymbolicRational>(
+          session, root, chart_handle, key, identity, geometry_record,
+          principal_matrix_record, native_scc_capabilities,
+          regular_value_relative_accuracy_max_exact,
+          std::move(scc), std::move(signature));
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      // A concurrent duplicate prepare is harmless only when its complete
+      // collision certificate is byte-identical.
+      if (const auto found = session->handles_by_key.find(key);
+          found != session->handles_by_key.end()) {
+        const auto existing = session->charts.at(found->second);
+        if (existing->signature() != chart->signature())
+          throw std::invalid_argument(
+              "concurrent chart cache key collision with unequal identity");
+        chart = existing;
+      } else {
+        session->charts.emplace(chart->handle(), chart);
+        session->handles_by_key.emplace(key, chart->handle());
+      }
+    }
+    return json::object{{"status", "ok"}, {"chart", chart->handle()},
+                        {"reused", chart->handle() != chart_handle},
+                        {"dimension", chart->dimension()},
+                        {"frame_base", chart->frame_base()},
+                        {"frame_width", chart->frame_width()},
+                        {"d0_inverse_mode", chart->d0_inverse_mode()},
+                        {"scc_components", chart->scc().component_count},
+                        {"scc_structural_edges",
+                         chart->scc().structural_edges.size()},
+                        {"scc_condensation_edges",
+                         chart->scc().condensation_edges.size()},
+                        {"scc_topological_order",
+                         encode_indices(chart->scc().topological_order)},
+                        {"scc_coupling_depth", chart->scc().coupling_depth}};
+  }
+
+  if (operation == "scc.prepare") {
+    const auto key = required_string(root, "key");
+    const auto identity = required_string(root, "identity");
+    const auto signature = composite_scc_signature(root);
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (const auto found = session->scc_handles_by_key.find(key);
+          found != session->scc_handles_by_key.end()) {
+        const auto composite = session->sccs.at(found->second);
+        if (composite->signature() != signature)
+          throw std::invalid_argument(
+              "persistent SCC cache key collision with unequal exact identity");
+        auto result = composite->publication_summary();
+        result["status"] = "ok";
+        result["session"] = session->handle;
+        result["reused"] = true;
+        return result;
+      }
+      if (session->sccs.size() >= session->scc_capacity)
+        throw std::invalid_argument("persistent SCC capacity is exhausted");
+    }
+
+    const auto& raw_blocks = as_array(root.at("blocks"), "SCC blocks");
+    std::vector<std::shared_ptr<PreparedChartBase>> erased_charts;
+    erased_charts.reserve(raw_blocks.size());
+    std::string scc_handle;
+    {
+      // Resolve and strongly retain the complete diagonal handle set before
+      // leaving the session lock.  The composite remains valid if the public
+      // chart handles are released after this preparation boundary.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      for (const auto& raw_block_value : raw_blocks) {
+        const auto& raw_block = as_object(raw_block_value, "SCC block");
+        const auto chart_handle = required_string(raw_block, "chart");
+        const auto found = session->charts.find(chart_handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "SCC preparation references an unknown or released chart");
+        erased_charts.push_back(found->second);
+      }
+      scc_handle = "scc:" + std::to_string(session->next_scc++);
+    }
+
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    if (session->domain == "rational")
+      composite = parse_composite_scc_chart<Rational>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+    else if (session->domain == "acb")
+      composite = parse_composite_scc_chart<ComplexBall>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+    else
+      composite = parse_composite_scc_chart<SymbolicRational>(
+          session, root, scc_handle, key, identity, signature,
+          erased_charts);
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during SCC preparation");
+      if (const auto found = session->scc_handles_by_key.find(key);
+          found != session->scc_handles_by_key.end()) {
+        const auto existing = session->sccs.at(found->second);
+        if (existing->signature() != composite->signature())
+          throw std::invalid_argument(
+              "concurrent SCC cache key collision with unequal exact identity");
+        composite = existing;
+      } else {
+        if (session->sccs.size() >= session->scc_capacity)
+          throw std::invalid_argument(
+              "persistent SCC capacity was exhausted during preparation");
+        session->sccs.emplace(composite->handle(), composite);
+        session->scc_handles_by_key.emplace(key, composite->handle());
+      }
+    }
+    auto result = composite->publication_summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["reused"] = composite->handle() != scc_handle;
+    return result;
+  }
+
+  if (operation == "chart.solve") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      chart = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = chart->solve(as_object(root.at("run"), "recurrence run"),
+                               output_digits);
+    result["session"] = session->handle;
+    result["chart"] = chart->handle();
+    return result;
+  }
+
+  if (operation == "chart.solve_batch") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      chart = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    const auto& runs = as_array(root.at("runs"), "persistent recurrence runs");
+    const auto requested_threads = root.if_contains("threads")
+        ? as_u32(root.at("threads"), "batch threads") : 1;
+    if (requested_threads == 0)
+      throw std::invalid_argument("batch threads must be positive");
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), runs.size()});
+    const auto worker_count = symbolic_serialized && bounded_threads != 0
+        ? std::size_t{1} : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<json::object> results(runs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&]() {
+      while (true) {
+        const auto index = next.fetch_add(1);
+        if (index >= runs.size()) return;
+        results[index] = solve_prepared_chart_safe(
+            chart, runs[index], output_digits, session->handle);
+      }
+    };
+    // jthread guarantees already-started workers are joined if a later
+    // thread construction throws; destroying a joinable std::thread here
+    // would otherwise terminate the host Wolfram kernel.
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i)
+      workers.emplace_back(worker);
+    for (auto& thread : workers) thread.join();
+
+    std::size_t succeeded = 0;
+    json::array encoded;
+    encoded.reserve(results.size());
+    for (auto& result : results) {
+      if (result.if_contains("status") != nullptr &&
+          result.at("status") == "ok")
+        ++succeeded;
+      encoded.push_back(std::move(result));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"chart", chart->handle()}, {"results", std::move(encoded)},
+        {"attempted", runs.size()}, {"succeeded", succeeded},
+        {"failed", runs.size() - succeeded},
+        {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"elapsed_ms", elapsed_ms}};
+  }
+
+  if (operation == "session.solve_many") {
+    const auto& raw_jobs = as_array(
+        root.at("jobs"), "persistent cross-chart recurrence jobs");
+    const auto requested_threads = root.if_contains("threads")
+        ? as_u32(root.at("threads"), "batch threads") : 1;
+    if (requested_threads == 0)
+      throw std::invalid_argument("batch threads must be positive");
+
+    struct PendingJob {
+      std::string chart_handle;
+      const json::value* run = nullptr;
+      int output_digits = 0;
+    };
+    std::vector<PendingJob> pending;
+    pending.reserve(raw_jobs.size());
+    for (std::size_t index = 0; index < raw_jobs.size(); ++index) {
+      const auto& job = as_object(
+          raw_jobs[index], "persistent cross-chart recurrence job");
+      const auto* raw_run = job.if_contains("run");
+      if (raw_run == nullptr)
+        throw std::invalid_argument(
+            "session.solve_many job " + std::to_string(index) +
+            " is missing its complete run record");
+      const auto output_digits = job.if_contains("output_digits")
+          ? static_cast<int>(as_i64(
+                job.at("output_digits"), "job output digits"))
+          : session->output_digits;
+      if (output_digits < 1)
+        throw std::invalid_argument("job output digits must be positive");
+      pending.push_back(PendingJob{
+          required_string(job, "chart"), raw_run, output_digits});
+    }
+
+    struct ResolvedJob {
+      std::shared_ptr<PreparedChartBase> chart;
+      const json::value* run = nullptr;
+      int output_digits = 0;
+    };
+    std::vector<ResolvedJob> jobs;
+    jobs.reserve(pending.size());
+    {
+      // Resolve the complete handle set before any worker exists.  Apart
+      // from making cross-session/released handles loud, the shared_ptrs
+      // retain every selected chart for the whole batch even if a concurrent
+      // chart.release follows this validation boundary.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      for (std::size_t index = 0; index < pending.size(); ++index) {
+        const auto found = session->charts.find(pending[index].chart_handle);
+        if (found == session->charts.end())
+          throw std::invalid_argument(
+              "unknown or released persistent chart in session.solve_many "
+              "job " + std::to_string(index) + ": " +
+              pending[index].chart_handle);
+        jobs.push_back(ResolvedJob{
+            found->second, pending[index].run, pending[index].output_digits});
+      }
+    }
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), jobs.size()});
+    const auto worker_count = symbolic_serialized && bounded_threads != 0
+        ? std::size_t{1} : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<json::object> results(jobs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        const auto index = next.fetch_add(1);
+        if (index >= jobs.size()) return;
+        const auto& job = jobs[index];
+        results[index] = solve_prepared_chart_safe(
+            job.chart, *job.run, job.output_digits, session->handle);
+      }
+    };
+    // If construction of a later worker fails, jthread destruction requests
+    // stop and joins every worker that already started.  No joinable native
+    // thread can escape into the host Wolfram kernel.
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i)
+      workers.emplace_back(worker);
+    for (auto& thread : workers) thread.join();
+
+    std::size_t succeeded = 0;
+    json::array encoded;
+    encoded.reserve(results.size());
+    for (auto& result : results) {
+      if (result.if_contains("status") != nullptr &&
+          result.at("status") == "ok")
+        ++succeeded;
+      encoded.push_back(std::move(result));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"results", std::move(encoded)}, {"attempted", jobs.size()},
+        {"succeeded", succeeded}, {"failed", jobs.size() - succeeded},
+        {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"elapsed_ms", elapsed_ms}};
+  }
+
+  if (operation == "scc.solve_column") {
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    std::string local_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or released persistent SCC chart");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument("persistent local capacity is exhausted");
+      composite = found->second;
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    CompositeColumnSolveResult column;
+    try {
+      column = composite->solve_column(local_handle, root, composite);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native SCC local reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native SCC local reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during SCC column solve");
+      session->locals.emplace(local_handle, column.local);
+      const auto local_stats = column.local->stats();
+      ++session->total_local_solves;
+      ++session->total_scc_column_solves;
+      session->total_local_run_parse_ms += local_stats.create_parse_ms;
+      session->total_local_kernel_ms += local_stats.create_kernel_ms;
+    }
+    // A solved column is retained by the SCC/session owner.  Returning its
+    // recursive summary duplicates exact physical-owner and tail metadata on
+    // every column and can exceed the generated hot-response budget.  The
+    // batch path already returns this same bounded reference DTO.
+    auto response = column.local->opaque_reference_summary();
+    response["status"] = "ok";
+    response["session"] = session->handle;
+    response["scc"] = composite->handle();
+    response["native_retained"] = true;
+    response["json_coefficients"] = 0;
+    response["execution_capability"] =
+        composite->column_execution_capability();
+    response["block_diagnostics"] = std::move(column.block_diagnostics);
+    response["elapsed_ms"] = column.elapsed_ms;
+    return response;
+  }
+
+  if (operation == "scc.solve_columns") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "scc", "columns", "threads"},
+        "native SCC column-batch request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native SCC column batches require rational or Acb coefficients");
+    const auto requested_threads = as_u32(
+        root.at("threads"), "native SCC column-batch threads");
+    if (requested_threads == 0)
+      throw std::invalid_argument(
+          "native SCC column-batch threads must be positive");
+    const auto& raw_columns = as_array(
+        root.at("columns"), "native SCC column-batch columns");
+    if (raw_columns.empty())
+      throw std::invalid_argument(
+          "native SCC column batch cannot be empty");
+    for (std::size_t index = 0; index < raw_columns.size(); ++index)
+      require_exact_keys(
+          as_object(raw_columns[index], "native SCC batch column"),
+          {"seed", "targets", "checkpoint_identity"},
+          "native SCC batch column");
+
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    std::vector<std::string> local_handles;
+    local_handles.reserve(raw_columns.size());
+    {
+      // Reserve the complete ordered result set before starting workers.
+      // Public SCC release cannot invalidate the strongly owned composite,
+      // and capacity cannot be consumed between individual columns.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or released persistent SCC chart");
+      if (raw_columns.size() > session->local_capacity ||
+          session->locals.size() + session->pending_local_solves >
+              session->local_capacity - raw_columns.size())
+        throw std::invalid_argument(
+            "persistent local capacity cannot admit the complete SCC column batch");
+      composite = found->second;
+      for (std::size_t index = 0; index < raw_columns.size(); ++index)
+        local_handles.push_back(
+            "l:" + std::to_string(session->next_local++));
+      session->pending_local_solves += raw_columns.size();
+    }
+
+    const auto worker_count = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads),
+         raw_columns.size()});
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<CompositeColumnSolveResult> columns(raw_columns.size());
+    std::vector<std::exception_ptr> errors(raw_columns.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        const auto index = next.fetch_add(1);
+        if (index >= raw_columns.size()) return;
+        try {
+          columns[index] = composite->solve_column(
+              local_handles[index],
+              as_object(raw_columns[index], "native SCC batch column"),
+              composite);
+        } catch (...) {
+          errors[index] = std::current_exception();
+        }
+      }
+    };
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    try {
+      for (std::size_t index = 0; index < worker_count; ++index)
+        workers.emplace_back(worker);
+      for (auto& thread : workers) thread.join();
+    } catch (...) {
+      for (auto& thread : workers) thread.request_stop();
+      for (auto& thread : workers)
+        if (thread.joinable()) thread.join();
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < raw_columns.size())
+        throw std::logic_error(
+            "native SCC column-batch reservation accounting underflow");
+      session->pending_local_solves -= raw_columns.size();
+      throw;
+    }
+
+    const auto failed = std::find_if(
+        errors.begin(), errors.end(), [](const auto& error) {
+          return error != nullptr;
+        });
+    if (failed != errors.end()) {
+      const auto failure = *failed;
+      {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->pending_local_solves < raw_columns.size())
+          throw std::logic_error(
+              "native SCC column-batch reservation accounting underflow");
+        session->pending_local_solves -= raw_columns.size();
+      }
+      // A batch is atomic at the retained-state boundary: successful worker
+      // temporaries are discarded and the first ordered failure is loud.
+      std::rethrow_exception(failure);
+    }
+
+    if (std::any_of(columns.begin(), columns.end(), [](const auto& column) {
+          return column.local == nullptr;
+        })) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < raw_columns.size())
+        throw std::logic_error(
+            "native SCC column-batch reservation accounting underflow");
+      session->pending_local_solves -= raw_columns.size();
+      throw std::logic_error(
+          "native SCC column batch completed without a retained local");
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < raw_columns.size())
+        throw std::logic_error(
+            "native SCC column-batch reservation accounting underflow");
+      session->pending_local_solves -= raw_columns.size();
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during SCC column batch");
+      session->locals.reserve(session->locals.size() + columns.size());
+      std::vector<std::string> inserted;
+      inserted.reserve(columns.size());
+      try {
+        for (std::size_t index = 0; index < columns.size(); ++index) {
+          if (!session->locals.emplace(
+                  local_handles[index], columns[index].local).second)
+            throw std::logic_error(
+                "native SCC column batch produced a duplicate local handle");
+          inserted.push_back(local_handles[index]);
+        }
+      } catch (...) {
+        for (const auto& handle : inserted) session->locals.erase(handle);
+        throw;
+      }
+      for (std::size_t index = 0; index < columns.size(); ++index) {
+        const auto local_stats = columns[index].local->stats();
+        ++session->total_local_solves;
+        ++session->total_scc_column_solves;
+        session->total_local_run_parse_ms += local_stats.create_parse_ms;
+        session->total_local_kernel_ms += local_stats.create_kernel_ms;
+      }
+    }
+
+    json::array column_elapsed_ms;
+    column_elapsed_ms.reserve(columns.size());
+    double column_elapsed_sum_ms = 0.0;
+    double column_elapsed_min_ms =
+        std::numeric_limits<double>::infinity();
+    double column_elapsed_max_ms = 0.0;
+    struct BlockTimingAggregate {
+      std::size_t calls = 0;
+      double parse_ms = 0.0;
+      double kernel_ms = 0.0;
+      std::uint64_t epsilon_regular_principal_factorizations = 0;
+      std::uint64_t epsilon_regular_principal_solves = 0;
+    };
+    std::map<std::pair<std::uint32_t, std::string>,
+             BlockTimingAggregate> block_timing;
+    for (const auto& column : columns) {
+      column_elapsed_ms.emplace_back(column.elapsed_ms);
+      column_elapsed_sum_ms += column.elapsed_ms;
+      column_elapsed_min_ms =
+          std::min(column_elapsed_min_ms, column.elapsed_ms);
+      column_elapsed_max_ms =
+          std::max(column_elapsed_max_ms, column.elapsed_ms);
+      for (const auto& raw_diagnostic : column.block_diagnostics) {
+        const auto& diagnostic = as_object(
+            raw_diagnostic, "native SCC block timing diagnostic");
+        const auto block = as_u32(
+            diagnostic.at("block"), "native SCC timing block");
+        const auto role = required_string(
+            diagnostic, "role");
+        auto& aggregate = block_timing[{block, role}];
+        ++aggregate.calls;
+        aggregate.parse_ms +=
+            diagnostic.at("parse_ms").as_double();
+        aggregate.kernel_ms +=
+            diagnostic.at("kernel_ms").as_double();
+        aggregate.epsilon_regular_principal_factorizations +=
+            as_u64(diagnostic.at(
+                "epsilon_regular_principal_factorizations"),
+                "native SCC timing principal factorizations");
+        aggregate.epsilon_regular_principal_solves +=
+            as_u64(diagnostic.at(
+                "epsilon_regular_principal_solves"),
+                "native SCC timing principal solves");
+      }
+    }
+    json::array block_timing_summary;
+    block_timing_summary.reserve(block_timing.size());
+    for (const auto& [key, aggregate] : block_timing)
+      block_timing_summary.push_back(json::object{
+          {"block", key.first}, {"role", key.second},
+          {"calls", aggregate.calls},
+          {"parse_ms", aggregate.parse_ms},
+          {"kernel_ms", aggregate.kernel_ms},
+          {"epsilon_regular_principal_factorizations",
+           aggregate.epsilon_regular_principal_factorizations},
+          {"epsilon_regular_principal_solves",
+           aggregate.epsilon_regular_principal_solves}});
+
+    json::array responses;
+    responses.reserve(columns.size());
+    for (auto& column : columns) {
+      // Every column strongly retains the same exact physical equation
+      // owner.  Return bounded references here; serializing the complete
+      // owner-bound residual identity once per column can otherwise require
+      // gigabytes even though no coefficient tensor crosses the bridge.
+      auto response = column.local->opaque_reference_summary();
+      response["status"] = "ok";
+      response["session"] = session->handle;
+      response["scc"] = composite->handle();
+      response["native_retained"] = true;
+      response["json_coefficients"] = 0;
+      response["execution_capability"] =
+          composite->column_execution_capability();
+      response["block_diagnostics"] =
+          std::move(column.block_diagnostics);
+      response["elapsed_ms"] = column.elapsed_ms;
+      responses.push_back(std::move(response));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"scc", composite->handle()},
+        {"results", std::move(responses)},
+        {"columns", raw_columns.size()},
+        {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"atomic_retention", true},
+        {"json_coefficients", 0}, {"elapsed_ms", elapsed_ms},
+        {"column_elapsed_ms", std::move(column_elapsed_ms)},
+        {"column_elapsed_sum_ms", column_elapsed_sum_ms},
+        {"column_elapsed_min_ms", column_elapsed_min_ms},
+        {"column_elapsed_max_ms", column_elapsed_max_ms},
+        {"block_timing_summary", std::move(block_timing_summary)}};
+  }
+
+  if (operation == "local.solve_batch") {
+    if (root.if_contains("equation_owner"))
+      require_exact_keys(root,
+          {"schema", "op", "session", "chart", "threads", "runs",
+           "metadata", "equation_owner"},
+          "native retained local batch request");
+    else
+      require_exact_keys(root,
+          {"schema", "op", "session", "chart", "threads", "runs",
+           "metadata"},
+          "native retained local batch request");
+    const auto requested_threads = as_u32(
+        root.at("threads"), "native retained local batch threads");
+    if (requested_threads == 0)
+      throw std::invalid_argument(
+          "native retained local batch threads must be positive");
+    const auto& runs = as_array(
+        root.at("runs"), "native retained local batch runs");
+    const auto& metadata = as_array(
+        root.at("metadata"), "native retained local batch metadata");
+    if (runs.empty())
+      throw std::invalid_argument(
+          "native retained local batch cannot be empty");
+    if (metadata.size() != runs.size())
+      throw std::invalid_argument(
+          "native retained local batch requires one metadata record per run");
+
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner;
+    std::vector<std::string> local_handles;
+    local_handles.reserve(runs.size());
+    {
+      // Reserve every handle and capacity slot before starting workers.  The
+      // batch is published only after every recurrence and metadata check has
+      // succeeded, so callers never observe a partial regular basis.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      if (runs.size() > session->local_capacity ||
+          session->locals.size() + session->pending_local_solves >
+              session->local_capacity - runs.size())
+        throw std::invalid_argument(
+            "persistent local capacity cannot admit the complete retained local batch");
+      chart = found->second;
+      equation_owner = chart;
+      if (const auto* requested_owner = root.if_contains("equation_owner")) {
+        if (!requested_owner->is_string() ||
+            requested_owner->as_string().empty())
+          throw std::invalid_argument(
+              "persistent local equation_owner must be a nonempty eq: handle");
+        const auto owner_found = session->regular_equation_owners.find(
+            std::string(requested_owner->as_string()));
+        if (owner_found == session->regular_equation_owners.end())
+          throw std::invalid_argument(
+              "unknown or released frame-independent regular equation owner for local batch");
+        equation_owner = owner_found->second;
+      }
+      for (std::size_t index = 0; index < runs.size(); ++index)
+        local_handles.push_back(
+            "l:" + std::to_string(session->next_local++));
+      session->pending_local_solves += runs.size();
+    }
+
+    const bool symbolic_serialized = session->domain == "symbolic";
+    const auto bounded_threads = std::min<std::size_t>(
+        {static_cast<std::size_t>(requested_threads),
+         static_cast<std::size_t>(kMaxPersistentBatchThreads), runs.size()});
+    const auto worker_count = symbolic_serialized ? std::size_t{1}
+                                                   : bounded_threads;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::shared_ptr<StoredLocalBase>> locals(runs.size());
+    std::vector<std::exception_ptr> errors(runs.size());
+    std::atomic<std::size_t> next{0};
+    auto worker = [&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        const auto index = next.fetch_add(1);
+        if (index >= runs.size()) return;
+        try {
+          locals[index] = chart->solve_local(
+              local_handles[index],
+              as_object(runs[index], "native retained local batch run"),
+              as_object(metadata[index],
+                        "native retained local batch metadata"),
+              equation_owner);
+        } catch (...) {
+          errors[index] = std::current_exception();
+        }
+      }
+    };
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    try {
+      for (std::size_t index = 0; index < worker_count; ++index)
+        workers.emplace_back(worker);
+      for (auto& thread : workers) thread.join();
+    } catch (...) {
+      for (auto& thread : workers) thread.request_stop();
+      for (auto& thread : workers)
+        if (thread.joinable()) thread.join();
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      throw;
+    }
+
+    const auto failed = std::find_if(
+        errors.begin(), errors.end(), [](const auto& error) {
+          return error != nullptr;
+        });
+    if (failed != errors.end()) {
+      const auto failure = *failed;
+      {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->pending_local_solves < runs.size())
+          throw std::logic_error(
+              "native retained local batch reservation accounting underflow");
+        session->pending_local_solves -= runs.size();
+      }
+      std::rethrow_exception(failure);
+    }
+    if (std::any_of(locals.begin(), locals.end(), [](const auto& local) {
+          return local == nullptr;
+        })) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      throw std::logic_error(
+          "native retained local batch completed without a retained local");
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves < runs.size())
+        throw std::logic_error(
+            "native retained local batch reservation accounting underflow");
+      session->pending_local_solves -= runs.size();
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during retained local batch");
+      session->locals.reserve(session->locals.size() + locals.size());
+      std::vector<std::string> inserted;
+      inserted.reserve(locals.size());
+      try {
+        for (std::size_t index = 0; index < locals.size(); ++index) {
+          if (!session->locals.emplace(
+                  local_handles[index], locals[index]).second)
+            throw std::logic_error(
+                "native retained local batch produced a duplicate local handle");
+          inserted.push_back(local_handles[index]);
+        }
+      } catch (...) {
+        for (const auto& handle : inserted) session->locals.erase(handle);
+        throw;
+      }
+      for (const auto& local : locals) {
+        const auto local_stats = local->stats();
+        ++session->total_local_solves;
+        session->total_local_run_parse_ms += local_stats.create_parse_ms;
+        session->total_local_kernel_ms += local_stats.create_kernel_ms;
+      }
+    }
+
+    json::array responses;
+    responses.reserve(locals.size());
+    for (const auto& local : locals) {
+      auto response = local->summary();
+      response["status"] = "ok";
+      response["session"] = session->handle;
+      response["native_retained"] = true;
+      response["json_coefficients"] = 0;
+      responses.push_back(std::move(response));
+    }
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return json::object{
+        {"status", "ok"}, {"session", session->handle},
+        {"chart", chart->handle()}, {"results", std::move(responses)},
+        {"attempted", runs.size()}, {"succeeded", runs.size()},
+        {"failed", 0}, {"requested_threads", requested_threads},
+        {"worker_threads", worker_count},
+        {"thread_limit", kMaxPersistentBatchThreads},
+        {"symbolic_serialized", symbolic_serialized},
+        {"atomic_retention", true}, {"json_coefficients", 0},
+        {"elapsed_ms", elapsed_ms}};
+  }
+
+  if (operation == "local.solve") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> chart;
+    std::shared_ptr<PhysicalEquationOwnerBase> equation_owner;
+    std::string local_handle;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or released persistent chart");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument("persistent local capacity is exhausted");
+      chart = found->second;
+      equation_owner = chart;
+      if (const auto* requested_owner = root.if_contains("equation_owner")) {
+        if (!requested_owner->is_string() ||
+            requested_owner->as_string().empty())
+          throw std::invalid_argument(
+              "persistent local equation_owner must be a nonempty eq: handle");
+        const auto owner_found = session->regular_equation_owners.find(
+            std::string(requested_owner->as_string()));
+        if (owner_found == session->regular_equation_owners.end())
+          throw std::invalid_argument(
+              "unknown or released frame-independent regular equation owner for local solve");
+        equation_owner = owner_found->second;
+      }
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      local = chart->solve_local(
+          local_handle, as_object(root.at("run"), "recurrence run"),
+          as_object(root.at("metadata"), "local metadata"),
+          equation_owner);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error("native local reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error("native local reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during local solve");
+      session->locals.emplace(local_handle, local);
+      const auto local_stats = local->stats();
+      ++session->total_local_solves;
+      session->total_local_run_parse_ms += local_stats.create_parse_ms;
+      session->total_local_kernel_ms += local_stats.create_kernel_ms;
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
+  if (operation == "local.apply_rational_row") {
+    require_exact_keys(root,
+        {"schema", "op", "session", "local", "row",
+         "source_checkpoint_identity", "checkpoint_identity"},
+        "native local.apply_rational_row request");
+    if (session->domain == "symbolic")
+      throw std::domain_error(
+          "native rational-row application requires exact Rational or specialized Acb coefficients");
+    const auto source_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> source;
+    std::string local_handle;
+    {
+      // Materialization runs outside the registry lock, but owns the source
+      // for its full lifetime.  The derived scalar local also retains that
+      // source as provenance after publication.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(source_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released retained local for rational-row application");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument("persistent local capacity is exhausted");
+      source = found->second;
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      if (session->domain == "rational") {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<Rational>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "rational-row source local differs from its Rational session");
+        local = build_rational_row_local<Rational>(
+            local_handle, root, session->precision_bits, typed, source);
+      } else {
+        const auto typed =
+            std::dynamic_pointer_cast<StoredLocal<ComplexBall>>(source);
+        if (!typed)
+          throw std::logic_error(
+              "rational-row source local differs from its Acb session");
+        local = build_rational_row_local<ComplexBall>(
+            local_handle, root, session->precision_bits, typed, source);
+      }
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native rational-row reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native rational-row reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during rational-row application");
+      if (!session->locals.emplace(local_handle, local).second)
+        throw std::logic_error(
+            "native rational-row application produced a duplicate local handle");
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["source_local"] = source_handle;
+    result["application_capability"] = kRetainedRationalRowCapability;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
+  if (operation == "local.endpoint_limit") {
+    if (root.if_contains("output_digits") != nullptr ||
+        root.if_contains("include_coefficients") != nullptr)
+      throw std::invalid_argument(
+          "local.endpoint_limit never exports coefficients; use the explicit "
+          "endpoint.export compatibility operation");
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    std::string endpoint_handle;
+    {
+      // Strong ownership is acquired under the session lock.  Public
+      // local.release may remove the registry token after admission without
+      // invalidating this endpoint computation.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released native local for endpoint limit");
+      if (session->endpoints.size() + session->pending_endpoint_limits >=
+          session->endpoint_capacity)
+        throw std::invalid_argument(
+            "persistent endpoint result capacity is exhausted");
+      local = found->second;
+      endpoint_handle = "e:" + std::to_string(session->next_endpoint++);
+      ++session->pending_endpoint_limits;
+    }
+
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    try {
+      endpoint = build_endpoint_limit(endpoint_handle, root, local);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_endpoint_limits == 0)
+        throw std::logic_error(
+            "native endpoint reservation accounting underflow");
+      --session->pending_endpoint_limits;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during endpoint limit");
+      session->endpoints.emplace(endpoint_handle, endpoint);
+      ++session->total_endpoint_limits;
+      session->total_endpoint_limit_ms += endpoint->elapsed_ms();
+    }
+    auto result = endpoint->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "local.match") {
+    if (session->domain != "rational")
+      throw std::invalid_argument(
+          "local.match currently supports only the exact rational regular "
+          "local capability; Acb and symbolic saturation are not routed "
+          "through it");
+    const auto& raw_basis = as_array(
+        root.at("basis"), "exact regular local match basis");
+    if (raw_basis.empty())
+      throw std::invalid_argument("local.match basis cannot be empty");
+    std::vector<std::string> basis_handles;
+    basis_handles.reserve(raw_basis.size());
+    std::set<std::string> unique_handles;
+    for (const auto& raw_handle : raw_basis) {
+      if (!raw_handle.is_string())
+        throw std::invalid_argument(
+            "local.match basis handles must be strings");
+      std::string handle(raw_handle.as_string());
+      if (!unique_handles.insert(handle).second)
+        throw std::invalid_argument(
+            "local.match basis handles must be pairwise distinct");
+      basis_handles.push_back(std::move(handle));
+    }
+    const auto incoming_handle = required_string(root, "incoming");
+    if (unique_handles.contains(incoming_handle))
+      throw std::invalid_argument(
+          "local.match incoming handle must be distinct from its basis");
+
+    std::vector<std::shared_ptr<StoredLocalBase>> basis;
+    std::shared_ptr<StoredLocalBase> incoming;
+    std::string match_handle;
+    {
+      // Resolve and strongly retain every local before releasing the session
+      // lock.  A concurrent public local.release cannot invalidate an
+      // already admitted native match operation.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (session->matches.size() + session->pending_matches >=
+          session->match_capacity)
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted");
+      for (const auto& handle : basis_handles) {
+        const auto found = session->locals.find(handle);
+        if (found == session->locals.end())
+          throw std::invalid_argument(
+              "unknown or released native local in match basis: " + handle);
+        basis.push_back(found->second);
+      }
+      const auto found = session->locals.find(incoming_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released incoming native local: " +
+            incoming_handle);
+      incoming = found->second;
+      match_handle = "m:" + std::to_string(session->next_match++);
+      ++session->pending_matches;
+    }
+
+    std::shared_ptr<StoredExactRegularMatch> match;
+    try {
+      match = build_exact_regular_match(
+          match_handle, root, basis_handles, basis, incoming_handle,
+          incoming);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native local match reservation accounting underflow");
+      --session->pending_matches;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native local match reservation accounting underflow");
+      --session->pending_matches;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during local matching");
+      session->matches.emplace(match_handle, match);
+      ++session->total_local_matches;
+      session->total_local_match_ms += match->elapsed_ms();
+    }
+    auto result = match->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "local.match_acb") {
+    if (session->domain != "acb")
+      throw std::invalid_argument(
+          "local.match_acb requires an Acb persistent session; exact rational matching remains local.match v1");
+    const auto& raw_basis = as_array(
+        root.at("basis"), "refined Acb local match basis");
+    if (raw_basis.empty())
+      throw std::invalid_argument(
+          "local.match_acb basis cannot be empty");
+    std::vector<std::string> basis_handles;
+    basis_handles.reserve(raw_basis.size());
+    std::set<std::string> unique_handles;
+    for (const auto& raw_handle : raw_basis) {
+      if (!raw_handle.is_string())
+        throw std::invalid_argument(
+            "local.match_acb basis handles must be strings");
+      std::string handle(raw_handle.as_string());
+      if (!unique_handles.insert(handle).second)
+        throw std::invalid_argument(
+            "local.match_acb basis handles must be pairwise distinct");
+      basis_handles.push_back(std::move(handle));
+    }
+    const auto incoming_handle = required_string(root, "incoming");
+    if (unique_handles.contains(incoming_handle))
+      throw std::invalid_argument(
+          "local.match_acb incoming handle must be distinct from its basis");
+
+    std::vector<std::shared_ptr<StoredLocalBase>> basis;
+    std::shared_ptr<StoredLocalBase> incoming;
+    std::string match_handle;
+    {
+      // Admission takes strong ownership of every source before releasing
+      // the session lock.  Concurrent public releases cannot invalidate the
+      // exact-point evaluation or the bounded refinement operation.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      if (session->matches.size() + session->pending_matches >=
+          session->match_capacity)
+        throw std::invalid_argument(
+            "persistent local match capacity is exhausted");
+      for (const auto& handle : basis_handles) {
+        const auto found = session->locals.find(handle);
+        if (found == session->locals.end())
+          throw std::invalid_argument(
+              "unknown or released native local in Acb match basis: " +
+              handle);
+        basis.push_back(found->second);
+      }
+      const auto found = session->locals.find(incoming_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released incoming native Acb local: " +
+            incoming_handle);
+      incoming = found->second;
+      match_handle = "m:" + std::to_string(session->next_match++);
+      ++session->pending_matches;
+    }
+
+    std::shared_ptr<StoredRefinedAcbMatch> match;
+    try {
+      match = build_refined_acb_match(
+          match_handle, root, basis_handles, basis, incoming_handle,
+          incoming, session->precision_bits,
+          checkpoint_configuration_identity(*session));
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native Acb local match reservation accounting underflow");
+      --session->pending_matches;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_matches == 0)
+        throw std::logic_error(
+            "native Acb local match reservation accounting underflow");
+      --session->pending_matches;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during Acb local matching");
+      session->matches.emplace(match_handle, match);
+      ++session->total_local_matches;
+      session->total_local_match_ms += match->elapsed_ms();
+    }
+    auto result = match->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "match.materialize_local") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "match", "checkpoint_identity"},
+        "native match.materialize_local request");
+    if (session->domain == "symbolic")
+      throw std::invalid_argument(
+          "native plan-match local materialization requires rational or Acb coefficients");
+    const auto match_handle = required_string(root, "match");
+    const auto checkpoint_identity = required_string(
+        root, "checkpoint_identity");
+    std::shared_ptr<StoredPlannedMatchHop> match;
+    std::string local_handle;
+    {
+      // Admission strongly retains the complete handoff before releasing the
+      // session lock.  The finite Laurent combination then runs natively and
+      // independently of public match/plan/basis tokens.
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or released retained match for local materialization");
+      match = std::dynamic_pointer_cast<StoredPlannedMatchHop>(found->second);
+      if (!match)
+        throw std::invalid_argument(
+            "match.materialize_local requires a plan-driven match handoff");
+      if (session->locals.size() + session->pending_local_solves >=
+          session->local_capacity)
+        throw std::invalid_argument(
+            "persistent local capacity is exhausted");
+      local_handle = "l:" + std::to_string(session->next_local++);
+      ++session->pending_local_solves;
+    }
+
+    std::shared_ptr<StoredLocalBase> local;
+    try {
+      local = match->materialize(
+          local_handle, checkpoint_identity, session->precision_bits, match);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native match materialization reservation accounting underflow");
+      --session->pending_local_solves;
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->pending_local_solves == 0)
+        throw std::logic_error(
+            "native match materialization reservation accounting underflow");
+      --session->pending_local_solves;
+      if (session->closed)
+        throw std::invalid_argument(
+            "persistent solver session closed during match materialization");
+      session->locals.emplace(local_handle, local);
+    }
+    auto result = local->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["materialization_capability"] =
+        kRetainedPlannedMatchMaterializationCapability;
+    result["native_retained"] = true;
+    result["json_coefficients"] = 0;
+    return result;
+  }
+
+  if (operation == "local.evaluate") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument("unknown or released native local solution");
+      local = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = local->evaluate(root, output_digits);
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["local"] = local->handle();
+    result["chart"] = local->source_chart();
+    return result;
+  }
+
+  if (operation == "local.certify_residual") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or released native local solution");
+      local = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = local->certify_residual(root, output_digits);
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["local"] = local->handle();
+    result["chart"] = local->source_chart();
+    return result;
+  }
+
+  if (operation == "endpoint.stats") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or released native endpoint result");
+      endpoint = found->second;
+    }
+    auto result = endpoint->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "endpoint.export") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> endpoint;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or released native endpoint result");
+      endpoint = found->second;
+    }
+    const auto output_digits = root.if_contains("output_digits")
+        ? static_cast<int>(as_i64(root.at("output_digits"), "output digits"))
+        : session->output_digits;
+    if (output_digits < 1)
+      throw std::invalid_argument("output digits must be positive");
+    auto result = endpoint->export_values(
+        required_string(root, "checkpoint_identity"), output_digits);
+    const auto export_ms = result.at("elapsed_ms").as_double();
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      ++session->total_endpoint_exports;
+      session->total_endpoint_export_ms += export_ms;
+    }
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "endpoint.release") {
+    const auto endpoint_handle = required_string(root, "endpoint");
+    std::shared_ptr<StoredEndpointResult> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->endpoints.find(endpoint_handle);
+      if (found == session->endpoints.end())
+        throw std::invalid_argument(
+            "unknown or already released native endpoint result");
+      removed = std::move(found->second);
+      session->endpoints.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", endpoint_handle},
+                        {"checkpoint_identity",
+                         removed->checkpoint_identity()}};
+  }
+
+  if (operation == "match.stats") {
+    const auto match_handle = required_string(root, "match");
+    std::shared_ptr<StoredMatchBase> match;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or released native local match");
+      match = found->second;
+    }
+    auto result = match->summary();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "match.release") {
+    const auto match_handle = required_string(root, "match");
+    std::shared_ptr<StoredMatchBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->matches.find(match_handle);
+      if (found == session->matches.end())
+        throw std::invalid_argument(
+            "unknown or already released native local match");
+      removed = std::move(found->second);
+      session->matches.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", match_handle}};
+  }
+
+  if (operation == "local.release") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument(
+            "unknown or already released native local solution");
+      removed = std::move(found->second);
+      session->locals.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", local_handle},
+                        {"chart", removed->source_chart()}};
+  }
+
+  if (operation == "local.release_terminal_factorized_owner") {
+    require_exact_keys(
+        root,
+        {"schema", "op", "session", "local",
+         "local_checkpoint_identity"},
+        "local.release_terminal_factorized_owner request");
+    const auto local_handle = required_string(root, "local");
+    const auto local_checkpoint =
+        required_string(root, "local_checkpoint_identity");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed)
+        throw std::invalid_argument("persistent solver session is closed");
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end() ||
+          local_checkpoint != found->second->checkpoint_identity())
+        throw std::invalid_argument(
+            "terminal factorized owner release has a stale local binding");
+      local = found->second;
+    }
+    auto result = local->release_terminal_factorized_owner();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    result["local"] = local_handle;
+    result["local_checkpoint_identity"] = local_checkpoint;
+    result["coefficient_retention"] = "terminal-local-only";
+    return result;
+  }
+
+  if (operation == "local.stats") {
+    const auto local_handle = required_string(root, "local");
+    std::shared_ptr<StoredLocalBase> local;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->locals.find(local_handle);
+      if (found == session->locals.end())
+        throw std::invalid_argument("unknown or released native local solution");
+      local = found->second;
+    }
+    auto result = local->stats_json();
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "scc.stats") {
+    const auto diagnostic_page_offset = root.if_contains("page_offset")
+        ? static_cast<std::size_t>(as_u64(root.at("page_offset"),
+                                          "diagnostic page offset"))
+        : 0U;
+    const auto requested_page_size = root.if_contains("page_size")
+        ? static_cast<std::size_t>(as_u64(root.at("page_size"),
+                                          "diagnostic page size"))
+        : protocol::kDiagnosticPageDefault;
+    if (requested_page_size == 0 ||
+        requested_page_size > protocol::kDiagnosticPageMax)
+      throw std::invalid_argument(
+          "diagnostic page size must lie in 1.." +
+          std::to_string(protocol::kDiagnosticPageMax));
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> composite;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or released persistent SCC chart");
+      composite = found->second;
+    }
+    auto result = composite->diagnostic_page(
+        diagnostic_page_offset, requested_page_size);
+    result["status"] = "ok";
+    result["session"] = session->handle;
+    return result;
+  }
+
+  if (operation == "scc.release") {
+    const auto scc_handle = required_string(root, "scc");
+    std::shared_ptr<CompositeSCCChartBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->sccs.find(scc_handle);
+      if (found == session->sccs.end())
+        throw std::invalid_argument(
+            "unknown or already released persistent SCC chart");
+      removed = std::move(found->second);
+      session->scc_handles_by_key.erase(removed->key());
+      session->sccs.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", scc_handle}};
+  }
+
+  if (operation == "chart.release") {
+    const auto chart_handle = required_string(root, "chart");
+    std::shared_ptr<PreparedChartBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->charts.find(chart_handle);
+      if (found == session->charts.end())
+        throw std::invalid_argument("unknown or already released chart");
+      removed = found->second;
+      session->handles_by_key.erase(removed->key());
+      session->charts.erase(found);
+    }
+    return json::object{{"status", "ok"}, {"released", chart_handle}};
+  }
+
+  if (operation == "regular_equation.release") {
+    const auto owner_handle = required_string(root, "equation_owner");
+    std::shared_ptr<RegularPhysicalEquationOwnerBase> removed;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      const auto found = session->regular_equation_owners.find(
+          owner_handle);
+      if (found == session->regular_equation_owners.end())
+        throw std::invalid_argument(
+            "unknown or already released regular equation owner");
+      removed = found->second;
+      session->regular_equation_owner_handles_by_key.erase(
+          removed->key());
+      session->regular_equation_owners.erase(found);
+    }
+    return json::object{{"status", "ok"},
+                        {"released", owner_handle},
+                        {"capability",
+                         kFrameIndependentRegularEquationOwnerCapability}};
+  }
+
+  if (operation == "session.counters") {
+    require_exact_keys(root, {"schema", "op", "session"},
+                       "session.counters request");
+    // This endpoint is deliberately fixed-size.  Production checkpoint and
+    // orchestration code needs session-level counters, not a recursively
+    // materialized diagnostic dump of every retained object.  In particular,
+    // do not call stats_json()/summary() here: retained derivations may contain
+    // complete local tensors and can be many gigabytes in a large transport.
+    std::lock_guard<std::mutex> lock(session->mutex);
+    std::uint64_t visible_local_coefficients = 0;
+    std::uint64_t visible_local_shared_owners = 0;
+    std::uint64_t maximum_visible_local_shared_owners = 0;
+    for (const auto& [ignored, local] : session->locals) {
+      (void)ignored;
+      if (!local) continue;
+      visible_local_coefficients += local->stats().coefficient_count;
+      const auto owners = static_cast<std::uint64_t>(local.use_count());
+      visible_local_shared_owners += owners;
+      maximum_visible_local_shared_owners =
+          std::max(maximum_visible_local_shared_owners, owners);
+    }
+    const auto& local_lifetimes = stored_local_lifetime_counters();
+    return json::object{
+        {"status", "ok"},
+        {"session", session->handle},
+        {"scope", "fixed-session-counters"},
+        {"domain", session->domain},
+        {"precision_bits", session->precision_bits},
+        {"charts", session->charts.size()},
+        {"regular_equation_owners",
+         session->regular_equation_owners.size()},
+        {"locals", session->locals.size()},
+        {"visible_local_coefficients", visible_local_coefficients},
+        {"visible_local_shared_owners", visible_local_shared_owners},
+        {"maximum_visible_local_shared_owners",
+         maximum_visible_local_shared_owners},
+        {"process_local_objects_constructed",
+         local_lifetimes.constructed.load(std::memory_order_relaxed)},
+        {"process_local_objects_destroyed",
+         local_lifetimes.destroyed.load(std::memory_order_relaxed)},
+        {"process_local_objects_live",
+         local_lifetimes.live.load(std::memory_order_relaxed)},
+        {"process_local_coefficients_constructed",
+         local_lifetimes.constructed_coefficients.load(
+             std::memory_order_relaxed)},
+        {"process_local_coefficients_destroyed",
+         local_lifetimes.destroyed_coefficients.load(
+             std::memory_order_relaxed)},
+        {"process_local_coefficients_live",
+         local_lifetimes.live_coefficients.load(
+             std::memory_order_relaxed)},
+        {"matches", session->matches.size()},
+        {"endpoints", session->endpoints.size()},
+        {"tile_plans", session->tile_plans.size()},
+        {"transport_states", session->transport_states.size()},
+        {"line_results", session->line_results.size()},
+        {"transport_pair_streams", session->transport_pair_streams.size()},
+        {"scc_charts", session->sccs.size()},
+        {"pending_local_solves", session->pending_local_solves},
+        {"pending_matches", session->pending_matches},
+        {"pending_endpoint_limits", session->pending_endpoint_limits},
+        {"pending_tile_plans", session->pending_tile_plans},
+        {"pending_transport_states", session->pending_transport_states},
+        {"pending_line_integrations", session->pending_line_integrations},
+        {"local_solves", session->total_local_solves},
+        {"scc_column_solves", session->total_scc_column_solves},
+        {"local_matches", session->total_local_matches},
+        {"endpoint_limits", session->total_endpoint_limits},
+        {"endpoint_exports", session->total_endpoint_exports},
+        {"tile_plans_created", session->total_tile_plans},
+        {"transport_arm_marches", session->total_transport_arm_marches},
+        {"transport_contractions", session->total_transport_contractions},
+        {"transport_observables", session->total_transport_observables},
+        {"transport_pair_contractions",
+         session->total_transport_pair_contractions},
+        {"transport_pair_observables",
+         session->total_transport_pair_observables},
+        {"transport_endpoint_batches",
+         session->total_transport_endpoint_batches},
+        {"transport_endpoint_rows", session->total_transport_endpoint_rows},
+        {"transport_physical_value_hop_attempts",
+         session->total_transport_physical_value_hop_attempts},
+        {"transport_physical_value_hop_successes",
+         session->total_transport_physical_value_hop_successes},
+        {"transport_physical_value_hop_ineligible",
+         session->total_transport_physical_value_hop_ineligible},
+        {"transport_framed_basis_hops",
+         session->total_transport_framed_basis_hops},
+        {"line_integrations", session->total_line_integrations},
+        {"line_exports", session->total_line_exports},
+        {"checkpoint_generation", session->checkpoint_generation},
+        {"checkpoint_restore_count", session->checkpoint_restore_count}};
+  }
+
+  if (operation == "session.stats") {
+    const auto diagnostic_page_offset = root.if_contains("page_offset")
+        ? static_cast<std::size_t>(as_u64(root.at("page_offset"),
+                                          "diagnostic page offset"))
+        : 0U;
+    const auto requested_page_size = root.if_contains("page_size")
+        ? static_cast<std::size_t>(as_u64(root.at("page_size"),
+                                          "diagnostic page size"))
+        : protocol::kDiagnosticPageDefault;
+    if (requested_page_size == 0 ||
+        requested_page_size > protocol::kDiagnosticPageMax)
+      throw std::invalid_argument(
+          "diagnostic page size must lie in 1.." +
+          std::to_string(protocol::kDiagnosticPageMax));
+    const auto in_diagnostic_page = [&](const std::size_t index) {
+      return index >= diagnostic_page_offset &&
+             index - diagnostic_page_offset < requested_page_size;
+    };
+    std::vector<std::shared_ptr<PreparedChartBase>> charts;
+    std::size_t regular_equation_owners = 0;
+    std::vector<std::shared_ptr<StoredLocalBase>> locals;
+    std::vector<std::shared_ptr<StoredMatchBase>> matches;
+    std::vector<std::shared_ptr<StoredEndpointResult>> endpoints;
+    std::vector<std::shared_ptr<StoredTilePlan>> tile_plans;
+    std::vector<std::shared_ptr<StoredTransportArmState>> transport_states;
+    std::vector<std::shared_ptr<StoredLineResult>> line_results;
+    std::vector<std::shared_ptr<CompositeSCCChartBase>> sccs;
+    std::size_t pending_local_solves = 0;
+    std::size_t pending_matches = 0;
+    std::size_t pending_endpoint_limits = 0;
+    std::size_t pending_tile_plans = 0;
+    std::size_t pending_transport_states = 0;
+    std::size_t pending_line_integrations = 0;
+    std::size_t transport_pair_streams = 0;
+    std::uint64_t total_local_solves = 0;
+    std::uint64_t total_scc_column_solves = 0;
+    std::uint64_t total_local_matches = 0;
+    std::uint64_t checkpoint_generation = 0;
+    std::uint64_t checkpoint_restore_count = 0;
+    std::string restored_from_checkpoint_identity;
+    std::uint64_t total_endpoint_limits = 0;
+    std::uint64_t total_endpoint_exports = 0;
+    std::uint64_t total_tile_plans = 0;
+    std::uint64_t total_transport_arm_marches = 0;
+    std::uint64_t total_transport_contractions = 0;
+    std::uint64_t total_transport_observables = 0;
+    std::uint64_t total_transport_pair_contractions = 0;
+    std::uint64_t total_transport_pair_observables = 0;
+    std::uint64_t total_transport_endpoint_batches = 0;
+    std::uint64_t total_transport_endpoint_rows = 0;
+    std::uint64_t total_line_integrations = 0;
+    std::uint64_t total_line_exports = 0;
+    double total_local_run_parse_ms = 0.0, total_local_kernel_ms = 0.0;
+    double total_local_match_ms = 0.0;
+    double total_endpoint_limit_ms = 0.0;
+    double total_endpoint_export_ms = 0.0;
+    double total_tile_plan_ms = 0.0;
+    double total_transport_arm_ms = 0.0;
+    double total_transport_contraction_ms = 0.0;
+    double total_transport_pair_contraction_ms = 0.0;
+    double total_transport_endpoint_batch_ms = 0.0;
+    double total_line_integration_ms = 0.0;
+    double total_line_export_ms = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      for (const auto& [ignored, chart] : session->charts)
+        charts.push_back(chart);
+      regular_equation_owners =
+          session->regular_equation_owners.size();
+      for (const auto& [ignored, local] : session->locals)
+        locals.push_back(local);
+      for (const auto& [ignored, match] : session->matches)
+        matches.push_back(match);
+      for (const auto& [ignored, endpoint] : session->endpoints)
+        endpoints.push_back(endpoint);
+      for (const auto& [ignored, plan] : session->tile_plans)
+        tile_plans.push_back(plan);
+      for (const auto& [ignored, state] : session->transport_states)
+        transport_states.push_back(state);
+      for (const auto& [ignored, result] : session->line_results)
+        line_results.push_back(result);
+      for (const auto& [ignored, composite] : session->sccs)
+        sccs.push_back(composite);
+      pending_local_solves = session->pending_local_solves;
+      pending_matches = session->pending_matches;
+      pending_endpoint_limits = session->pending_endpoint_limits;
+      pending_tile_plans = session->pending_tile_plans;
+      pending_transport_states = session->pending_transport_states;
+      pending_line_integrations = session->pending_line_integrations;
+      transport_pair_streams = session->transport_pair_streams.size();
+      total_local_solves = session->total_local_solves;
+      total_scc_column_solves = session->total_scc_column_solves;
+      total_local_matches = session->total_local_matches;
+      total_endpoint_limits = session->total_endpoint_limits;
+      total_endpoint_exports = session->total_endpoint_exports;
+      total_tile_plans = session->total_tile_plans;
+      total_transport_arm_marches = session->total_transport_arm_marches;
+      total_transport_contractions = session->total_transport_contractions;
+      total_transport_observables = session->total_transport_observables;
+      total_transport_pair_contractions =
+          session->total_transport_pair_contractions;
+      total_transport_pair_observables =
+          session->total_transport_pair_observables;
+      total_transport_endpoint_batches =
+          session->total_transport_endpoint_batches;
+      total_transport_endpoint_rows =
+          session->total_transport_endpoint_rows;
+      total_line_integrations = session->total_line_integrations;
+      total_line_exports = session->total_line_exports;
+      total_local_run_parse_ms = session->total_local_run_parse_ms;
+      total_local_kernel_ms = session->total_local_kernel_ms;
+      total_local_match_ms = session->total_local_match_ms;
+      checkpoint_generation = session->checkpoint_generation;
+      checkpoint_restore_count = session->checkpoint_restore_count;
+      restored_from_checkpoint_identity =
+          session->restored_from_checkpoint_identity;
+      total_endpoint_limit_ms = session->total_endpoint_limit_ms;
+      total_endpoint_export_ms = session->total_endpoint_export_ms;
+      total_tile_plan_ms = session->total_tile_plan_ms;
+      total_transport_arm_ms = session->total_transport_arm_ms;
+      total_transport_contraction_ms =
+          session->total_transport_contraction_ms;
+      total_transport_pair_contraction_ms =
+          session->total_transport_pair_contraction_ms;
+      total_transport_endpoint_batch_ms =
+          session->total_transport_endpoint_batch_ms;
+      total_line_integration_ms = session->total_line_integration_ms;
+      total_line_export_ms = session->total_line_export_ms;
+    }
+    const auto by_handle = [](const auto& left, const auto& right) {
+      return left->handle() < right->handle();
+    };
+    std::sort(charts.begin(), charts.end(), by_handle);
+    std::sort(locals.begin(), locals.end(), by_handle);
+    std::sort(matches.begin(), matches.end(), by_handle);
+    std::sort(endpoints.begin(), endpoints.end(), by_handle);
+    std::sort(tile_plans.begin(), tile_plans.end(), by_handle);
+    std::sort(transport_states.begin(), transport_states.end(), by_handle);
+    std::sort(line_results.begin(), line_results.end(), by_handle);
+    std::sort(sccs.begin(), sccs.end(), by_handle);
+    std::uint64_t runs = 0;
+    double prepare_parse_ms = 0.0, run_parse_ms = 0.0, kernel_ms = 0.0;
+    json::array chart_stats;
+    for (std::size_t index = 0; index < charts.size(); ++index) {
+      const auto& chart = charts[index];
+      const auto stats = chart->stats();
+      runs += stats.runs;
+      prepare_parse_ms += stats.prepare_parse_ms;
+      run_parse_ms += stats.run_parse_ms;
+      kernel_ms += stats.kernel_ms;
+      if (in_diagnostic_page(index)) chart_stats.push_back(json::object{
+          {"chart", chart->handle()}, {"key", chart->key()},
+          {"dimension", chart->dimension()},
+          {"frame_base", chart->frame_base()},
+          {"frame_width", chart->frame_width()}, {"runs", stats.runs},
+          {"d0_inverse_mode", chart->d0_inverse_mode()},
+          {"local_solves", stats.local_runs},
+          {"scc_components", chart->scc().component_count},
+          {"scc_structural_edges", chart->scc().structural_edges.size()},
+          {"scc_condensation_edges", chart->scc().condensation_edges.size()},
+          {"scc_topological_order",
+           encode_indices(chart->scc().topological_order)},
+          {"scc_coupling_depth", chart->scc().coupling_depth},
+          {"prepare_parse_ms", stats.prepare_parse_ms},
+          {"run_parse_ms", stats.run_parse_ms},
+          {"kernel_ms", stats.kernel_ms},
+          {"local_run_parse_ms", stats.local_run_parse_ms},
+          {"local_kernel_ms", stats.local_kernel_ms}});
+    }
+    std::uint64_t local_evaluations = 0;
+    std::uint64_t local_residual_certifications = 0;
+    std::uint64_t local_endpoint_limits = 0;
+    std::uint64_t local_line_integrations = 0;
+    std::uint64_t local_tail_certificate_requests = 0;
+    std::uint64_t local_tail_certificate_certified = 0;
+    std::uint64_t local_tail_certificate_inconclusive = 0;
+    std::uint64_t local_tail_certificate_unsupported = 0;
+    std::size_t local_coefficients = 0;
+    double local_evaluate_ms = 0.0, local_residual_certify_ms = 0.0;
+    double local_endpoint_limit_ms = 0.0;
+    double local_line_integration_ms = 0.0;
+    json::array local_stats;
+    for (std::size_t index = 0; index < locals.size(); ++index) {
+      const auto& local = locals[index];
+      const auto stats = local->stats();
+      local_evaluations += stats.evaluations;
+      local_residual_certifications += stats.residual_certifications;
+      local_endpoint_limits += stats.endpoint_limits;
+      local_line_integrations += stats.line_integrations;
+      local_tail_certificate_requests += stats.tail_certificate_requests;
+      local_tail_certificate_certified += stats.tail_certificate_certified;
+      local_tail_certificate_inconclusive +=
+          stats.tail_certificate_inconclusive;
+      local_tail_certificate_unsupported +=
+          stats.tail_certificate_unsupported;
+      local_coefficients += stats.coefficient_count;
+      local_evaluate_ms += stats.evaluate_ms;
+      local_residual_certify_ms += stats.residual_certify_ms;
+      local_endpoint_limit_ms += stats.endpoint_limit_ms;
+      local_line_integration_ms += stats.line_integration_ms;
+      if (in_diagnostic_page(index)) {
+        auto encoded = local->opaque_reference_summary();
+        encoded["diagnostic_detail"] = "bounded-reference";
+        local_stats.push_back(std::move(encoded));
+      }
+    }
+    json::array scc_stats;
+    for (std::size_t index = 0; index < sccs.size(); ++index)
+      if (in_diagnostic_page(index))
+        scc_stats.push_back(json::object{
+            {"scc", sccs[index]->handle()},
+            {"key", sccs[index]->key()},
+            {"dimension", sccs[index]->dimension()},
+            {"execution_capability",
+             sccs[index]->column_execution_capability()},
+            {"diagnostic_detail", "bounded-reference"}});
+    json::array match_stats;
+    for (std::size_t index = 0; index < matches.size(); ++index)
+      if (in_diagnostic_page(index))
+        match_stats.push_back(json::object{
+            {"match", matches[index]->handle()},
+            {"diagnostic_detail", "bounded-reference"}});
+    json::array endpoint_stats;
+    for (std::size_t index = 0; index < endpoints.size(); ++index)
+      if (in_diagnostic_page(index))
+        endpoint_stats.push_back(json::object{
+            {"endpoint", endpoints[index]->handle()},
+            {"diagnostic_detail", "bounded-reference"}});
+    json::array tile_plan_stats;
+    for (std::size_t index = 0; index < tile_plans.size(); ++index)
+      if (in_diagnostic_page(index))
+        tile_plan_stats.push_back(json::object{
+            {"tile_plan", tile_plans[index]->handle()},
+            {"diagnostic_detail", "bounded-reference"}});
+    json::array transport_state_stats;
+    for (std::size_t index = 0; index < transport_states.size(); ++index)
+      if (in_diagnostic_page(index))
+        transport_state_stats.push_back(json::object{
+            {"transport_state", transport_states[index]->handle()},
+            {"diagnostic_detail", "bounded-reference"}});
+    json::array line_result_stats;
+    for (std::size_t index = 0; index < line_results.size(); ++index)
+      if (in_diagnostic_page(index))
+        line_result_stats.push_back(json::object{
+            {"line", line_results[index]->handle()},
+            {"diagnostic_detail", "bounded-reference"}});
+    const auto diagnostic_total = std::max(
+        {charts.size(), locals.size(), matches.size(), endpoints.size(),
+         tile_plans.size(), transport_states.size(), line_results.size(),
+         sccs.size()});
+    const auto diagnostic_page_begin = std::min(
+        diagnostic_total, diagnostic_page_offset);
+    const auto diagnostic_page_end = diagnostic_page_begin + std::min(
+        diagnostic_total - diagnostic_page_begin, requested_page_size);
+    const auto diagnostic_has_more = diagnostic_page_end < diagnostic_total;
+    return json::object{{"status", "ok"}, {"session", session->handle},
+                        {"domain", session->domain},
+                        {"precision_bits", session->precision_bits},
+                        {"charts", charts.size()}, {"runs", runs},
+                        {"regular_equation_owners",
+                         regular_equation_owners},
+                        {"locals", locals.size()},
+                        {"matches", matches.size()},
+                        {"endpoints", endpoints.size()},
+                        {"tile_plans", tile_plans.size()},
+                        {"transport_states", transport_states.size()},
+                        {"line_results", line_results.size()},
+                        {"transport_pair_streams", transport_pair_streams},
+                        {"scc_charts", sccs.size()},
+                        {"pending_local_solves", pending_local_solves},
+                        {"pending_matches", pending_matches},
+                        {"pending_endpoint_limits", pending_endpoint_limits},
+                        {"pending_tile_plans", pending_tile_plans},
+                        {"pending_transport_states",
+                         pending_transport_states},
+                        {"pending_line_integrations",
+                         pending_line_integrations},
+                        {"local_solves", total_local_solves},
+                        {"local_matches", total_local_matches},
+                        {"endpoint_limits", total_endpoint_limits},
+                        {"endpoint_exports", total_endpoint_exports},
+                        {"tile_plans_created", total_tile_plans},
+                        {"transport_arm_marches",
+                         total_transport_arm_marches},
+                        {"transport_contractions",
+                         total_transport_contractions},
+                        {"transport_observables",
+                         total_transport_observables},
+                        {"transport_pair_contractions",
+                         total_transport_pair_contractions},
+                        {"transport_pair_observables",
+                         total_transport_pair_observables},
+                        {"transport_endpoint_batches",
+                         total_transport_endpoint_batches},
+                        {"transport_endpoint_rows",
+                         total_transport_endpoint_rows},
+                        {"line_integrations", total_line_integrations},
+                        {"line_exports", total_line_exports},
+                        {"local_match_capability",
+                         session->domain == "rational"
+                             ? kExactRegularLocalMatchCapability
+                             : "unsupported"},
+                        {"acb_local_match_capability",
+                         session->domain == "acb"
+                             ? kRefinedAcbLocalMatchCapability
+                             : "unsupported"},
+                        {"endpoint_limit_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedEndpointLimitCapability},
+                        {"planned_endpoint_limit_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedEndpointLimitCapability},
+                        {"tile_plan_capability", kRetainedTilePlanCapability},
+                        {"single_arm_tile_plan_capability",
+                         kRetainedSingleArmTilePlanCapability},
+                        {"planned_match_hop_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchHopCapability},
+                        {"planned_match_materialization_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedPlannedMatchMaterializationCapability},
+                        {"rational_row_application_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedRationalRowCapability},
+                        {"line_integration_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedStoredLineCapability},
+                        {"parallel_transport_arm_state_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedParallelTransportArmStateCapability},
+                        {"transport_arm_state_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmStateCapability},
+                        {"transport_arm_contraction_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportArmContractionCapability},
+                        {"transport_pair_contraction_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportPairContractionCapability},
+                        {"transport_pair_stream_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportPairStreamCapability},
+                        {"transport_endpoint_batch_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedTransportEndpointBatchCapability},
+                        {"certified_tail_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRegularTailMajorantCapability},
+                        {"certified_line_integration_capability",
+                         session->domain == "symbolic"
+                             ? "unsupported"
+                             : kRetainedCertifiedLineCapability},
+                        {"scc_column_solves", total_scc_column_solves},
+                        {"local_evaluations", local_evaluations},
+                        {"local_residual_certifications",
+                         local_residual_certifications},
+                        {"local_endpoint_limits", local_endpoint_limits},
+                        {"local_line_integrations",
+                         local_line_integrations},
+                        {"local_tail_certificate_requests",
+                         local_tail_certificate_requests},
+                        {"local_tail_certificate_certified",
+                         local_tail_certificate_certified},
+                        {"local_tail_certificate_inconclusive",
+                         local_tail_certificate_inconclusive},
+                        {"local_tail_certificate_unsupported",
+                         local_tail_certificate_unsupported},
+                        {"local_coefficient_count", local_coefficients},
+                        {"static_tensor_copies", 0},
+                        {"prepare_parse_ms", prepare_parse_ms},
+                        {"run_parse_ms", run_parse_ms},
+                        {"kernel_ms", kernel_ms},
+                        {"local_run_parse_ms", total_local_run_parse_ms},
+                        {"local_kernel_ms", total_local_kernel_ms},
+                        {"local_evaluate_ms", local_evaluate_ms},
+                        {"local_residual_certify_ms",
+                         local_residual_certify_ms},
+                        {"local_endpoint_limit_ms", local_endpoint_limit_ms},
+                        {"local_line_integration_ms",
+                         local_line_integration_ms},
+                        {"local_match_ms", total_local_match_ms},
+                        {"checkpoint_generation", checkpoint_generation},
+                        {"checkpoint_restore_count",
+                         checkpoint_restore_count},
+                        {"restored_from_checkpoint_identity",
+                         restored_from_checkpoint_identity.empty()
+                             ? json::value(nullptr)
+                             : json::value(
+                                   restored_from_checkpoint_identity)},
+                        {"endpoint_limit_ms", total_endpoint_limit_ms},
+                        {"endpoint_export_ms", total_endpoint_export_ms},
+                        {"tile_plan_ms", total_tile_plan_ms},
+                        {"transport_arm_ms", total_transport_arm_ms},
+                        {"transport_contraction_ms",
+                         total_transport_contraction_ms},
+                        {"transport_pair_contraction_ms",
+                         total_transport_pair_contraction_ms},
+                        {"transport_endpoint_batch_ms",
+                         total_transport_endpoint_batch_ms},
+                        {"line_integration_ms", total_line_integration_ms},
+                        {"line_export_ms", total_line_export_ms},
+                        {"diagnostics_page",
+                         json::object{
+                             {"offset", diagnostic_page_offset},
+                             {"size", requested_page_size},
+                             {"returned_through", diagnostic_page_end},
+                             {"total", diagnostic_total},
+                             {"has_more", diagnostic_has_more},
+                             {"next_offset",
+                              diagnostic_has_more
+                                  ? json::value(diagnostic_page_end)
+                                  : json::value(nullptr)}}},
+                        {"chart_stats", std::move(chart_stats)},
+                        {"local_stats", std::move(local_stats)},
+                        {"match_stats", std::move(match_stats)},
+                        {"endpoint_stats", std::move(endpoint_stats)},
+                        {"tile_plan_stats", std::move(tile_plan_stats)},
+                        {"transport_state_stats",
+                         std::move(transport_state_stats)},
+                        {"line_result_stats", std::move(line_result_stats)},
+                        {"scc_stats", std::move(scc_stats)}};
+  }
+
+  throw std::invalid_argument("unknown persistent solver operation: " + operation);
+}

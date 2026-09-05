@@ -31,6 +31,15 @@ If[MemberQ[{"1loop","zmz","mzz","zzz"},family],
  ph1=MapAt[Transpose,samples[[1]],2];ph6=MapAt[Transpose,samples[[If[highPrecision,2,6]]],2];
  config={AccuracyGoal->15,ExpansionOrder->40,DeltaPrescriptions->{p1s+I δ,s12+I δ,s15+I δ,s23+I δ,s34+I δ,s45+I δ},MatrixDirectory->work,WorkingPrecision->150,ChopPrecision->100};
  If[highPrecision,config=Join[config,{AccuracyGoal->128,DivisionOrder->4,ExpansionOrder->230,WorkingPrecision->280,ChopPrecision->230}]];
+ If[highPrecision,
+  (* These are published integrand normalizations, not signs fitted to values. *)
+  basisSource=FileNameJoin[{data,"zzz","pureBasis-zzz.m"}];
+  basis=Flatten[Last/@Get[basisSource]]/.Insertion[q_]:>q;
+  basis=basis/.roots;
+  prefactors=Map[Function[q,Times@@DeleteDuplicates[Cases[q,a:Power[_,r_Rational]/;Denominator[r]==2:>a,{0,Infinity}]]],basis];
+  assert[Length[prefactors]===Length[ph1[[2]]],"Published basis dimension mismatch."];
+  assert[And@@MapThread[FreeQ[Cancel[#1/#2],Power[_,_Rational]]&,{basis,prefactors}],"A basis normalization did not factor algebraically."];
+  config=Join[config,{BasisPrefactors->prefactors}]];
  loaded=LoadConfiguration[config];assert[!FailureQ[loaded],loaded];
  boundary=PrepareBoundaryConditions[ph1[[2]],ph1[[1]]];assert[!FailureQ[boundary],boundary];
  result=TransportTo[boundary,ph6[[1]]];assert[!FailureQ[result],result];

@@ -41,7 +41,7 @@ struct Compiled {
   ExactField field;
   std::vector<Exact> squares,root_derivatives;
   std::vector<Entry> entries;
-  std::vector<Exact> letters;
+  std::vector<Exact> letters,basis_prefactors;
   std::vector<CanonicalEntry> canonical_entries;
   bool canonical=true;
   std::vector<B> singularities;
@@ -70,6 +70,14 @@ inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong 
   for(const auto& kv:request.at("paths").as_object())paths.emplace(std::string(kv.key()),algebra.extract(data::Reader(string(kv.value())).read()));
   std::vector<data::Expr> expressions;
   for(const auto& v:request.at("entries").as_array())expressions.push_back(algebra.extract(data::Reader(string(v.as_object().at("expression"))).read()));
+  std::vector<data::Expr> prefactors;
+  if(auto supplied=request.if_contains("basis_prefactors")) {
+    if(!supplied->is_array() || supplied->as_array().size()!=d)throw std::invalid_argument("basis_prefactors requires one expression string per component");
+    for(const auto& value:supplied->as_array()) {
+      if(!value.is_string())throw std::invalid_argument("basis_prefactors entries must be expression strings");
+      prefactors.push_back(algebra.extract(data::Reader(string(value)).read()));
+    }
+  }
   std::vector<std::string> names{"x","I"};for(unsigned r=0;r<algebra.radicands.size();++r)names.push_back("r"+std::to_string(r));
   Compiled out(names,d,k);Exact x(out.field,"x"),imag(out.field,"I");
   std::map<std::string,Exact> vars{{"x",x},{"I",imag}};
@@ -79,6 +87,7 @@ inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong 
     auto square=evaluate_exact(e,x,vars);out.squares.push_back(square);
     auto derivative=out.derivative(square)/(x.constant(2)*x.variable(out.squares.size()+1));out.root_derivatives.push_back(std::move(derivative));
   }
+  for(const auto& prefactor:prefactors)out.basis_prefactors.push_back(out.reduced(evaluate_exact(prefactor,x,vars)));
   unsigned index=0;std::map<std::pair<std::string,std::string>,Exact> prepared_coefficients;std::map<std::string,unsigned> letter_ids;
   for(const auto& v:request.at("entries").as_array()) {
     const auto& o=v.as_object();known_keys(o,{"row","column","epsilon","variable","expression","coefficient"},"matrix entry");unsigned row=integer(o,"row",-1,0,d-1),col=integer(o,"column",-1,0,d-1),eps=integer(o,"epsilon",0,0,100);
@@ -131,9 +140,11 @@ inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong 
   // candidate is discarded only when every actual denominator and radicand
   // excludes zero on the continuously transported sheet at that candidate.
   out.singularities.erase(std::remove_if(out.singularities.begin(),out.singularities.end(),[&](const B& candidate) {
-    if(!arb_contains_zero(acb_imagref(candidate.raw())) || !arb_is_nonnegative(acb_realref(candidate.raw())) ||
-       !arb_le(acb_realref(candidate.raw()),acb_realref(B(1).raw())))return false;
-    B point;arb_set(acb_realref(point.raw()),acb_realref(candidate.raw()));
+    if(!arb_contains_zero(acb_imagref(candidate.raw())))return false;
+    // Root isolation may round a real endpoint root to a ball straddling 0 or
+    // 1. Check its intersection with the path, not whole-ball containment.
+    B point,domain=B::from_strings("1/2");arb_add_error_2exp_si(acb_realref(domain.raw()),-1);
+    if(!arb_intersection(acb_realref(point.raw()),acb_realref(candidate.raw()),acb_realref(domain.raw()),bits))return false;
     Jet context(0,1,bits);context.set(0,point);std::map<std::string,Jet> env{{"x",context}};
     for(unsigned root=0;root<out.square_polynomials.size();++root) {
       auto square=out.square_polynomials[root].evaluate_polynomial(point);if(square.contains_zero())return false;
@@ -163,6 +174,71 @@ inline json::array matrix_json(const Boundary& values,long digits) {
 }
 inline B magnitude(const B& v) {B b;acb_abs(acb_realref(b.raw()),v.raw(),B::precision());return b;}
 inline B arithmetic_error(const B& v) {B b;mag_t m;mag_init(m);mag_add(m,arb_radref(acb_realref(v.raw())),arb_radref(acb_imagref(v.raw())));arf_set_mag(arb_midref(acb_realref(b.raw())),m);mag_clear(m);return b;}
+// Endpoint normalization is supplied mathematical basis data. It is never
+// inferred from a component's value, a reference result, or a family name.
+inline std::vector<B> principal_roots_at(const Compiled& c,const B& point) {
+  std::vector<Exact> replacements;
+  if(point.is_finite() && acb_is_exact(point.raw()) && !c.squares.empty()) {
+    const auto rational_string=[](const arf_t coordinate) {
+      fmpq_t q;fmpq_init(q);arf_get_fmpq(q,coordinate);
+      char* raw=fmpq_get_str(nullptr,10,q);std::string text(raw);flint_free(raw);fmpq_clear(q);return text;
+    };
+    const auto& model=c.squares.front();
+    for(unsigned i=0;i<model.variables().size();++i)replacements.push_back(model.variable(i));
+    replacements[0]=Exact(c.field,rational_string(arb_midref(acb_realref(point.raw()))))+
+      model.variable(1)*Exact(c.field,rational_string(arb_midref(acb_imagref(point.raw()))));
+  }
+  std::vector<B> roots;for(unsigned r=0;r<c.square_polynomials.size();++r) {
+    B square;
+    if(!replacements.empty()) {
+      // Cancel endpoint polynomial coefficients exactly before rounding. Tiny
+      // artificial imaginary intervals on a negative real radicand straddle
+      // the principal square-root cut and otherwise destroy its precision.
+      auto exact=c.reduced(c.squares[r].substitute(replacements));Jet context(0,1,B::precision());
+      square=evaluate(data::Reader(exact.str()).read(),context,{}).at(0);
+    } else square=c.square_polynomials[r].evaluate_polynomial(point);
+    B root;acb_sqrt(root.raw(),square.raw(),B::precision());
+    if(!root.is_finite())throw std::invalid_argument("non-finite principal endpoint root");roots.push_back(std::move(root));
+  }return roots;
+}
+inline std::vector<B> basis_prefactor_ratios(const Compiled& c,const B& endpoint,const std::vector<B>& continued_roots) {
+  if(c.basis_prefactors.empty())return {};
+  if(continued_roots.size()!=c.square_polynomials.size())throw std::invalid_argument("basis prefactor root dimensions");
+  Jet point(0,1,B::precision());point.set(0,endpoint);std::map<std::string,Jet> continued{{"x",point}},principal{{"x",point}};
+  auto principal_roots=principal_roots_at(c,endpoint);
+  for(unsigned r=0;r<continued_roots.size();++r) {
+    if(!continued_roots[r].is_finite())throw std::invalid_argument("non-finite continued endpoint root");
+    auto a=point.constant(0),b=point.constant(0);a.set(0,continued_roots[r]);b.set(0,principal_roots[r]);
+    continued.emplace("r"+std::to_string(r),std::move(a));principal.emplace("r"+std::to_string(r),std::move(b));
+  }
+  std::vector<B> ratios;for(const auto& prefactor:c.basis_prefactors) {
+    auto expression=data::Reader(prefactor.str()).read();auto denominator=evaluate(expression,point,continued).at(0),numerator=evaluate(expression,point,principal).at(0);
+    if(!denominator.is_finite() || denominator.contains_zero() || !numerator.is_finite())
+      throw std::invalid_argument("basis prefactor has a zero-containing or non-finite endpoint divisor/value");
+    auto ratio=numerator/denominator;if(!ratio.is_finite())throw std::invalid_argument("non-finite basis prefactor ratio");ratios.push_back(std::move(ratio));
+  }return ratios;
+}
+// Reusable for a completed transport: reconstruct the continued roots from its
+// exact path, then apply this helper without repeating the differential equation.
+inline void apply_basis_prefactors(const Compiled& c,const B& endpoint,const std::vector<B>& continued_roots,
+    Boundary& values,Boundary& errors) {
+  if(c.basis_prefactors.empty())return;
+  if(values.size()!=c.dimension || errors.size()!=c.dimension)throw std::invalid_argument("basis prefactor boundary dimensions");
+  for(unsigned i=0;i<c.dimension;++i)if(values[i].size()!=c.epsilon_order+1 || errors[i].size()!=c.epsilon_order+1)
+    throw std::invalid_argument("basis prefactor epsilon window");
+  auto ratios=basis_prefactor_ratios(c,endpoint,continued_roots);
+  // Stage changes so a rejected divisor or output never partially converts a boundary.
+  auto converted=values,estimates=errors;
+  for(unsigned i=0;i<c.dimension;++i)for(unsigned e=0;e<=c.epsilon_order;++e) {
+    if(!errors[i][e].is_finite() || !arb_is_zero(acb_imagref(errors[i][e].raw())) || !arb_is_nonnegative(acb_realref(errors[i][e].raw())))
+      throw std::invalid_argument("basis prefactor errors must be finite real nonnegative bounds");
+    converted[i][e]=ratios[i]*values[i][e];
+    if(!converted[i][e].is_finite())throw std::invalid_argument("non-finite converted basis value");
+    estimates[i][e]=magnitude(ratios[i])*errors[i][e]+arithmetic_error(converted[i][e]);
+    if(!estimates[i][e].is_finite())throw std::invalid_argument("non-finite converted basis error");
+  }
+  values=std::move(converted);errors=std::move(estimates);
+}
 inline Boundary boundary(const json::object& r,unsigned d,unsigned k,slong bits) {
   Boundary out(d,std::vector<B>(k+1,B(0)));const auto& input=r.at("boundary").as_array();
   if(input.size()!=d)throw std::invalid_argument("transport boundary dimension");Jet ctx(0,1,bits);
@@ -396,7 +472,7 @@ inline std::optional<std::pair<Boundary,Boundary>> finite_start(const Compiled& 
 
 inline json::value run(const json::value& input) {
   const auto start=std::chrono::steady_clock::now();const auto& r=input.as_object();
-  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only"},"transport");
+  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors"},"transport");
   if(auto a=r.if_contains("asymptotic")) {
     known_keys(a->as_object(),{"constraints","cutoffs"},"asymptotic");
     for(const auto& v:a->as_object().at("constraints").as_array())known_keys(v.as_object(),{"row","epsilon","power","log_degree","value"},"asymptotic constraint");
@@ -441,6 +517,7 @@ inline json::value run(const json::value& input) {
     }
     center=next;++charts;
     if(r.if_contains("initial_only") && r.at("initial_only").as_bool()) {
+      apply_basis_prefactors(c,endpoint,{},current,errors);
       const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
       return json::object{{"schema","DiffExp.TransportResult/v1"},{"parameter",decimal_mid(acb_realref(endpoint.raw()),digits)},
         {"values",matrix_json(current,digits)},{"errors",matrix_json(errors,digits)},{"charts",charts},{"segments",std::move(segments)},
@@ -511,6 +588,7 @@ inline json::value run(const json::value& input) {
     center=next;
     if(charts%20==0)std::cerr<<"Transport chart "<<charts<<", path parameter "<<center<<"\n";
   }
+  apply_basis_prefactors(c,B(1),root_values,current,errors);
   if(goal>0) {
     auto tolerance=B::from_strings("1e-"+std::to_string(goal));
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
@@ -520,10 +598,17 @@ inline json::value run(const json::value& input) {
     }
   }
   const auto finished=std::chrono::steady_clock::now();
-  return json::object{{"schema","DiffExp.TransportResult/v1"},{"parameter","1"},{"values",matrix_json(current,digits)},
+  json::object output{{"schema","DiffExp.TransportResult/v1"},{"parameter","1"},{"values",matrix_json(current,digits)},
     {"errors",matrix_json(errors,digits)},{"charts",charts},{"segments",std::move(segments)},{"omitted_tails_certified",false},
     {"timings",json::object{{"preparation_seconds",std::chrono::duration<double>(prepared-start).count()},
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
+  if(!c.basis_prefactors.empty()) {
+    output["basis_convention"]="principal_endpoint";
+    output["segments_basis_convention"]="continued";
+    output["endpoint_roots_continued"]=matrix_json(Boundary{root_values},digits).at(0);
+    output["endpoint_roots_principal"]=matrix_json(Boundary{principal_roots_at(c,B(1))},digits).at(0);
+  }
+  return output;
 }
 inline int run_file(const std::string& path) {
   std::ifstream file;if(path!="-"){file.open(path);if(!file)throw std::runtime_error("cannot open transport request");}

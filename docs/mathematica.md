@@ -49,6 +49,19 @@ not an example identifier. Algebraic transport continues square-root sheets
 along the path. The current algebraic implementation requires independent
 polynomial radicands; nested algebraic towers are rejected explicitly.
 
+For a basis with algebraic normalization factors defined on the principal sheet
+at each physical point, add `BasisPrefactors -> {g1, g2, ...}` to the
+configuration, with one expression per integral and `1` where no factor is
+needed. The native solver continues roots along the path and converts the
+endpoint values using these factors. Chained boundaries and saved configuration
+retain this convention. The default empty list returns the continuously
+transported basis. The 128-digit planar example supplies the factors extracted
+from its published `pureBasis-zzz.m` ancillary file; this explicit basis-data
+adaptation is needed when the path changes the normalization's root sheet.
+No component signs are inferred from numerical reference values. General
+asymptotic initialization still requires rational input; apply algebraic
+prefactors on subsequent regular transport.
+
 Saved output has the original outer shape `{{point,values,errors}, metadata}`.
 For a physical plotting point, `ToPiecewise` uses native transport and caches
 the result. For a line varying one coordinate affinely, it starts from the
@@ -116,7 +129,8 @@ python3 scripts/check_original_mathematica.py --kernel /path/to/WolframKernel --
 
 Use `--case banana --case banana-routes`, for example, to select a workflow.
 The runner records per-case logs and elapsed time under
-`build-reference/mathematica-workflows`, with a finite per-case timeout. It
+`build-reference/mathematica-workflows`. The per-case limit is 30 minutes for
+standard workflows and 60 minutes for `zzz-high`; `--timeout` overrides it. It
 checks original polylogarithms, all four planar families, supplied-boundary
 Henn transport, partial banana initialization, chained equal/unequal banana
 routes and saved-output numerical evaluation. The high-precision demonstration

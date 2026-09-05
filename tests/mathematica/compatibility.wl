@@ -42,6 +42,19 @@ Put[{{Log[1+t]}},FileNameJoin[{folder,"d_1.m"}]];
 LoadConfiguration[{MatrixDirectory->folder,EpsilonOrder->2,WorkingPrecision->90,ChopPrecision->60,ExpansionOrder->40,Verbosity->0}];
 r=measured["canonical",TransportTo[PrepareBoundaryConditions[{1},{t->0}],{t->1}]];
 If[ListQ[r],check[close[r[[2,1,3]],Log[2]^2/2],"canonical dlog weights"],check[False,"canonical result"]];
+(* Explicit algebraic basis data survives process dispatch, chaining and saves. *)
+DeleteFile[FileNames["*.m",folder]];
+Put[{{1/(2 Sqrt[t](2+Sqrt[t]))}},FileNameJoin[{folder,"dt_0.m"}]];
+LoadConfiguration[{MatrixDirectory->folder,EpsilonOrder->0,WorkingPrecision->90,ExpansionOrder->40,
+ AccuracyGoal->30,BasisPrefactors->{2+Sqrt[t]},Verbosity->0}];
+loop=1-8 x(1-x)+8 I x(1-x)(1-2 x);
+b=PrepareBoundaryConditions[{1},{t->1}];
+saved=measured["algebraic_basis_loop",TransportTo[b,{t->loop},1,True]];
+check[ListQ[saved] && close[saved[[1,2,1,1]],1],"principal endpoint basis after root winding"];
+If[ListQ[saved],r=TransportTo[saved[[1]],{t->4}];
+ check[ListQ[r] && close[r[[2,1,1]],4/3],"principal basis chained boundary"]];
+functions=ToPiecewise[saved];UpdateConfiguration[BasisPrefactors->{}];
+check[MatrixQ[functions] && close[functions[[1,1]][1/4],(2+Sqrt[loop/.x->1/4])/3],"saved basis configuration"];
 DeleteFile[FileNames["*.m",folder]];
 Put[{{0,1/t},{1/t,0}},FileNameJoin[{folder,"dt_0.m"}]];
 LoadConfiguration[{MatrixDirectory->folder,EpsilonOrder->0,WorkingPrecision->90,ChopPrecision->60,ExpansionOrder->40,Verbosity->0}];

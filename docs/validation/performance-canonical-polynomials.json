@@ -1,0 +1,47 @@
+{
+  "schema": "DiffExp.PerformanceExperiment/v1",
+  "production_enabled": false,
+  "status": "passed",
+  "machine": "Apple M4, macOS ARM64; Release, FLINT 3.4.0",
+  "observations": [
+    {
+      "status": "passed",
+      "dimension": 3,
+      "epsilon_order": 4,
+      "taylor_order": 80,
+      "working_bits": 384,
+      "step": "1/16",
+      "production_chart_seconds": 0.002281375,
+      "polynomial_chart_seconds": 0.001724167,
+      "observed_chart_speedup": 1.3231751912662753,
+      "finite": 15,
+      "overlapping": 15,
+      "maximum_radius_ratio": 1.0218665592382559,
+      "scope": "Experimental retained first chart only; overlap is not an independent accuracy or tail certificate. Candidate does not select the production solver. Preparation excluded; polynomial coefficient extraction included in candidate time.",
+      "case": "synthetic",
+      "process_wall_seconds": 0.388385292,
+      "minimum_relative_accuracy_bits_including_zero_balls": 380
+    },
+    {
+      "status": "passed",
+      "dimension": 86,
+      "epsilon_order": 4,
+      "taylor_order": 230,
+      "working_bits": 931,
+      "step": "1/100000",
+      "production_chart_seconds": 23.49278325,
+      "polynomial_chart_seconds": 33.256867625,
+      "observed_chart_speedup": 0.706403967893233,
+      "finite": 430,
+      "overlapping": 430,
+      "maximum_radius_ratio": 1.1367749241632716,
+      "scope": "Experimental retained first chart only; overlap is not an independent accuracy or tail certificate. Candidate does not select the production solver. Preparation excluded; polynomial coefficient extraction included in candidate time.",
+      "case": "original-zzz-high-first-chart",
+      "process_wall_seconds": 58.687921417,
+      "minimum_relative_accuracy_bits_including_zero_balls": -9223372036854775807
+    }
+  ],
+  "limitations": "Single first-chart comparison per input, under concurrent load. Arithmetic overlap is not independent numerical validation. No end-to-end timing or omitted-tail certificate.",
+  "decision": "Not adopted: slower on the high-precision original chart, despite a small synthetic speedup.",
+  "relative_accuracy_note": "The raw FLINT minimum includes balls containing zero. A large negative sentinel denotes undefined relative accuracy at zero, not an actual finite number of inaccurate bits. No full-solution accuracy is claimed."
+}

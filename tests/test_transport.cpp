@@ -103,6 +103,66 @@ int main() {
   if(!acb_overlaps(midpoint.raw(),oracle.raw()))throw std::runtime_error("direct asymptotic continuation lost initial uncertainty");
   auto unknown=direct;unknown.as_object()["accuracy_gola"]=12;rejected=false;
   try{transport::run(unknown);}catch(const std::invalid_argument&){rejected=true;}if(!rejected)throw std::runtime_error("unknown transport key accepted");
+  auto principal_basis=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"paths":{"t":"1-8*x*(1-x)+8*I*x*(1-x)*(1-2*x)"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"dlog","expression":"2+Sqrt[t]"}],"boundary":[["1"]],"basis_prefactors":["2+Sqrt[t]"]})JSON");
+  result=transport::run(principal_basis);
+  if(std::abs(real(result)-1)>1e-12 || result.as_object().at("basis_convention")!="principal_endpoint")
+    throw std::runtime_error("supplied principal-basis conversion lost algebraic loop normalization");
+  // A root occurring only in the supplied basis data must also be continued.
+  principal_basis.as_object()["entries"]=j::array{};
+  principal_basis.as_object()["epsilon_order"]=1;
+  principal_basis.as_object()["boundary"]=j::array{j::array{"1","2"}};
+  principal_basis.as_object()["boundary_errors"]=j::array{j::array{"1/100000000000000000000","1/50000000000000000000"}};
+  principal_basis.as_object()["basis_prefactors"]=j::array{"Sqrt[t]"};
+  result=transport::run(principal_basis);
+  if(std::abs(real(result)+1)>1e-12 || std::abs(real(result,0,1)+2)>1e-12)
+    throw std::runtime_error("prefactor-only root or epsilon conversion lost monodromy");
+  for(unsigned e=0;e<2;++e) {
+    const auto& v=result.as_object().at("values").as_array()[0].as_array()[e].as_object();
+    const auto& error=result.as_object().at("errors").as_array()[0].as_array()[e].as_object();
+    if(std::stod(std::string(v.at("radius").as_string()))<1e-20 || std::stod(std::string(error.at("real_midpoint").as_string()))<1e-20)
+      throw std::runtime_error("principal-basis conversion dropped carried errors");
+  }
+  // Reuse the exact helper independently of any differential-equation run.
+  principal_basis.as_object()["basis_prefactors"]=j::array{"2+Sqrt[t]"};
+  auto prefactor_compiled=transport::compile(principal_basis.as_object(),1,1,256);
+  auto continued=transport::principal_roots_at(prefactor_compiled,B(0));
+  for(unsigned i=0;i<continued.size();++i)continued[i]=continue_polynomial_sqrt(prefactor_compiled.square_polynomials[i],B(0),B(1),continued[i]);
+  Boundary completed{{B(2),B(4)}},completed_errors{{B::from_strings("1/100"),B::from_strings("1/50")}};
+  for(auto& v:completed[0])arb_add_error_2exp_si(acb_realref(v.raw()),-40);
+  transport::apply_basis_prefactors(prefactor_compiled,B(1),continued,completed,completed_errors);
+  if(!acb_contains(completed[0][0].raw(),B(6).raw()) || !acb_contains(completed[0][1].raw(),B(12).raw()) ||
+     !arb_ge(acb_realref(completed_errors[0][0].raw()),acb_realref(B::from_strings("3/100").raw())))
+    throw std::runtime_error("reusable principal-basis helper failed to scale values/errors");
+  auto invalid_prefactor=principal_basis;invalid_prefactor.as_object()["basis_prefactors"]=j::array{"0"};
+  rejected=false;try{transport::run(invalid_prefactor);}catch(const std::invalid_argument&){rejected=true;}
+  if(!rejected)throw std::runtime_error("zero endpoint basis divisor accepted");
+  invalid_prefactor.as_object()["basis_prefactors"]=j::array{};
+  rejected=false;try{transport::run(invalid_prefactor);}catch(const std::invalid_argument&){rejected=true;}
+  if(!rejected)throw std::runtime_error("basis prefactor shape mismatch accepted");
+  // Exact endpoint cancellation must precede principal-root evaluation on its cut.
+  auto cancel_cut=j::parse(R"JSON({"paths":{"t":"x"},"entries":[],"basis_prefactors":["Sqrt[-1+I*(t/3+t/7-10/21)]"]})JSON");
+  auto cut_compiled=transport::compile(cancel_cut.as_object(),1,0,256);
+  auto cut_roots=transport::principal_roots_at(cut_compiled,B(1));
+  B plus_i=B::from_strings("0","1");
+  if(!acb_equal(cut_roots[0].raw(),plus_i.raw()))throw std::runtime_error("exact endpoint cancellation straddled principal root cut");
+  cancel_cut.as_object()["basis_prefactors"]=j::array{"Sqrt[-1+I*(t/3+t/7-5/21)]"};
+  auto dyadic_compiled=transport::compile(cancel_cut.as_object(),1,0,256);
+  auto dyadic_roots=transport::principal_roots_at(dyadic_compiled,B::from_strings("1/2"));
+  if(!acb_equal(dyadic_roots[0].raw(),plus_i.raw()))throw std::runtime_error("exact dyadic endpoint cancellation lost principal branch");
+  B interval_point(1);arb_add_error_2exp_si(acb_realref(interval_point.raw()),-80);
+  auto interval_roots=transport::principal_roots_at(cut_compiled,interval_point);
+  auto polynomial_value=cut_compiled.square_polynomials[0].evaluate_polynomial(interval_point);B enclosing_root;
+  acb_sqrt(enclosing_root.raw(),polynomial_value.raw(),B::precision());
+  if(!acb_equal(interval_roots[0].raw(),enclosing_root.raw()))throw std::runtime_error("non-exact endpoint lost enclosing root fallback");
+  auto endpoint_ghost=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":299,"paths":{"t":"1+3*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(2*Sqrt[t]*(2+Sqrt[t]))"}],"boundary":[["1"]],"basis_prefactors":["2+Sqrt[t]"]})JSON");
+  result=transport::run(endpoint_ghost);
+  if(std::abs(real(result)-4.0/3)>1e-15)throw std::runtime_error("endpoint conjugate-sheet root blocked normalized chaining");
+  endpoint_ghost.as_object()["entries"].as_array()[0].as_object()["expression"]="1/(2*Sqrt[t]*(2-Sqrt[t]))";
+  auto endpoint_pole=transport::compile(endpoint_ghost.as_object(),1,0,299);
+  if(!std::any_of(endpoint_pole.singularities.begin(),endpoint_pole.singularities.end(),[](const B& root){return acb_contains(root.raw(),B(1).raw());}))
+    throw std::runtime_error("domain clipping removed a genuine endpoint pole");
+  rejected=false;try{transport::run(endpoint_ghost);}catch(const std::runtime_error&){rejected=true;}
+  if(!rejected)throw std::runtime_error("genuine singular endpoint accepted after ghost filtering");
   std::cout<<"Generic physical/canonical/algebraic transport and asymptotic matching passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

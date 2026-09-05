@@ -29,6 +29,7 @@ zero-based. The retained epsilon window is `0..epsilon_order`.
 | `entries` | Nonzero differential-equation entries |
 | `boundary` | Component-by-epsilon matrix of numerical expression strings at the path start |
 | `boundary_errors` | Optional nonnegative real absolute uncertainties with the same shape |
+| `basis_prefactors` | Optional algebraic normalization expression string per component; convert continued roots to the principal endpoint basis |
 | `asymptotic` | Partial power/log constraints at `x=0`, replacing `boundary` |
 | `initial_only` | With `asymptotic`, return a regular numerical seed at a small positive `x` |
 | `taylor_order` | Retained local series order; default 50 |
@@ -54,6 +55,32 @@ Nested algebraic towers and nonpolynomial radicands are rejected. Decimal
 boundary input may carry Mathematica precision annotations; these become input
 uncertainty, not exact rational data. Responses are decimal strings and never
 require evaluation as code.
+
+## Algebraic basis conventions
+
+Roots in the differential equation are continued along the entire path. If the
+integrals are defined with algebraic factors evaluated on the principal sheet at
+each physical point, supply those factors in `basis_prefactors`. For a component
+`F_i = g_i J_i`, the returned value is multiplied by
+`g_i(principal endpoint roots) / g_i(continued endpoint roots)`. The initial
+boundary must use the principal starting basis. This is explicit mathematical
+input; the solver never infers factors from reference values or a family name.
+Use `"1"` for components with no algebraic normalization.
+
+For example, a component with prefactor `"2+Sqrt[t]"` needs this conversion
+when the path winds around `t=0`. Roots appearing only in the prefactors are
+also continued. Endpoint factors must have finite values and a nonzero
+continued divisor. Exact endpoint coordinates are substituted before numerical
+root evaluation to avoid artificial branch-cut uncertainty from cancellation.
+Asymptotic initialization currently requires rational input, including its
+prefactors; use algebraic prefactors on the subsequent regular transport.
+
+For a completed ordinary transport with prefactors supplied, `values` and
+`errors` use the principal endpoint basis and the response says
+`basis_convention: "principal_endpoint"`.
+Optional saved Taylor segments remain in their continued basis, marked by
+`segments_basis_convention: "continued"`; both endpoint root arrays are
+reported. Without prefactors, the returned values retain the continued basis.
 
 ## Partial asymptotic boundaries
 

@@ -8,7 +8,7 @@ authors:
   - family-names: Hidding
     given-names: Martijn
 version: 2.1.1
-date-released: "2026-09-05"
+date-released: "2026-09-06"
 license: GPL-3.0-or-later
 repository-code: https://github.com/modulargraph/diffexp_refactored
 url: https://github.com/modulargraph/diffexp_refactored

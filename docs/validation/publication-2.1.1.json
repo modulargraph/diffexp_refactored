@@ -1,8 +1,8 @@
 {
   "schema": "DiffExp.PublicationValidation/v1",
   "version": "2.1.1",
-  "date": "2026-09-05T23:54:02.773711+02:00",
-  "status": "standard_checks_passed_high_precision_pending",
+  "date": "2026-09-06T00:54:03.009110+02:00",
+  "status": "passed",
   "validation": {
     "native_and_external": "native-tests-2.1.1.json",
     "optional_compatibility_runtime": "compatibility-tests-2.1.1.json",
@@ -11,7 +11,7 @@
     "clean_source_build": "passed",
     "installed_cpp_consumer": {
       "status": "passed",
-      "seconds": 0.42989041699999997,
+      "seconds": 0.424231541,
       "exit": 0,
       "stdout": "Installed C++ package: exact recurrence, Banana4 coordinates, certified scalar leaf, shared-source snapshot, verified endpoint cache and ordinary continuation passed\n",
       "stderr": "Preparing generic transport: 1 components, epsilon 0..0\n"
@@ -27,36 +27,70 @@
         "original_transport_api": true,
         "saved_functions": true
       },
-      "seconds": 0.699228,
+      "seconds": 0.314912,
       "configured_family_timings": {
-        "process_seconds": 0.020173,
-        "preparation_seconds": 0.000745166,
-        "numerical_seconds": 0.004729875,
-        "total_seconds": 0.005644375
+        "process_seconds": 0.009085,
+        "preparation_seconds": 0.000278375,
+        "numerical_seconds": 0.002222917,
+        "total_seconds": 0.002593709
       },
       "transport_timings": {
-        "process_seconds": 0.015786,
-        "preparation_seconds": 0.000398292,
-        "numerical_seconds": 0.000281542,
-        "total_seconds": 0.000679834,
-        "wrapper_total_seconds": 0.016724,
-        "native_total_seconds": 0.000679834,
+        "process_seconds": 0.008162,
+        "preparation_seconds": 0.000191083,
+        "numerical_seconds": 0.00011975,
+        "total_seconds": 0.000310833,
+        "wrapper_total_seconds": 0.008628,
+        "native_total_seconds": 0.000310833,
         "native_calls": [
           {
-            "process_seconds": 0.015786,
-            "preparation_seconds": 0.000398292,
-            "numerical_seconds": 0.000281542,
-            "total_seconds": 0.000679834
+            "process_seconds": 0.008162,
+            "preparation_seconds": 0.000191083,
+            "numerical_seconds": 0.00011975,
+            "total_seconds": 0.000310833
           }
         ],
         "charts": 1
       }
+    },
+    "final_endpoint_basis_checks": {
+      "status": "passed",
+      "wall_seconds": 24.93,
+      "tests": [
+        {
+          "name": "transport",
+          "seconds": 0.875561,
+          "status": "passed"
+        },
+        {
+          "name": "family_config",
+          "seconds": 0.0124294,
+          "status": "passed"
+        },
+        {
+          "name": "cli.interface",
+          "seconds": 0.286019,
+          "status": "passed"
+        },
+        {
+          "name": "mathematica.interface",
+          "seconds": 3.04875,
+          "status": "passed"
+        },
+        {
+          "name": "mathematica.compatibility",
+          "seconds": 20.7017,
+          "status": "passed"
+        }
+      ],
+      "scope": "Final transport root-sheet normalization, real endpoint ghost-root handling, generic family configuration, CLI, Mathematica process interface and compatibility; includes normalization chaining and saved configuration.",
+      "transport_header_sha256": "193d9e90d4d234cefb4ae0b49c21f829ae4a9cf921c9c247ae357419a1b595b3",
+      "wrapper_sha256": "f57e4e0326fe6350efc7a73ecfc7668fea3c423371c85651b80234e67be00996"
     }
   },
   "artifacts": {
-    "native_executable_sha256": "8d7b6b890bcead1b6cd979083ca87f1ba8a0a9e7123f83f6730836c263a833f2",
+    "native_executable_sha256": "05de4b071e7f10c537fddf50ffb7cc9364f9b0d5b1267707180db4242167c3de",
     "installed_native_executable_matches": true,
-    "mathematica_wrapper_sha256": "bad708470d9428c958e6be02b60fa93e6aa0e10748181e20beb1ada0e82ca526",
+    "mathematica_wrapper_sha256": "f57e4e0326fe6350efc7a73ecfc7668fea3c423371c85651b80234e67be00996",
     "installed_wrapper_matches": true
   },
   "scientific_scope": {
@@ -65,5 +99,103 @@
     "henn_all108_ft": "Frozen; not an accepted full FT reconstruction.",
     "tails": "General omitted tails are not certified."
   },
-  "previous_release": "publication.json"
+  "previous_release": "publication.json",
+  "github_ci_before_endpoint_basis_fix": {
+    "conclusion": "success",
+    "databaseId": 33994410742,
+    "headSha": "2bc01102f9444bb4e2994c931afad24ea6465702",
+    "jobs": [
+      {
+        "completedAt": "2026-09-05T22:02:58Z",
+        "conclusion": "success",
+        "databaseId": 101382245236,
+        "name": "native",
+        "startedAt": "2026-09-05T21:55:14Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-05T21:55:16Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-05T21:55:15Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T21:55:17Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v4",
+            "number": 2,
+            "startedAt": "2026-09-05T21:55:16Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T21:55:29Z",
+            "conclusion": "success",
+            "name": "Dependencies",
+            "number": 3,
+            "startedAt": "2026-09-05T21:55:17Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T21:55:34Z",
+            "conclusion": "success",
+            "name": "Configure",
+            "number": 4,
+            "startedAt": "2026-09-05T21:55:29Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T22:01:33Z",
+            "conclusion": "success",
+            "name": "Build",
+            "number": 5,
+            "startedAt": "2026-09-05T21:55:34Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T22:02:39Z",
+            "conclusion": "success",
+            "name": "Test native core and CLI",
+            "number": 6,
+            "startedAt": "2026-09-05T22:01:33Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T22:02:52Z",
+            "conclusion": "success",
+            "name": "Install and test external CMake consumer",
+            "number": 7,
+            "startedAt": "2026-09-05T22:02:39Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T22:02:53Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v4",
+            "number": 14,
+            "startedAt": "2026-09-05T22:02:52Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-05T22:02:55Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 15,
+            "startedAt": "2026-09-05T22:02:53Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/modulargraph/diffexp_refactored/actions/runs/33994410742/job/101382245236"
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/modulargraph/diffexp_refactored/actions/runs/33994410742",
+    "native_tests": {
+      "passed": 70,
+      "failed": 0,
+      "wall_seconds": 65.48
+    }
+  },
+  "github_ci_note": "This recorded run validates the generic-family and wrapper implementation at its stated commit. The subsequent endpoint-basis fix has focused local checks; final release CI is linked from GitHub."
 }

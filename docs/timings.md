@@ -15,6 +15,7 @@ benchmarks. Wrapper times below exclude Wolfram kernel startup.
 | Original planar `zmz` wrapper | 2m 45s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
 | Original planar `mzz` wrapper | 2m 1s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
 | Original planar `zzz` wrapper | 3m 13s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
+| Original 128-digit `zzz` demonstration | 41m 27s | PH1 to PH2, epsilon 0–4, 145 charts; endpoint basis conversion 0.71 s, reference replay 3.46 s separately |
 | Original Henn wrapper | 59.75 s | Transport of 108 supplied boundary components, AccuracyGoal 30 |
 | Original banana partial initialization | 27.69 s + 2.16 s | Mathematica gamma/epsilon preparation, then native matching and transport through the wrapper |
 | Original equal-banana transport to 32 | 6.37 s | From the derived boundary at -1, with saved metadata |
@@ -31,11 +32,16 @@ the momentum to 50 took 435.3 s; the reverse order took 8.56 s and 49.3 s.
 The two endpoints agree within 4.53e-38. The published unequal-banana reference
 agrees within 4.80e-28 at its supplied precision.
 
-The separate original 128-digit `zzz` PH1-to-PH2 demonstration remains under
-validation. Its 30-minute trial reached chart 100, at path parameter 0.787,
-before the timeout. A longer bounded run is recorded separately in the
-[interface report](validation/interface-2.1.1.json); no completed timing or
-128-digit numerical acceptance is inferred from that partial run.
+The separate 128-digit `zzz` PH1-to-PH2 demonstration completed at Taylor order
+230 and WorkingPrecision 280. Its maximum difference from the published values
+is 5.70e-134. The computation used continuous root sheets; the published
+integrand prefactors then converted the endpoint to the principal basis in
+0.71 s using the same helper as native transport. The complete request was
+verified unchanged except for those supplied prefactors, so no ODE rerun was
+needed. The 3.46 s Wolfram replay includes startup and reference validation;
+its short wrapper timing does not include the 41-minute native computation.
+The [interface report](validation/interface-2.1.1.json) preserves the initial
+basis mismatch and the earlier incomplete trials, including a 30-minute timeout.
 
 The four-loop timings are preserved acceptance measurements. Those expensive
 calculations were not repeated for this interface release. Full Henn FT

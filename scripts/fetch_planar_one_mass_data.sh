@@ -22,6 +22,7 @@ files=(
   mzz/numIntegrals-mzz.m
   zzz/diffEq-zzz.m
   zzz/numIntegrals-zzz.m
+  zzz/pureBasis-zzz.m
 )
 hashes=(
   7d685bcd1028b55b974039fe99acd5d1ec0e712af75223212c27040e04038e86
@@ -33,6 +34,7 @@ hashes=(
   e2424eb7cdc0d994d72bc0031bcc938f2ea562b2727ecbfa798655547652c74f
   43f617d7929ee5f6aaef9d808f76ea2248c3961b0677a3632f72f6c83a9a29b1
   184dfc6a105164776d1406ae0b5e7e3b9f2447091b02479604613fe065b0df66
+  68368e419471556e319ec6323580d216af730c372e6b5b55611b40e4f2522369
 )
 
 hash_file() {

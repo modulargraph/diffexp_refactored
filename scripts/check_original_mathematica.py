@@ -32,9 +32,9 @@ def main():
     parser.add_argument("--kernel", required=True, type=Path)
     parser.add_argument("--case", action="append", choices=CASES)
     parser.add_argument("--include-high-precision", action="store_true")
-    parser.add_argument("--timeout", type=int, default=1800, help="Maximum seconds per workflow")
+    parser.add_argument("--timeout", type=int, help="Maximum seconds per workflow (default: 1800; 3600 for zzz-high)")
     args = parser.parse_args()
-    if args.timeout <= 0 or not args.kernel.is_file():
+    if (args.timeout is not None and args.timeout <= 0) or not args.kernel.is_file():
         parser.error("Select an existing WolframKernel and a positive timeout")
     cases = args.case or [c for c in CASES if c != "zzz-high"]
     if args.include_high_precision and "zzz-high" not in cases:
@@ -54,6 +54,7 @@ def main():
         environment.pop("DIFFEXP_REQUEST_ONLY", None)
         environment.pop("DIFFEXP_RESPONSE_FILE", None)
         environment.update(settings)
+        timeout = args.timeout if args.timeout is not None else (3600 if case == "zzz-high" else 1800)
         start = time.monotonic()
         with (folder / f"{case}.log").open("w") as log:
             process = subprocess.Popen(
@@ -62,7 +63,7 @@ def main():
                 start_new_session=True,
             )
             try:
-                code = process.wait(timeout=args.timeout)
+                code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 # Include the child native process in timeout cleanup.
                 import signal
@@ -73,7 +74,7 @@ def main():
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                 code = "timeout"
-        report = {"case": case, "exit": code, "wall_seconds": time.monotonic() - start}
+        report = {"case": case, "exit": code, "wall_seconds": time.monotonic() - start, "time_limit_seconds": timeout}
         reports.append(report)
         (folder / "runner.json").write_text(json.dumps(reports, indent=2) + "\n")
         print(json.dumps(report), flush=True)

@@ -9,6 +9,8 @@
   boundary, transport and plotting workflow using RunProcess.
 - Preserve boundary precision, report preparation/numerical/wrapper timings,
   and retain explicit error estimates and omitted-tail status.
+- Accept explicit algebraic basis prefactors for principal endpoint
+  normalization after root continuation, including through the Mathematica wrapper.
 - Use guarded grouped-dot rational charts with the scalar fallback, and share
   canonical letter expansions and source convolutions across matrix entries.
 - Retain carried boundary uncertainty through local homogeneous maps where

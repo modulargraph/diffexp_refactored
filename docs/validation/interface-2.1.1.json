@@ -1,7 +1,7 @@
 {
   "schema": "DiffExp.InterfaceValidation/v1",
   "version": "2.1.1",
-  "date": "2026-09-05T23:54:02.772089+02:00",
+  "date": "2026-09-06T00:54:03.007508+02:00",
   "standard_workflows_status": "passed",
   "machine": {
     "hardware": "Apple M4",
@@ -445,26 +445,26 @@
       "original_transport_api": true,
       "saved_functions": true
     },
-    "seconds": 0.699228,
+    "seconds": 0.314912,
     "configured_family_timings": {
-      "process_seconds": 0.020173,
-      "preparation_seconds": 0.000745166,
-      "numerical_seconds": 0.004729875,
-      "total_seconds": 0.005644375
+      "process_seconds": 0.009085,
+      "preparation_seconds": 0.000278375,
+      "numerical_seconds": 0.002222917,
+      "total_seconds": 0.002593709
     },
     "transport_timings": {
-      "process_seconds": 0.015786,
-      "preparation_seconds": 0.000398292,
-      "numerical_seconds": 0.000281542,
-      "total_seconds": 0.000679834,
-      "wrapper_total_seconds": 0.016724,
-      "native_total_seconds": 0.000679834,
+      "process_seconds": 0.008162,
+      "preparation_seconds": 0.000191083,
+      "numerical_seconds": 0.00011975,
+      "total_seconds": 0.000310833,
+      "wrapper_total_seconds": 0.008628,
+      "native_total_seconds": 0.000310833,
       "native_calls": [
         {
-          "process_seconds": 0.015786,
-          "preparation_seconds": 0.000398292,
-          "numerical_seconds": 0.000281542,
-          "total_seconds": 0.000679834
+          "process_seconds": 0.008162,
+          "preparation_seconds": 0.000191083,
+          "numerical_seconds": 0.00011975,
+          "total_seconds": 0.000310833
         }
       ],
       "charts": 1
@@ -473,30 +473,64 @@
   "generic_family_report": "generic-families.json",
   "limitations": [
     "General native transport and recursive FT omitted tails are estimated, not certified.",
+    "Principal endpoint algebraic normalization requires explicit BasisPrefactors data; the high-precision example extracts it from published integrand definitions.",
     "Mathematica symbolic general solutions, dimension-form dVARIABLE_d.m matrices, and the fifth sampling-list argument are not implemented; legacy strategy and Pade/Mobius options do not select the old Wolfram algorithms.",
     "Henn here is transport of 108 supplied boundary values, not full FT reconstruction. Full Henn FT remains frozen.",
     "Four-loop banana FT acceptance is preserved from earlier runs; it was not rerun for the interface release."
   ],
   "source_hashes": {
-    "transport_header_sha256": "2d1f11cae82d7cbb829df6cf92fc9d5e0f9eb7b905bda12f6c4d605cf2e1b34f",
-    "mathematica_wrapper_sha256": "bad708470d9428c958e6be02b60fa93e6aa0e10748181e20beb1ada0e82ca526"
+    "transport_header_sha256": "193d9e90d4d234cefb4ae0b49c21f829ae4a9cf921c9c247ae357419a1b595b3",
+    "mathematica_wrapper_sha256": "f57e4e0326fe6350efc7a73ecfc7668fea3c423371c85651b80234e67be00996"
   },
   "high_precision_planar": {
-    "status": "running",
-    "scope": "Original zzz PH1 to PH2 at AccuracyGoal 128, Taylor order 230 and WorkingPrecision 280. Separate opt-in check, not included in the passing standard workflows.",
-    "previous_trials": [
-      {
-        "status": "stopped",
-        "approximate_seconds": 1380,
-        "reason": "Superseded by verified shared source convolutions."
-      },
-      {
-        "status": "timeout",
-        "wall_seconds": 1800.009248417,
-        "last_completed_chart": 100,
-        "last_path_parameter": 0.786575
-      }
-    ],
-    "current_time_limit_seconds": 3600
+    "schema": "DiffExp.OriginalWrapperValidation/v1",
+    "family": "zzz-high",
+    "status": "passed",
+    "max_discrepancy": "5.69079852775751177373`3.8071179769405146*^-134",
+    "max_estimated_error": "5.2842579377729751946380179166486539630536611138828046604578167782232333851610749680502454620375617633078800819585165517727180766144461616744008538809734103123572892161489459009704955707411823920278961358461860488637233477954917239265694542559717837970851090372175523663187455059993115298511565848136927124503507484`285.*^-130",
+    "timings": {
+      "preparation_seconds": 1.758160625,
+      "numerical_seconds": 2485.384292709,
+      "total_seconds": 2487.142453334,
+      "external_native_process": true,
+      "wrapper_total_seconds": 0.132966,
+      "native_total_seconds": 2487.142453334,
+      "native_calls": [
+        {
+          "preparation_seconds": 1.758160625,
+          "numerical_seconds": 2485.384292709,
+          "total_seconds": 2487.142453334,
+          "external_native_process": true
+        }
+      ],
+      "charts": 145,
+      "test_total_seconds": 0.739254
+    },
+    "basis_conversion_report": "zzz-high-basis.json",
+    "native_process": {
+      "status": 0,
+      "seconds": 2487.207659791,
+      "time_limit_seconds": 3600,
+      "previous_trials": [
+        {
+          "status": "stopped",
+          "approximate_seconds": 1380,
+          "reason": "superseded by verified shared-convolution implementation"
+        },
+        {
+          "status": "timeout",
+          "seconds": 1800.009248417,
+          "last_completed_chart": 100,
+          "last_path_parameter": 0.786575
+        }
+      ]
+    },
+    "verification_process": {
+      "exit": 0,
+      "wall_seconds": 3.462351625,
+      "response_basis": "principal_endpoint"
+    },
+    "execution_mode": "Native computation followed by Wolfram replay, to release the single-kernel license during the long computation.",
+    "timing_note": "The raw wrapper_total_seconds and test_total_seconds measure only replay and input preparation in this split check. Native_process.seconds is the completed numerical process wall time; verification_process.wall_seconds includes Wolfram startup and the reference comparison."
   }
 }

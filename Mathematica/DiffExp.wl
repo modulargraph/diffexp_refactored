@@ -15,6 +15,7 @@ IntegrateSystem::usage = "IntegrateSystem[boundary, line] returns numerical func
 ToPiecewise::usage = "ToPiecewise[saved, pade:False] returns numerical functions. Evaluation replays and caches native transport at the requested physical point; pade is accepted for call compatibility and does not change the native method.";
 DiffExpLastTimings::usage = "DiffExpLastTimings[] returns the most recent wrapper and native timings.";
 DiffExpFamilyTemplate::usage = "DiffExpFamilyTemplate[name] returns a complete editable family configuration for DiffExpFeynmanTrick.";
+BasisPrefactors::usage = "BasisPrefactors is a list of algebraic normalization factors, one per integral. Native transport converts their continued square-root sheets to principal endpoint values.";
 ChopPrecision::usage = "DiffExp configuration or boundary-input symbol.";
 DeltaPrescriptions::usage = "DiffExp configuration or boundary-input symbol.";
 DivisionOrder::usage = "DiffExp configuration or boundary-input symbol.";
@@ -92,7 +93,7 @@ DiffExpBackendInfo[OptionsPattern[]] :=
   jsonRun[{"backend-info"}, "", OptionValue["Executable"]];
 (* Compatibility input preparation and native process dispatch. *)
 eps := \[Epsilon];
-$defaultConfiguration = <|AccuracyGoal -> "?", ChopPrecision -> 250,
+$defaultConfiguration = <|AccuracyGoal -> "?", BasisPrefactors -> {}, ChopPrecision -> 250,
  DeltaPrescriptions -> {}, DivisionOrder -> 3, EpsilonOrder -> 4, ExpansionOrder -> 50,
  LineParameter -> Global`x, MatrixDirectory -> "", RadiusOfConvergence -> 1,
  SegmentationStrategy -> "Predivision", IntegrationStrategy -> "Default", UseMobius -> False,
@@ -227,11 +228,14 @@ asymptoticData[coefficients_,lp_] := Module[{constraints={},cutoffs={},expressio
   If[rowCutoffs=!={},AppendTo[cutoffs,<|"row"->row-1,"power"->inputString[Replace[Min[rowCutoffs],Infinity->1]]|>]],{row,Length[coefficients]}];
  <|"constraints"->constraints,"cutoffs"->cutoffs|>
 ];
-baseRequest[paths_Association,save_] := <|"schema"->"DiffExp.Transport/v1","dimension"->$matrixDimension,
+baseRequest[paths_Association,save_] := Module[{request,prefactors=configValue[BasisPrefactors]},request=<|"schema"->"DiffExp.Transport/v1","dimension"->$matrixDimension,
  "epsilon_order"->configValue[EpsilonOrder],"taylor_order"->configValue[ExpansionOrder],
  "working_bits"->Ceiling[configValue[WorkingPrecision] Log[2,10]],
  "accuracy_goal"->If[NumberQ[configValue[AccuracyGoal]],configValue[AccuracyGoal],0],
  "division_order"->configValue[DivisionOrder],"save_segments"->TrueQ[save],"paths"->wirePaths[paths],"entries"->$matrixEntries|>;
+ If[prefactors=!={},
+  If[!ListQ[prefactors] || Length[prefactors]=!=$matrixDimension,compatFailure["BasisPrefactors","Supply one algebraic prefactor per integral."]];
+  request["basis_prefactors"]=inputString/@prefactors];request];
 nativeTransport[request_Association] := Module[{data,elapsed},
  $lastRequest=request;
  {elapsed,data}=AbsoluteTiming[jsonRun[{"transport","-"},ExportString[request,"RawJSON","Compact"->True],Automatic]];

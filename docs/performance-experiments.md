@@ -167,3 +167,34 @@ agreed within 4.35e-38. The bounded original `ReImPlot` check took 1.86 s. Gener
 curves retain replay from the original boundary; a failed nearby continuation
 falls back once. These measurements do not imply that arbitrary dense plots
 are inexpensive.
+
+
+## Whole-layer polynomial experiment
+
+A further bounded experiment computes canonical epsilon layers in sequence,
+using `acb_poly_mullow` for the complete letter/source products and polynomial
+integration for the Taylor coefficients. This is possible because a canonical
+epsilon layer depends only on the preceding layer. It is an experimental
+benchmark, not a production solver option.
+
+| First-chart input | Production shared convolution | Polynomial layers |
+| --- | ---: | ---: |
+| Synthetic 3-component system, order 80, 384 bits | 0.00228 s | 0.00172 s |
+| Original `zzz`, 86 components, order 230, 931 bits | 23.49 s | 33.26 s |
+
+All 15 synthetic and 430 original output balls were finite and overlapped the
+production retained-chart values. The maximum radius ratios were 1.022 and
+1.137 respectively; neither calculation tests omitted tails. The candidate
+was **not adopted**, because the relevant large chart was slower. These are
+single observations under concurrent load, with exact preparation excluded
+and candidate coefficient extraction included. The large negative relative
+accuracy sentinel in the raw report comes from balls containing zero and is
+not a meaningful finite precision estimate.
+
+The benchmark source is `tools/performance/benchmark_canonical_polynomials.cpp`.
+Compile it with the same include/link flags used above, then pass a canonical
+transport request JSON file and an exact rational first-chart step. The original
+measurement used the exported high-precision request and step `1/100000`.
+Each of the recorded processes had a 120-second limit. The
+[raw observations](validation/performance-canonical-polynomials.json) preserve
+the result and the decision.

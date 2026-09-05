@@ -14,8 +14,15 @@ transport, partial banana initialization and both unequal-banana routes.
 A clean source-only build, installed external C++ consumer and installed
 Mathematica wrapper pass. The installed wrapper checks include a family with
 changed masses and momentum, original transport calls and saved numerical
-functions. The separate original 128-digit planar demonstration is still
-being checked; it is not included in these passing standard workflows.
+functions. The separate original 128-digit planar demonstration also passes,
+with maximum reference difference 5.70e-134. Its endpoint uses explicit
+algebraic normalization factors extracted from the published basis definitions.
+The original continuous-root result was converted using the production helper,
+after checking that the requests differed only by this basis data. This
+preserves the completed 41-minute integration. The wrapper also tests actual
+native basis conversion, chaining and saved configuration on a small winding
+path. This explicit basis-data adaptation is part of the compatibility limits;
+the original notebooks are not claimed to run byte-for-byte unchanged.
 See the [publication report](validation/publication-2.1.1.json),
 [interface comparisons](validation/interface-2.1.1.json) and [timings](timings.md).
 The [2.1.0 report](validation/publication.json) preserves the earlier release's

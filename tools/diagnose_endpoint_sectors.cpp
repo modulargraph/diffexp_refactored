@@ -18,6 +18,7 @@ int main(int argc,char** argv){using namespace diffexp;namespace json=boost::jso
    level::Provider no_reduction=[](const auto&,const auto&)->fire::Result{throw std::runtime_error("diagnostic refuses uncached reduction");};
    return cached_level::prepare(graph_store,basis,dimension,field,parameter,sources,budget,no_reduction).result;
  };
+ if(options.anchors.empty())options.anchors=recursion::default_anchors("henn_double_pentagon_x0",7);
  auto graph=recursion::prepare(feynman::example_family("henn_double_pentagon_x0"),canonical.scalar_targets,options,provider);
  const auto& node=graph.nodes.front();auto gauge=epsilon_diagonal_gauge(node.closure.matrix,1);
  fuchsify::Options fo;fo.max_dimension=256;auto regular=fuchsify::prepare(gauge.matrix,0,fo);if(!regular.success)throw std::runtime_error(regular.reason);

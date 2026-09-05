@@ -31,7 +31,7 @@ int main() {
   assert(info.at("persistent_transport_pair_tile_stream_capability")
              .as_string() ==
          "retained-native-transport-pair-tile-stream-v1");
-  assert(info.at("backend").as_string() == "DiffExp3 C++");
+  assert(info.at("backend").as_string() == "DiffExp C++");
   assert(!info.at("flint").as_string().empty());
   assert(!info.at("librarylink").as_bool());
   assert(info.at("standalone_cpp").as_bool());

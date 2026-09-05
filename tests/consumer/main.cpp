@@ -5,6 +5,8 @@
 #include <diffexp/recursion_leaf.hpp>
 #include <diffexp/cached_affine.hpp>
 #include <diffexp/recursion_pipeline.hpp>
+#include <diffexp/family_config.hpp>
+#include <diffexp/transport.hpp>
 #include <iostream>
 int main() {
   using namespace diffexp;
@@ -30,7 +32,13 @@ int main() {
   auto snapshot=evaluator.linear_expression();Jet::Ball::set_precision(384);
   auto restored=linear_boundary::materialize(snapshot,0);
   if(restored.low!=evaluated.low || !acb_overlaps(restored.values[0][0].raw(),evaluated.values[0][0].raw()))return 1;
-  const auto directory=std::filesystem::temp_directory_path()/("de3-installed-cache-"+std::to_string(::getpid()));
+  auto config=family_config::parse(family_config::describe(bubble));
+  if(config.family.momenta.lines.size()!=2)return 1;
+  auto request=boost::json::parse(R"JSON({"dimension":1,"epsilon_order":0,"paths":{"t":"x/2"},"entries":[{"row":0,"column":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
+  auto response=transport::run(request);
+  const auto& midpoint=response.as_object().at("values").as_array()[0].as_array()[0].as_object().at("real_midpoint").as_string();
+  if(std::abs(std::stod(std::string(midpoint))-2)>1e-14)return 1;
+  const auto directory=std::filesystem::temp_directory_path()/("diffexp-installed-cache-"+std::to_string(::getpid()));
   struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code error;std::filesystem::remove_all(path,error);}} cleanup{directory};
   artifacts::Store store(directory);
   AffineFrobeniusSeries::Matrix endpoint{{Exact(field,"eps/x")}};

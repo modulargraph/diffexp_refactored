@@ -1,22 +1,32 @@
 # Validation and limitations
 
-The release retains the mathematical implementation tested under the DiffExp3
-working name. Packaging changes rename the public C++ namespace, include paths,
-CMake package and executable; the CLI adds JSON output and stdin requests.
-Scientific cache identifiers remain unchanged.
+The C++ mathematical backend, command-line interface and Mathematica wrapper
+are validated separately, with numerical accuracy and runtime recorded explicitly.
 
-The publication check passes **91/91 native, original-example, external-reduction
-and interface tests**, plus **52/52 optional compatibility-runtime tests**.
-A clean source-only build, installed external C++ consumer, and installed
-Mathematica wrapper with a cached sunrise calculation also pass. See the
-[publication report](validation/publication.json).
+Version 2.1.1 passes **88/88 native and external-reduction regressions**, plus
+**52/52 optional compatibility-runtime tests** and both Mathematica smoke and
+compatibility tests. Focused transport, configuration and CLI checks also pass
+after the final recurrence refinements. All nine standard original example
+groups pass through the Mathematica process wrapper, including the full
+polylogarithm workflow, all four planar families, supplied-boundary Henn
+transport, partial banana initialization and both unequal-banana routes.
+
+A clean source-only build, installed external C++ consumer and installed
+Mathematica wrapper pass. The installed wrapper checks include a family with
+changed masses and momentum, original transport calls and saved numerical
+functions. The separate original 128-digit planar demonstration is still
+being checked; it is not included in these passing standard workflows.
+See the [publication report](validation/publication-2.1.1.json),
+[interface comparisons](validation/interface-2.1.1.json) and [timings](timings.md).
+The [2.1.0 report](validation/publication.json) preserves the earlier release's
+91-test publication run separately.
 
 ## Numerical coverage
 
-These are recorded end-to-end acceptance results from development. Renaming the
-package does not constitute a new independent numerical run of each expensive
-family. The publication regression and wrapper checks are recorded separately
-in `validation/publication.json`.
+These are recorded end-to-end acceptance results from development. Expensive
+FT acceptance runs are preserved; the interface release does not repeat each
+reconstruction. The current regression and wrapper checks are recorded
+separately in `validation/publication-2.1.1.json`.
 
 | Example | Accepted coefficient window | Scope |
 | --- | --- | --- |

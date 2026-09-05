@@ -1,0 +1,502 @@
+{
+  "schema": "DiffExp.InterfaceValidation/v1",
+  "version": "2.1.1",
+  "date": "2026-09-05T23:54:02.772089+02:00",
+  "standard_workflows_status": "passed",
+  "machine": {
+    "hardware": "Apple M4",
+    "platform": "macOS ARM64",
+    "compiler": "AppleClang 21.0.0",
+    "flint": "3.4.0",
+    "wolfram": "15.0.0",
+    "build": "Release"
+  },
+  "reference_source": {
+    "repository": "https://gitlab.com/hiddingm/diffexp",
+    "revision": "784c8229bf92369a03f011a48e161522c8c54bbd",
+    "note": "Original notebook computational workflows adapted to the process wrapper; matrix and published boundary data are fetched separately with hashes."
+  },
+  "timing_scope": "Development wall times, with other compilation and a long high-precision native transport sometimes running. Per-wrapper timings exclude kernel startup; runner timings include startup and validation. No isolated end-to-end speedup claim.",
+  "planar_and_henn": [
+    {
+      "schema": "DiffExp.OriginalWrapperValidation/v1",
+      "family": "1loop",
+      "status": "passed",
+      "max_discrepancy": "1.4525734128001217754653056830137814920729831977549858344548756042507179468114094889489415251095457740418817693533316286277533011561`117.10853692731159*^-24",
+      "max_estimated_error": "1.03111974590211857866933269249685826973728097755156341008841991424560546875`155.*^-20",
+      "timings": {
+        "process_seconds": 21.013875,
+        "preparation_seconds": 0.265792875,
+        "numerical_seconds": 20.457338459,
+        "total_seconds": 20.723131334,
+        "wrapper_total_seconds": 21.031554,
+        "native_total_seconds": 20.723131334,
+        "native_calls": [
+          {
+            "process_seconds": 21.013875,
+            "preparation_seconds": 0.265792875,
+            "numerical_seconds": 20.457338459,
+            "total_seconds": 20.723131334
+          }
+        ],
+        "charts": 176,
+        "test_total_seconds": 21.062432
+      }
+    },
+    {
+      "schema": "DiffExp.OriginalWrapperValidation/v1",
+      "family": "zmz",
+      "status": "passed",
+      "max_discrepancy": "1.2779316744232827617337480758228754170790553013327135389468527089872190495371588151768684882907906670897111620244100365882962102931`113.9567983423181*^-24",
+      "max_estimated_error": "1.53572246931883515849108823888950758895788339941645972430706024169921875`155.*^-18",
+      "timings": {
+        "process_seconds": 165.103696,
+        "preparation_seconds": 1.957451916,
+        "numerical_seconds": 162.730659709,
+        "total_seconds": 164.688111625,
+        "wrapper_total_seconds": 165.183411,
+        "native_total_seconds": 164.688111625,
+        "native_calls": [
+          {
+            "process_seconds": 165.103696,
+            "preparation_seconds": 1.957451916,
+            "numerical_seconds": 162.730659709,
+            "total_seconds": 164.688111625
+          }
+        ],
+        "charts": 187,
+        "test_total_seconds": 166.048916
+      }
+    },
+    {
+      "schema": "DiffExp.OriginalWrapperValidation/v1",
+      "family": "mzz",
+      "status": "passed",
+      "max_discrepancy": "9.947152304042164048885524631814393161826721991851764085515174450827776342515576043010567148498686319916024163272229148874502548055514484444`122.99769876761485*^-16",
+      "max_estimated_error": "2.271943647305870924638969226248830235448394887498579919338226318359375`155.*^-18",
+      "timings": {
+        "process_seconds": 120.484763,
+        "preparation_seconds": 0.991341542,
+        "numerical_seconds": 118.999057833,
+        "total_seconds": 119.990399375,
+        "wrapper_total_seconds": 120.558379,
+        "native_total_seconds": 119.990399375,
+        "native_calls": [
+          {
+            "process_seconds": 120.484763,
+            "preparation_seconds": 0.991341542,
+            "numerical_seconds": 118.999057833,
+            "total_seconds": 119.990399375
+          }
+        ],
+        "charts": 184,
+        "test_total_seconds": 121.107798
+      }
+    },
+    {
+      "schema": "DiffExp.OriginalWrapperValidation/v1",
+      "family": "zzz",
+      "status": "passed",
+      "max_discrepancy": "1.3330354505597893910165790911597966313235699947564125025118933057318756868599441887577228727220495662268761213214526218642780777276`113.99665082869471*^-24",
+      "max_estimated_error": "4.75543793494096026638074119381738302791973183047957718372344970703125`155.*^-18",
+      "timings": {
+        "process_seconds": 192.835585,
+        "preparation_seconds": 1.490309125,
+        "numerical_seconds": 190.973386,
+        "total_seconds": 192.463695125,
+        "wrapper_total_seconds": 192.952,
+        "native_total_seconds": 192.463695125,
+        "native_calls": [
+          {
+            "process_seconds": 192.835585,
+            "preparation_seconds": 1.490309125,
+            "numerical_seconds": 190.973386,
+            "total_seconds": 192.463695125
+          }
+        ],
+        "charts": 193,
+        "test_total_seconds": 193.811804
+      }
+    },
+    {
+      "schema": "DiffExp.OriginalWrapperValidation/v1",
+      "family": "henn",
+      "status": "passed",
+      "max_discrepancy": "4.242080443848043106368787024713817953751`12.70358687567727*^-38",
+      "max_estimated_error": "3.09603735701842132366696812197790075616280774739149815470682400135593592693794562364928424358367919921875`155.*^-33",
+      "timings": {
+        "process_seconds": 59.626513,
+        "preparation_seconds": 0.664517959,
+        "numerical_seconds": 58.472907625,
+        "total_seconds": 59.137425584,
+        "wrapper_total_seconds": 59.75119,
+        "native_total_seconds": 59.137425584,
+        "native_calls": [
+          {
+            "process_seconds": 59.626513,
+            "preparation_seconds": 0.664517959,
+            "numerical_seconds": 58.472907625,
+            "total_seconds": 59.137425584
+          }
+        ],
+        "charts": 10,
+        "test_total_seconds": 64.010591
+      }
+    }
+  ],
+  "polylogarithms": [
+    {
+      "word_and_endpoint": "{1, 0, 1, 4}",
+      "seconds": 0.413657,
+      "discrepancy": "9.915788835113702354449746658194004184917`17.577789694402274*^-38",
+      "status": "passed"
+    },
+    {
+      "word_and_endpoint": "{1, -10, 0, 4}",
+      "seconds": 0.211783,
+      "discrepancy": "1.3410581508599982067198812919888822625372`19.420846385692943*^-37",
+      "status": "passed"
+    },
+    {
+      "word_and_endpoint": "{10, -10 + I, -1/2, -50, 1}",
+      "seconds": 0.053472,
+      "discrepancy": "8.66244502249161320784670804097260253`14.941127975817325*^-41",
+      "status": "passed"
+    },
+    {
+      "word_and_endpoint": "{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}",
+      "seconds": 1.65477,
+      "discrepancy": "1.845477486566352504067277492031897055536`14.555934907081204*^-57",
+      "status": "passed"
+    }
+  ],
+  "banana_asymptotic": {
+    "schema": "DiffExp.OriginalWrapperValidation/v1",
+    "family": "banana-equal-asymptotic",
+    "status": "passed",
+    "max_discrepancy": "2.106328280985182833308409979978057043149026572387836289001347132`45.3847957722969*^-33",
+    "boundary_preparation_seconds": 27.692929,
+    "timings": {
+      "process_seconds": 1.780577,
+      "preparation_seconds": 0.00476175,
+      "numerical_seconds": 1.759548125,
+      "total_seconds": 1.764309875,
+      "wrapper_total_seconds": 2.157782,
+      "native_total_seconds": 1.8713875409999998,
+      "native_calls": [
+        {
+          "process_seconds": 0.348304,
+          "total_seconds": 0.107077666,
+          "preparation_seconds": 0.001644291
+        },
+        {
+          "process_seconds": 1.780577,
+          "preparation_seconds": 0.00476175,
+          "numerical_seconds": 1.759548125,
+          "total_seconds": 1.764309875
+        }
+      ],
+      "charts": 20,
+      "test_total_seconds": 29.854711
+    }
+  },
+  "banana_routes": {
+    "schema": "DiffExp.OriginalWrapperValidation/v1",
+    "family": "banana-routes",
+    "status": "passed",
+    "equal_reference_at20": "0``22.15072811796382",
+    "equal_route_discrepancy_at32": "3.183714271924801984276721909184572641016076158984947487264071633987030041714010755837824018417739497533330134497834276094080835034085866`114.62960547500842*^-38",
+    "unequal_route_discrepancy_at50": "4.523033353981784108719289043155399617780748366530389112350366079057891491056132237213423404928273383915393563183466349313229341342599009`114.95092581937293*^-38",
+    "unequal_reference_at50": "4.7979347761`0.4240297302987419*^-28",
+    "phases": [
+      {
+        "phase": "equal_to_32_saved",
+        "seconds": 6.367073,
+        "native_timings": {
+          "process_seconds": 6.357119,
+          "preparation_seconds": 0.003420625,
+          "numerical_seconds": 6.145899959,
+          "total_seconds": 6.149320584,
+          "wrapper_total_seconds": 6.366887,
+          "native_total_seconds": 6.149320584,
+          "native_calls": [
+            {
+              "process_seconds": 6.357119,
+              "preparation_seconds": 0.003420625,
+              "numerical_seconds": 6.145899959,
+              "total_seconds": 6.149320584
+            }
+          ],
+          "charts": 55
+        }
+      },
+      {
+        "phase": "equal_saved_plot_at20",
+        "seconds": 7.986193,
+        "native_timings": {
+          "process_seconds": 7.978503,
+          "preparation_seconds": 0.003660792,
+          "numerical_seconds": 7.959743,
+          "total_seconds": 7.963403792,
+          "wrapper_total_seconds": 7.985834,
+          "native_total_seconds": 7.963403792,
+          "native_calls": [
+            {
+              "process_seconds": 7.978503,
+              "preparation_seconds": 0.003660792,
+              "numerical_seconds": 7.959743,
+              "total_seconds": 7.963403792
+            }
+          ],
+          "charts": 57
+        }
+      },
+      {
+        "phase": "equal_to_2",
+        "seconds": 3.801412,
+        "native_timings": {
+          "process_seconds": 3.792633,
+          "preparation_seconds": 0.01051675,
+          "numerical_seconds": 3.750043666,
+          "total_seconds": 3.760560416,
+          "wrapper_total_seconds": 3.801226,
+          "native_total_seconds": 3.760560416,
+          "native_calls": [
+            {
+              "process_seconds": 3.792633,
+              "preparation_seconds": 0.01051675,
+              "numerical_seconds": 3.750043666,
+              "total_seconds": 3.760560416
+            }
+          ],
+          "charts": 23
+        }
+      },
+      {
+        "phase": "equal_2_to_32",
+        "seconds": 5.661738,
+        "native_timings": {
+          "process_seconds": 5.657092,
+          "preparation_seconds": 0.0064145,
+          "numerical_seconds": 5.63261375,
+          "total_seconds": 5.63902825,
+          "wrapper_total_seconds": 5.661376,
+          "native_total_seconds": 5.63902825,
+          "native_calls": [
+            {
+              "process_seconds": 5.657092,
+              "preparation_seconds": 0.0064145,
+              "numerical_seconds": 5.63261375,
+              "total_seconds": 5.63902825
+            }
+          ],
+          "charts": 42
+        }
+      },
+      {
+        "phase": "equal_to_half",
+        "seconds": 2.945816,
+        "native_timings": {
+          "process_seconds": 2.941164,
+          "preparation_seconds": 0.005072417,
+          "numerical_seconds": 2.9211855,
+          "total_seconds": 2.926257917,
+          "wrapper_total_seconds": 2.945643,
+          "native_total_seconds": 2.926257917,
+          "native_calls": [
+            {
+              "process_seconds": 2.941164,
+              "preparation_seconds": 0.005072417,
+              "numerical_seconds": 2.9211855,
+              "total_seconds": 2.926257917
+            }
+          ],
+          "charts": 23
+        }
+      },
+      {
+        "phase": "unequal_mass_first",
+        "seconds": 44.762021,
+        "native_timings": {
+          "process_seconds": 44.743683,
+          "preparation_seconds": 4.495108584,
+          "numerical_seconds": 39.971956666,
+          "total_seconds": 44.46706525,
+          "wrapper_total_seconds": 44.76152,
+          "native_total_seconds": 44.46706525,
+          "native_calls": [
+            {
+              "process_seconds": 44.743683,
+              "preparation_seconds": 4.495108584,
+              "numerical_seconds": 39.971956666,
+              "total_seconds": 44.46706525
+            }
+          ],
+          "charts": 5
+        }
+      },
+      {
+        "phase": "unequal_momentum_to50_saved",
+        "seconds": 435.280014,
+        "native_timings": {
+          "process_seconds": 435.259796,
+          "preparation_seconds": 5.692205667,
+          "numerical_seconds": 429.229953708,
+          "total_seconds": 434.922159375,
+          "wrapper_total_seconds": 435.279549,
+          "native_total_seconds": 434.922159375,
+          "native_calls": [
+            {
+              "process_seconds": 435.259796,
+              "preparation_seconds": 5.692205667,
+              "numerical_seconds": 429.229953708,
+              "total_seconds": 434.922159375
+            }
+          ],
+          "charts": 57
+        }
+      },
+      {
+        "phase": "equal_momentum_to50",
+        "seconds": 8.564511,
+        "native_timings": {
+          "process_seconds": 8.559556,
+          "preparation_seconds": 0.007692458,
+          "numerical_seconds": 8.532247833,
+          "total_seconds": 8.539940291,
+          "wrapper_total_seconds": 8.564365,
+          "native_total_seconds": 8.539940291,
+          "native_calls": [
+            {
+              "process_seconds": 8.559556,
+              "preparation_seconds": 0.007692458,
+              "numerical_seconds": 8.532247833,
+              "total_seconds": 8.539940291
+            }
+          ],
+          "charts": 55
+        }
+      },
+      {
+        "phase": "unequal_mass_at50",
+        "seconds": 49.284545,
+        "native_timings": {
+          "process_seconds": 49.254631,
+          "preparation_seconds": 5.272312417,
+          "numerical_seconds": 43.676010625,
+          "total_seconds": 48.948323042,
+          "wrapper_total_seconds": 49.283876,
+          "native_total_seconds": 48.948323042,
+          "native_calls": [
+            {
+              "process_seconds": 49.254631,
+              "preparation_seconds": 5.272312417,
+              "numerical_seconds": 43.676010625,
+              "total_seconds": 48.948323042
+            }
+          ],
+          "charts": 4
+        }
+      }
+    ]
+  },
+  "banana_plot": {
+    "schema": "DiffExp.OriginalWrapperValidation/v1",
+    "family": "banana-plot",
+    "status": "passed",
+    "reference_discrepancy": "0``22.15072811796382",
+    "nearby_replay_discrepancy": "4.34763096078782444070962401049732680829436855482512492343439473183553401089406166978751439071739919245143136971265728096081569145873995`114.83438951821104*^-38",
+    "reference_evaluation_seconds": 1.398198,
+    "nearby_evaluation_seconds": 0.393074,
+    "direct_evaluation_seconds": 12.316546,
+    "plot_seconds": 1.863126
+  },
+  "banana_route_workflow_wall_seconds": 573.63526075,
+  "source_wrapper_checks": [
+    {
+      "check": "save-existing",
+      "exit": 0,
+      "seconds": 3.37420775
+    },
+    {
+      "check": "banana-plot",
+      "exit": 0,
+      "seconds": 19.200938875
+    },
+    {
+      "check": "compatibility",
+      "exit": 0,
+      "seconds": 48.714630459000006
+    },
+    {
+      "check": "standard-originals",
+      "exit": 0,
+      "seconds": 582.847278167
+    }
+  ],
+  "installed_wrapper": {
+    "schema": "DiffExp.InstalledWrapperValidation/v1",
+    "status": "passed",
+    "checks": {
+      "automatic_executable": true,
+      "standalone_backend": true,
+      "exact_series": true,
+      "changed_family_geometry": true,
+      "original_transport_api": true,
+      "saved_functions": true
+    },
+    "seconds": 0.699228,
+    "configured_family_timings": {
+      "process_seconds": 0.020173,
+      "preparation_seconds": 0.000745166,
+      "numerical_seconds": 0.004729875,
+      "total_seconds": 0.005644375
+    },
+    "transport_timings": {
+      "process_seconds": 0.015786,
+      "preparation_seconds": 0.000398292,
+      "numerical_seconds": 0.000281542,
+      "total_seconds": 0.000679834,
+      "wrapper_total_seconds": 0.016724,
+      "native_total_seconds": 0.000679834,
+      "native_calls": [
+        {
+          "process_seconds": 0.015786,
+          "preparation_seconds": 0.000398292,
+          "numerical_seconds": 0.000281542,
+          "total_seconds": 0.000679834
+        }
+      ],
+      "charts": 1
+    }
+  },
+  "generic_family_report": "generic-families.json",
+  "limitations": [
+    "General native transport and recursive FT omitted tails are estimated, not certified.",
+    "Mathematica symbolic general solutions, dimension-form dVARIABLE_d.m matrices, and the fifth sampling-list argument are not implemented; legacy strategy and Pade/Mobius options do not select the old Wolfram algorithms.",
+    "Henn here is transport of 108 supplied boundary values, not full FT reconstruction. Full Henn FT remains frozen.",
+    "Four-loop banana FT acceptance is preserved from earlier runs; it was not rerun for the interface release."
+  ],
+  "source_hashes": {
+    "transport_header_sha256": "2d1f11cae82d7cbb829df6cf92fc9d5e0f9eb7b905bda12f6c4d605cf2e1b34f",
+    "mathematica_wrapper_sha256": "bad708470d9428c958e6be02b60fa93e6aa0e10748181e20beb1ada0e82ca526"
+  },
+  "high_precision_planar": {
+    "status": "running",
+    "scope": "Original zzz PH1 to PH2 at AccuracyGoal 128, Taylor order 230 and WorkingPrecision 280. Separate opt-in check, not included in the passing standard workflows.",
+    "previous_trials": [
+      {
+        "status": "stopped",
+        "approximate_seconds": 1380,
+        "reason": "Superseded by verified shared source convolutions."
+      },
+      {
+        "status": "timeout",
+        "wall_seconds": 1800.009248417,
+        "last_completed_chart": 100,
+        "last_path_parameter": 0.786575
+      }
+    ],
+    "current_time_limit_seconds": 3600
+  }
+}

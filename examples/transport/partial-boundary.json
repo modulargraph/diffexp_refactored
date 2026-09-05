@@ -1,0 +1,17 @@
+{
+  "schema": "DiffExp.Transport/v1",
+  "dimension": 2,
+  "epsilon_order": 0,
+  "taylor_order": 40,
+  "working_bits": 256,
+  "accuracy_goal": 20,
+  "paths": {"t": "x"},
+  "entries": [
+    {"row": 0, "column": 1, "epsilon": 0, "variable": "t", "expression": "1/t"},
+    {"row": 1, "column": 0, "epsilon": 0, "variable": "t", "expression": "1/t"}
+  ],
+  "asymptotic": {
+    "constraints": [{"row": 0, "epsilon": 0, "power": "1", "log_degree": 0, "value": "1"}],
+    "cutoffs": [{"row": 0, "power": "2"}]
+  }
+}

@@ -1,0 +1,214 @@
+{
+  "schema": "DiffExp.GenericFamilyValidation/v1",
+  "status": "passed",
+  "machine": "Apple M4, macOS arm64; FLINT 3.4.0; Release build",
+  "tests": [
+    {
+      "case": "unregistered one-loop family",
+      "configuration": {
+        "schema": "DiffExp.FeynmanFamily/v1",
+        "name": "custom_equal_mass_two",
+        "loops": 1,
+        "external_gram": [
+          [
+            "-3"
+          ]
+        ],
+        "propagators": [
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "2"
+          },
+          {
+            "loop_coefficients": [
+              "-1"
+            ],
+            "external_coefficients": [
+              "1"
+            ],
+            "mass_squared": "2"
+          }
+        ],
+        "physical_count": 2,
+        "dimension_at_epsilon_zero": 2,
+        "epsilon_order": 0,
+        "numerical": {
+          "endpoint_order": 32,
+          "ordinary_order": 80,
+          "working_bits": 384,
+          "leaf_digits": 28,
+          "method": "adjoint"
+        },
+        "integrals": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "validation": "Certified enclosure overlaps independent elementary atanh formula; native test_family_config.",
+      "result": {
+        "schema": "DiffExp.FeynmanTrick/v1",
+        "family": "custom_equal_mass_two",
+        "status": "completed",
+        "levels": 1,
+        "systems_built": 0,
+        "systems_reused": 0,
+        "timings": {
+          "preparation_seconds": 0.002720958,
+          "numerical_seconds": 0.007551083,
+          "total_seconds": 0.010481
+        },
+        "epsilon_low": 0,
+        "epsilon_high": 0,
+        "coefficient_order": "component,epsilon",
+        "coefficients": [
+          [
+            {
+              "real": "[0.40344598248164497816236944951525836234551425141 +/- 6.48e-48]",
+              "imaginary": "[+/- 4.31e-48]"
+            }
+          ]
+        ],
+        "component_basis": "requested_scalar",
+        "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+        "omitted_tails_certified": true,
+        "working_bits": 384
+      }
+    },
+    {
+      "case": "unregistered two-loop family with three distinct masses",
+      "configuration": {
+        "schema": "DiffExp.FeynmanFamily/v1",
+        "name": "configured-three-distinct-masses",
+        "loops": 2,
+        "external_gram": [
+          [
+            "-3"
+          ]
+        ],
+        "propagators": [
+          {
+            "loop_coefficients": [
+              "1",
+              "0"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "2"
+          },
+          {
+            "loop_coefficients": [
+              "0",
+              "1"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "3/2"
+          },
+          {
+            "loop_coefficients": [
+              "-1",
+              "-1"
+            ],
+            "external_coefficients": [
+              "1"
+            ],
+            "mass_squared": "1"
+          }
+        ],
+        "physical_count": 3,
+        "dimension_at_epsilon_zero": 2,
+        "epsilon_order": 0,
+        "numerical": {
+          "endpoint_order": 32,
+          "ordinary_order": 80,
+          "working_bits": 384,
+          "leaf_digits": 28,
+          "method": "adjoint"
+        }
+      },
+      "validation": "Retained recursion result overlaps independent Bessel integral after exact mass/momentum rescaling; family_config.external passed. General FT tails remain uncertified.",
+      "cold_result": {
+        "schema": "DiffExp.FeynmanTrick/v1",
+        "family": "configured-three-distinct-masses",
+        "status": "completed",
+        "levels": 2,
+        "systems_built": 1,
+        "systems_reused": 0,
+        "timings": {
+          "preparation_seconds": 0.385277542,
+          "numerical_seconds": 2.767558292,
+          "total_seconds": 3.153707875
+        },
+        "epsilon_low": -2,
+        "epsilon_high": 0,
+        "coefficient_order": "component,epsilon",
+        "coefficients": [
+          [
+            {
+              "real": "0",
+              "imaginary": "0"
+            },
+            {
+              "real": "[2.38239266629856832494818914919601341507570844415922e-62 +/- 7.67e-113]",
+              "imaginary": "[1.3539589144626711678712096063409264099206744e-68 +/- 4.01e-112]"
+            },
+            {
+              "real": "[1.4664147359999819799915938817278519784295943965 +/- 4.27e-47]",
+              "imaginary": "[+/- 9.43e-48]"
+            }
+          ]
+        ],
+        "component_basis": "requested_scalar",
+        "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+        "omitted_tails_certified": false,
+        "working_bits": 384
+      },
+      "warm_result": {
+        "schema": "DiffExp.FeynmanTrick/v1",
+        "family": "configured-three-distinct-masses",
+        "status": "completed",
+        "levels": 2,
+        "systems_built": 0,
+        "systems_reused": 1,
+        "timings": {
+          "preparation_seconds": 0.006368542,
+          "numerical_seconds": 2.657639,
+          "total_seconds": 2.665024167
+        },
+        "epsilon_low": -2,
+        "epsilon_high": 0,
+        "coefficient_order": "component,epsilon",
+        "coefficients": [
+          [
+            {
+              "real": "0",
+              "imaginary": "0"
+            },
+            {
+              "real": "[2.38239266629856832494818914919601341507570844415922e-62 +/- 7.67e-113]",
+              "imaginary": "[1.3539589144626711678712096063409264099206744e-68 +/- 4.01e-112]"
+            },
+            {
+              "real": "[1.4664147359999819799915938817278519784295943965 +/- 4.27e-47]",
+              "imaginary": "[+/- 9.43e-48]"
+            }
+          ]
+        ],
+        "component_basis": "requested_scalar",
+        "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+        "omitted_tails_certified": false,
+        "working_bits": 384
+      }
+    }
+  ],
+  "timing_scope": "CLI totals include exact preparation and numerical recurrence, exclude independent reference work. Cold uses an empty cache; warm reuses exact/endpoint/continuation artifacts. OS caches were not flushed. Other development checks were running."
+}

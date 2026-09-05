@@ -10,7 +10,7 @@ If[AssociationQ[result],
   check[result["coefficients"][[3, 1, 3]] === "1/2", "epsilon convolution"];
   check[result["infinite_tail_certified"] === False, "tail status"]];
 check[DiffExpBackendInfo[]["standalone_cpp"] === True, "standalone backend"];
-check[StringContainsQ[DiffExpRun[{"--version"}]["StandardOutput"], "2.1.0"], "version"];
+check[StringContainsQ[DiffExpRun[{"--version"}]["StandardOutput"], "2.1.1"], "version"];
 testProgram = Environment["DIFFEXP_EXECUTABLE"];
 If[!StringQ[testProgram] || testProgram === "", testProgram = ExpandFileName[
   FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "build", "diffexp"}]]];

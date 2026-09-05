@@ -29,7 +29,7 @@ int main(int argc,char** argv) {
   // Core transport diagnostics currently use cout; reserve stdout for JSON.
   std::ostream json_output(std::cout.rdbuf());
   struct DiagnosticRedirect {std::streambuf* original;DiagnosticRedirect():original(std::cout.rdbuf(std::cerr.rdbuf())){}~DiagnosticRedirect(){std::cout.rdbuf(original);}} redirect;
-  const auto start=Clock::now();json::object report{{"schema","diffexp3-ft-example-acceptance-v1"},{"status","error"},{"absolute_threshold","1e-20"},{"comparison_is_numerical_acceptance_not_certification",true}};
+  const auto start=Clock::now();json::object report{{"schema","DiffExp.FTAcceptance/v1"},{"status","error"},{"absolute_threshold","1e-20"},{"comparison_is_numerical_acceptance_not_certification",true}};
   std::string phase="arguments";unsigned reused=0,built=0;json::array exact_events;
   try {
     if(argc<2 || argc>9)throw std::invalid_argument("usage: test_ft_examples FAMILY [CACHE [FIRE_OR_DASH [ENDPOINT_N [ORDINARY_N [BITS [GRAPH_TIMEOUT_SECONDS [METHOD]]]]]]]");
@@ -41,7 +41,7 @@ int main(int argc,char** argv) {
     report["requested_epsilon_high"]=requested_top;
     if(numerical_pins)report["absolute_threshold"]="1e-18";
     if(estimated_reference)report["absolute_threshold"]="5e-7";
-    const auto cache=argc>2?std::filesystem::path(argv[2]):std::filesystem::temp_directory_path()/"diffexp3-exact-cache";
+    const auto cache=argc>2?std::filesystem::path(argv[2]):std::filesystem::temp_directory_path()/"diffexp-exact-cache";
     recursion::Options exact;recursion::NumericalOptions numerical;
     AdjointConditioningStats conditioning;
     numerical.adjoint.conditioning_stats=&conditioning;

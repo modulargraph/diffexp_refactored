@@ -1,0 +1,271 @@
+{
+  "schema": "DiffExp.TestRun/v1",
+  "version": "2.1.1",
+  "status": "passed",
+  "passed": 52,
+  "failed": 0,
+  "wall_seconds": 3.55,
+  "timing_scope": "Concurrent development work and a high-precision transport were running; two CTest workers.",
+  "tests": [
+    {
+      "test": "kernel.test_json_codec",
+      "status": "passed",
+      "seconds": 0.3
+    },
+    {
+      "test": "kernel.test_persistent_transport_run_arms",
+      "status": "passed",
+      "seconds": 0.5
+    },
+    {
+      "test": "kernel.test_persistent_scc_owner_bound_residual",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_scc_plan_match",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_rational_row",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "kernel.test_persistent_scc_solve_singular_column",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_scc_spectral_frames",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_scc_solve_column",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_rational_row_tail",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_single_arm_tile_plan",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_matching",
+      "status": "passed",
+      "seconds": 0.08
+    },
+    {
+      "test": "kernel.test_persistent_checkpoint",
+      "status": "passed",
+      "seconds": 0.09
+    },
+    {
+      "test": "kernel.test_persistent_plan_match_hop",
+      "status": "passed",
+      "seconds": 0.07
+    },
+    {
+      "test": "kernel.test_persistent_regular_equation_owner",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_tail_majorant",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "kernel.test_persistent_planned_endpoint",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_analytic_prescription",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_scc_solve_block_column",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_local_solve_batch",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_scc_pseudo_compensation",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_local",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_parallel_arms",
+      "status": "passed",
+      "seconds": 0.09
+    },
+    {
+      "test": "kernel.test_persistent_scc_prepare",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_phase_planned_match",
+      "status": "passed",
+      "seconds": 0.06
+    },
+    {
+      "test": "kernel.test_persistent_matched_tail_majorant",
+      "status": "passed",
+      "seconds": 0.06
+    },
+    {
+      "test": "kernel.test_persistent_owner_bound_residual",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_endpoint_limit",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_tail_majorant",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_acb_local_match",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_path_planner",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_local_algebra",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_algebraic_tile_plan",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_checkpoint_deferred_state",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "kernel.test_persistent_local_match",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_artifact_manifest",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_local_solution",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_correlation",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_integration",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_immutable_recursive_cache",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_line_integration",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_singular_tail_majorant",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_persistent_transport_endpoint_batch",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "kernel.test_persistent_transport_contract_pair",
+      "status": "passed",
+      "seconds": 0.05
+    },
+    {
+      "test": "kernel.test_persistent_tile_line",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_session_solve_many",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_recurrence",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_adjoint_observable",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "kernel.test_scc_formal_completeness",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_protocol_contract",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_physical_ode_evolution",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_singular_indicial",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "kernel.test_persistent_singular_scc_arms",
+      "status": "passed",
+      "seconds": 3.54
+    }
+  ]
+}

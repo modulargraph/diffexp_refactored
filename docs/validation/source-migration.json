@@ -1,5 +1,5 @@
 {
-  "description": "Publication source migration from the frozen DiffExp3 development copy. Public namespace, includes and environment prefix renamed; serialized cache tags retained. New interface/build/documentation files are validated separately.",
+  "description": "Source checksums for the publication snapshot. New interface/build/documentation files are validated separately.",
   "files": [
     {
       "path": "include/diffexp/adjoint_checkpoint.hpp",

@@ -1,5 +1,5 @@
 {
-  "schema": "diffexp3-ft-example-acceptance-v1",
+  "schema": "DiffExp.FTAcceptance/v1",
   "status": "pass",
   "absolute_threshold": "1e-20",
   "comparison_is_numerical_acceptance_not_certification": true,

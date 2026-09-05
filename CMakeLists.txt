@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DiffExp VERSION 2.1.0 LANGUAGES CXX)
+project(DiffExp VERSION 2.1.1 LANGUAGES CXX)
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
@@ -45,12 +45,12 @@ if(DIFFEXP_BUILD_KERNEL_RUNTIME)
 endif()
 
 if(BUILD_TESTING)
-  set(native_tests frontend data_geometry tadpole_bubble ibp sunrise_ibp
+  set(native_tests transport frontend data_geometry tadpole_bubble ibp sunrise_ibp
     deepest_beta sunrise_pipeline frobenius certified_tail certified_bubble
     banana_oracle henn_observables certified_deepest_beta merge_pullback fuchsify affine_frobenius
     epsilon_gauge laurent_transport affine_matching direct_examples singular_transport)
   if(UNIX)
-    list(APPEND native_tests fire_native level_preparation recursion_graph artifact_store certified_rational_transport
+    list(APPEND native_tests family_config fire_native level_preparation recursion_graph artifact_store certified_rational_transport
       gaussian_boundary level_cache scalar_functional recursion_leaf fire_session recursion_pipeline fire_batch_cache)
     list(APPEND native_tests box_oracle henn_boundary causal causal_contour pentagon_oracle affine_operator adjoint_transport linear_boundary
       polynomial_transport henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
@@ -115,6 +115,8 @@ if(BUILD_TESTING)
     set_tests_properties(fire_modular.external PROPERTIES TIMEOUT 180)
   endif()
   if(UNIX AND DIFFEXP_FIRE_EXECUTABLE)
+    add_test(NAME family_config.external COMMAND diffexp_test_family_config "${DIFFEXP_FIRE_EXECUTABLE}")
+    set_tests_properties(family_config.external PROPERTIES TIMEOUT 180)
     add_test(NAME fire_native.external COMMAND diffexp_test_fire_native "${DIFFEXP_FIRE_EXECUTABLE}")
     set_tests_properties(fire_native.external PROPERTIES TIMEOUT 180)
     add_test(NAME level_preparation.external COMMAND diffexp_test_level_preparation "${DIFFEXP_FIRE_EXECUTABLE}" --banana4)
@@ -174,6 +176,8 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/DiffExpConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/DiffExpConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DiffExp)
 
+install(DIRECTORY examples/feynman/ DESTINATION ${CMAKE_INSTALL_DATADIR}/diffexp/examples/feynman)
+install(DIRECTORY examples/transport/ DESTINATION ${CMAKE_INSTALL_DATADIR}/diffexp/examples/transport)
 install(DIRECTORY Mathematica/ DESTINATION ${CMAKE_INSTALL_DATADIR}/diffexp/Mathematica)
 install(FILES LICENSE README.md DESTINATION ${CMAKE_INSTALL_DATADIR}/diffexp)
 if(BUILD_TESTING)
@@ -192,6 +196,9 @@ if(BUILD_TESTING)
     add_test(NAME mathematica.interface COMMAND ${CMAKE_COMMAND} -E env
       "DIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>" ${DIFFEXP_WOLFRAMSCRIPT} ${diffexp_wolfram_arguments}
       -file ${CMAKE_CURRENT_SOURCE_DIR}/tests/mathematica/smoke.wl)
-    set_tests_properties(mathematica.interface PROPERTIES TIMEOUT 60)
+    add_test(NAME mathematica.compatibility COMMAND ${CMAKE_COMMAND} -E env
+      "DIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>" ${DIFFEXP_WOLFRAMSCRIPT} ${diffexp_wolfram_arguments}
+      -file ${CMAKE_CURRENT_SOURCE_DIR}/tests/mathematica/compatibility.wl)
+    set_tests_properties(mathematica.interface mathematica.compatibility PROPERTIES TIMEOUT 120 RESOURCE_LOCK wolfram_kernel)
   endif()
 endif()

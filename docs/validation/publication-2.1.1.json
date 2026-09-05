@@ -1,0 +1,69 @@
+{
+  "schema": "DiffExp.PublicationValidation/v1",
+  "version": "2.1.1",
+  "date": "2026-09-05T23:54:02.773711+02:00",
+  "status": "standard_checks_passed_high_precision_pending",
+  "validation": {
+    "native_and_external": "native-tests-2.1.1.json",
+    "optional_compatibility_runtime": "compatibility-tests-2.1.1.json",
+    "mathematica_and_originals": "interface-2.1.1.json",
+    "new_configured_families": "generic-families.json",
+    "clean_source_build": "passed",
+    "installed_cpp_consumer": {
+      "status": "passed",
+      "seconds": 0.42989041699999997,
+      "exit": 0,
+      "stdout": "Installed C++ package: exact recurrence, Banana4 coordinates, certified scalar leaf, shared-source snapshot, verified endpoint cache and ordinary continuation passed\n",
+      "stderr": "Preparing generic transport: 1 components, epsilon 0..0\n"
+    },
+    "installed_wrapper": {
+      "schema": "DiffExp.InstalledWrapperValidation/v1",
+      "status": "passed",
+      "checks": {
+        "automatic_executable": true,
+        "standalone_backend": true,
+        "exact_series": true,
+        "changed_family_geometry": true,
+        "original_transport_api": true,
+        "saved_functions": true
+      },
+      "seconds": 0.699228,
+      "configured_family_timings": {
+        "process_seconds": 0.020173,
+        "preparation_seconds": 0.000745166,
+        "numerical_seconds": 0.004729875,
+        "total_seconds": 0.005644375
+      },
+      "transport_timings": {
+        "process_seconds": 0.015786,
+        "preparation_seconds": 0.000398292,
+        "numerical_seconds": 0.000281542,
+        "total_seconds": 0.000679834,
+        "wrapper_total_seconds": 0.016724,
+        "native_total_seconds": 0.000679834,
+        "native_calls": [
+          {
+            "process_seconds": 0.015786,
+            "preparation_seconds": 0.000398292,
+            "numerical_seconds": 0.000281542,
+            "total_seconds": 0.000679834
+          }
+        ],
+        "charts": 1
+      }
+    }
+  },
+  "artifacts": {
+    "native_executable_sha256": "8d7b6b890bcead1b6cd979083ca87f1ba8a0a9e7123f83f6730836c263a833f2",
+    "installed_native_executable_matches": true,
+    "mathematica_wrapper_sha256": "bad708470d9428c958e6be02b60fa93e6aa0e10748181e20beb1ada0e82ca526",
+    "installed_wrapper_matches": true
+  },
+  "scientific_scope": {
+    "original_groups": "All nine standard original groups represented through the Mathematica wrapper; 128-digit demonstration recorded separately.",
+    "banana4": "Preserved equal/unequal finite-part acceptance. No expensive rerun.",
+    "henn_all108_ft": "Frozen; not an accepted full FT reconstruction.",
+    "tails": "General omitted tails are not certified."
+  },
+  "previous_release": "publication.json"
+}

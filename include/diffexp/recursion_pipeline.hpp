@@ -333,7 +333,7 @@ class Evaluator {
     // A familiar name cannot authorize a prescription for altered kinematics.
     // Compare the actual incoming coordinates with the native fixture before
     // using its positivity proof or its supplied Henn contour data.
-    auto example=feynman::example_family(graph_.family_name);
+    auto example=graph_.definition?*graph_.definition:feynman::example_family(graph_.family_name);
     const ibp::PropagatorBasis expected(ibp::quadratic_family(example.momenta,graph_.dimension,example.physical_count));
     const auto& actual=graph_.nodes.front().incoming;
     bool same=actual.physical_count==expected.physical_count && actual.space.loops==expected.space.loops &&
@@ -344,7 +344,9 @@ class Evaluator {
     if(!same)throw std::invalid_argument("altered example kinematics require an explicit causal prescription");
     std::vector<Rational> anchors;bool standard=true;
     for(const auto& node:graph_.nodes) {anchors.push_back(node.anchor);standard=standard&&node.left==0&&node.right==1;}
-    return causal::current_example(graph_.family_name,graph_.nodes.size(),anchors,standard);
+    if(!graph_.definition && graph_.family_name=="henn_double_pentagon_x0")
+      return causal::current_example(graph_.family_name,graph_.nodes.size(),anchors,standard);
+    return causal::euclidean_family(example,graph_.nodes.size());
   }
   void report(std::size_t depth,const std::string& phase,int high)const {if(options_.progress)options_.progress(depth,phase,high);}
   static int checked(long value) {

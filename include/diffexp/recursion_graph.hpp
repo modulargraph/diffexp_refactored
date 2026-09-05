@@ -38,6 +38,7 @@ struct Graph {
   std::string family_name;
   std::vector<Node> nodes;
   std::vector<Event> events;
+  std::optional<feynman::ExampleFamily> definition;
 };
 
 inline std::vector<Rational> default_anchors(const std::string& family,unsigned levels) {
@@ -118,13 +119,14 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     throw std::invalid_argument("recursive merge/anchor count or level budget");
   for(const auto& anchor:options.anchors)if(anchor<=Rational(0)||anchor>=Rational(1))
     throw std::invalid_argument("recursive matching anchors must lie strictly between zero and one");
-  const auto anchors=options.anchors.empty()?default_anchors(family.name,levels):options.anchors;
+  // Family names are labels. Special ladders belong in explicit configuration.
+  const auto anchors=options.anchors.empty()?std::vector<Rational>(levels,Rational("1/3")):options.anchors;
   if(!provider)provider=[](const auto& b,const auto& d,const auto& f,auto p,const auto& r,const auto& o){
     return level::prepare(b,d,f,p,r,o);
   };
   ExactField field({"x","eps","I"});Exact x(field,"x"),eps(field,"eps");
   auto dimension=x.constant(family.dimension_at_epsilon_zero)-x.constant(2)*eps;
-  Graph graph{field,dimension,family.name,{}, {}};
+  Graph graph{field,dimension,family.name,{}, {},family};
   auto raw=ibp::quadratic_family(family.momenta,x,family.physical_count);
   const auto began=std::chrono::steady_clock::now();
   if(requested.empty()) {

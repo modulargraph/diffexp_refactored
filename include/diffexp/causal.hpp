@@ -33,6 +33,18 @@ inline bool positive_on_open_orthant(const Exact& polynomial) {
   for(const auto& term:polynomial.numerator_terms())if(term.coefficient<=Rational(0))return false;
   return denominator.front().coefficient>Rational(0);
 }
+inline Prescription euclidean_family(const feynman::ExampleFamily& definition,std::size_t depth) {
+  auto physical=definition.momenta;physical.lines.resize(definition.physical_count);
+  std::vector<std::string> names;for(unsigned i=0;i<definition.physical_count;++i)names.push_back("a"+std::to_string(i));
+  ExactField field(names);Exact sample(field);std::vector<Exact> parameters;
+  for(unsigned i=0;i<definition.physical_count;++i)parameters.push_back(sample.variable(i));
+  auto geometry=feynman::symanzik(physical,parameters);
+  if(!positive_on_open_orthant(geometry.U) || !positive_on_open_orthant(geometry.F))
+    throw std::invalid_argument("the configured physical U/F are not proved positive; supply an explicit causal prescription");
+  Prescription p;p.f_rim=-1;p.levels.assign(depth,LevelPlan{1});p.assurance=Assurance::EuclideanPhysicalDomain;
+  p.provenance="Exact configured physical Symanzik U/F have positive monomials; no open-simplex physical cut. Contour homotopy is not certified.";
+  p.validate(depth);return p;
+}
 // standard_merge_order means the legacy left-associated (first two physical
 // denominators) ladder in original ordered family. Caller must verify this.
 inline Prescription current_example(const std::string& name,std::size_t depth,

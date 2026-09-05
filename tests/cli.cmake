@@ -1,6 +1,6 @@
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --version
   OUTPUT_VARIABLE version RESULT_VARIABLE status)
-if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.1.0")
+if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.1.1")
   message(FATAL_ERROR "Version command failed: ${version}")
 endif()
 set(request "${DIFFEXP_SOURCE_DIR}/examples/logarithm.json")
@@ -39,4 +39,17 @@ execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" backend-info
 string(JSON standalone GET "${output}" standalone_cpp)
 if(NOT status EQUAL 0 OR NOT standalone)
   message(FATAL_ERROR "Backend is not standalone C++")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" transport "${DIFFEXP_SOURCE_DIR}/examples/transport/ordinary.json"
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON schema GET "${output}" schema)
+if(NOT status EQUAL 0 OR NOT schema STREQUAL "DiffExp.TransportResult/v1")
+  message(FATAL_ERROR "Generic transport failed: ${errors} ${output}")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json" --epsilon-order 0 --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON completed GET "${output}" status)
+string(JSON timing GET "${output}" timings total_seconds)
+if(NOT status EQUAL 0 OR NOT completed STREQUAL "completed" OR timing LESS 0)
+  message(FATAL_ERROR "Configured FT dispatch or timing failed: ${errors} ${output}")
 endif()

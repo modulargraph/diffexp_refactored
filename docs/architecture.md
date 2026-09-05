@@ -45,3 +45,26 @@ parse a restricted data grammar without evaluating Wolfram code. The optional
 prepared-input compatibility runtime contains inherited C++ regression
 machinery and is disabled by default. Neither the public wrapper nor the
 native recursion pipeline needs a LibraryLink interface.
+
+
+## Public input interfaces
+
+The native `transport` command accepts actual matrix entries, kinematic paths
+and ordinary or partial asymptotic boundaries through the
+[transport JSON protocol](transport-protocol.md). Its canonical implementation
+shares both letter expansions and identical letter/source convolutions across
+rows. Noncanonical systems can apply inherited uncertainty through a local
+homogeneous map to reduce repeated interval overestimation. These choices leave
+series order, working precision and error acceptance controls explicit.
+
+The `prepare` and `ft` commands accept complete
+[Feynman-family configurations](feynman-families.md). Propagator geometry,
+requested integer powers, merge ladders, matching anchors and causal input are
+separate configuration data. A label never chooses a calculation. Prepared
+graphs retain the actual family definition so default Euclidean prescriptions
+are checked against its Symanzik polynomials.
+
+The Mathematica package is an input adapter: it reads the original matrix files,
+normalizes boundary expressions and launches the executable using `RunProcess`.
+It does not own a parallel numerical integration engine. See the
+[compatibility guide](mathematica.md) for supported original functions and limits.

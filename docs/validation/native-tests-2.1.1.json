@@ -1,0 +1,464 @@
+{
+  "schema": "DiffExp.TestRun/v1",
+  "version": "2.1.1",
+  "status": "passed",
+  "passed": 88,
+  "failed": 0,
+  "wall_seconds": 153.19,
+  "timing_scope": "Concurrent development work and a high-precision transport were running; two CTest workers.",
+  "tests": [
+    {
+      "test": "factored_pipeline",
+      "status": "passed",
+      "seconds": 55.54
+    },
+    {
+      "test": "original_banana_unequal.routes",
+      "status": "passed",
+      "seconds": 78.02
+    },
+    {
+      "test": "recursion_pipeline",
+      "status": "passed",
+      "seconds": 38.15
+    },
+    {
+      "test": "original_mpl",
+      "status": "passed",
+      "seconds": 17.83
+    },
+    {
+      "test": "pipeline_preflight",
+      "status": "passed",
+      "seconds": 10.18
+    },
+    {
+      "test": "fire_backward_checkpoint.external",
+      "status": "passed",
+      "seconds": 15.99
+    },
+    {
+      "test": "original_banana_equal.historical32",
+      "status": "passed",
+      "seconds": 4.22
+    },
+    {
+      "test": "level_preparation.external",
+      "status": "passed",
+      "seconds": 8.43
+    },
+    {
+      "test": "affine_frobenius.external",
+      "status": "passed",
+      "seconds": 8.13
+    },
+    {
+      "test": "fuchsify.external",
+      "status": "passed",
+      "seconds": 8.05
+    },
+    {
+      "test": "singular_transport.original",
+      "status": "passed",
+      "seconds": 3.07
+    },
+    {
+      "test": "sunrise_pipeline",
+      "status": "passed",
+      "seconds": 5.73
+    },
+    {
+      "test": "henn_scalar_leaf",
+      "status": "passed",
+      "seconds": 4.42
+    },
+    {
+      "test": "banana_oracle",
+      "status": "passed",
+      "seconds": 4.31
+    },
+    {
+      "test": "family_config.external",
+      "status": "passed",
+      "seconds": 3.46
+    },
+    {
+      "test": "scalar_accumulator",
+      "status": "passed",
+      "seconds": 3.49
+    },
+    {
+      "test": "scalar_functional",
+      "status": "passed",
+      "seconds": 3.59
+    },
+    {
+      "test": "fire_modular.external",
+      "status": "passed",
+      "seconds": 2.6
+    },
+    {
+      "test": "fire_checkpoint.external",
+      "status": "passed",
+      "seconds": 2.64
+    },
+    {
+      "test": "fire_native.external",
+      "status": "passed",
+      "seconds": 2.16
+    },
+    {
+      "test": "recursion_leaf",
+      "status": "passed",
+      "seconds": 3.55
+    },
+    {
+      "test": "certified_deepest_beta",
+      "status": "passed",
+      "seconds": 2.54
+    },
+    {
+      "test": "fire_native",
+      "status": "passed",
+      "seconds": 1.03
+    },
+    {
+      "test": "affine_large",
+      "status": "passed",
+      "seconds": 1.15
+    },
+    {
+      "test": "recursion_graph.external",
+      "status": "passed",
+      "seconds": 1.83
+    },
+    {
+      "test": "adjoint_checkpoint",
+      "status": "passed",
+      "seconds": 1.5
+    },
+    {
+      "test": "gaussian_boundary",
+      "status": "passed",
+      "seconds": 0.36
+    },
+    {
+      "test": "deepest_beta",
+      "status": "passed",
+      "seconds": 0.31
+    },
+    {
+      "test": "centered_adjoint",
+      "status": "passed",
+      "seconds": 0.75
+    },
+    {
+      "test": "affine_endpoint_domain",
+      "status": "passed",
+      "seconds": 1.27
+    },
+    {
+      "test": "recursion_graph",
+      "status": "passed",
+      "seconds": 0.6
+    },
+    {
+      "test": "direct_examples",
+      "status": "passed",
+      "seconds": 0.98
+    },
+    {
+      "test": "singular_transport",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "sunrise_ibp",
+      "status": "passed",
+      "seconds": 0.6
+    },
+    {
+      "test": "adjoint_scaling",
+      "status": "passed",
+      "seconds": 0.59
+    },
+    {
+      "test": "henn_boundary.ancillary",
+      "status": "passed",
+      "seconds": 0.35
+    },
+    {
+      "test": "affine_operator",
+      "status": "passed",
+      "seconds": 0.87
+    },
+    {
+      "test": "affine_matching",
+      "status": "passed",
+      "seconds": 0.99
+    },
+    {
+      "test": "causal_contour",
+      "status": "passed",
+      "seconds": 0.04
+    },
+    {
+      "test": "box_triangle_oracle",
+      "status": "passed",
+      "seconds": 0.35
+    },
+    {
+      "test": "factored_transport",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "frobenius",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "tadpole_bubble",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "linear_boundary",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "certified_tail",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "data_geometry",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "certified_rational_transport",
+      "status": "passed",
+      "seconds": 0.15
+    },
+    {
+      "test": "laurent_transport",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "certified_bubble",
+      "status": "passed",
+      "seconds": 0.18
+    },
+    {
+      "test": "epsilon_gauge",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "affine_matching.external",
+      "status": "passed",
+      "seconds": 0.38
+    },
+    {
+      "test": "endpoint_gauge",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "fire_session.external",
+      "status": "passed",
+      "seconds": 0.29
+    },
+    {
+      "test": "prepared_stage",
+      "status": "passed",
+      "seconds": 0.77
+    },
+    {
+      "test": "cached_affine_columns",
+      "status": "passed",
+      "seconds": 0.15
+    },
+    {
+      "test": "cli.interface",
+      "status": "passed",
+      "seconds": 0.06
+    },
+    {
+      "test": "causal",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "adjoint_transport",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "conditioned_adjoint",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "fire_batch_cache",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "fire_batch_cache.external",
+      "status": "passed",
+      "seconds": 0.35
+    },
+    {
+      "test": "level_preparation",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "ibp",
+      "status": "passed",
+      "seconds": 0.24
+    },
+    {
+      "test": "cached_affine",
+      "status": "passed",
+      "seconds": 0.09
+    },
+    {
+      "test": "level_cache",
+      "status": "passed",
+      "seconds": 0.04
+    },
+    {
+      "test": "henn_observables.ancillary",
+      "status": "passed",
+      "seconds": 0.27
+    },
+    {
+      "test": "univariate_rational",
+      "status": "passed",
+      "seconds": 0.05
+    },
+    {
+      "test": "affine_finite_lag",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "polynomial_transport",
+      "status": "passed",
+      "seconds": 0.02
+    },
+    {
+      "test": "fire_backward_checkpoint",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "modular_reconstruction",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "artifact_store",
+      "status": "passed",
+      "seconds": 0.03
+    },
+    {
+      "test": "merge_pullback.ancillary",
+      "status": "passed",
+      "seconds": 0.24
+    },
+    {
+      "test": "fire_modular",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "henn_observables",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "box_bubble_oracle",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "fire_session",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "merge_pullback",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "fire_checkpoint",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "affine_frobenius",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "double_box_oracle",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "fuchsify",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "family_config",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "pentagon_oracle",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "frontend",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "box_oracle",
+      "status": "passed",
+      "seconds": 0.01
+    },
+    {
+      "test": "henn_boundary",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "test": "transport",
+      "status": "passed",
+      "seconds": 1.53
+    }
+  ],
+  "scope": "Native, ancillary and external-reduction regressions; original MPL, singular transport, equal-banana historical-32 and unequal-banana routes. The native original_planar4 and original_henn tests were not repeated in this run; the same families were independently rerun through the Mathematica process wrapper.",
+  "final_focused_recheck": {
+    "status": "passed",
+    "passed": 3,
+    "failed": 0,
+    "wall_seconds": 1.83,
+    "tests": [
+      "transport",
+      "family_config",
+      "cli.interface"
+    ],
+    "scope": "After shared canonical source convolutions and the triangular-system uncertainty selector; the transport test compares shared/unshared canonical retained balls, errors and saved coefficients bitwise. The final family check also rejects using the fixed Henn projection with altered geometry and accepts an unchanged geometry under another label."
+  }
+}

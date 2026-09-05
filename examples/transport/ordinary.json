@@ -1,0 +1,12 @@
+{
+  "schema": "DiffExp.Transport/v1",
+  "dimension": 1,
+  "epsilon_order": 0,
+  "taylor_order": 40,
+  "working_bits": 256,
+  "accuracy_goal": 20,
+  "division_order": 4,
+  "paths": {"t": "x/2"},
+  "entries": [{"row": 0, "column": 0, "epsilon": 0, "variable": "t", "expression": "1/(1-t)"}],
+  "boundary": [["1"]]
+}

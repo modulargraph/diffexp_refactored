@@ -1,0 +1,89 @@
+# Native differential-equation transport
+
+`diffexp transport request.json` (or `transport -` for stdin) integrates a
+matrix differential equation along an explicitly supplied path. It is the
+same interface used by the Mathematica wrapper and has no example-name input.
+The input and output each contain one JSON object; progress goes to stderr.
+
+Run the two small complete examples:
+
+```sh
+build/diffexp transport examples/transport/ordinary.json
+build/diffexp transport examples/transport/partial-boundary.json
+```
+
+The first solves `dy/dt = y/(1-t)`, from `t=0` to `t=1/2`, with `y(0)=1`.
+Its endpoint is 2. The second fixes only the first component of a coupled
+regular-singular system by `y1=x+O(x^2)`; Frobenius matching determines both
+components and transports them to `(1,1)`.
+
+## Request
+
+The schema is `DiffExp.Transport/v1`. Matrix positions and epsilon powers are
+zero-based. The retained epsilon window is `0..epsilon_order`.
+
+| Field | Meaning |
+| --- | --- |
+| `dimension` | Number of components |
+| `paths` | Object mapping each kinematic variable to an expression in `x`; native transport runs from `x=0` to `x=1` |
+| `entries` | Nonzero differential-equation entries |
+| `boundary` | Component-by-epsilon matrix of numerical expression strings at the path start |
+| `boundary_errors` | Optional nonnegative real absolute uncertainties with the same shape |
+| `asymptotic` | Partial power/log constraints at `x=0`, replacing `boundary` |
+| `initial_only` | With `asymptotic`, return a regular numerical seed at a small positive `x` |
+| `taylor_order` | Retained local series order; default 50 |
+| `working_bits` | Binary working precision; default 384 |
+| `accuracy_goal` | Requested decimal digits under the reported error estimate; 0 disables this check |
+| `division_order` | Local step control; default 4 |
+| `save_segments` | Export local retained Taylor coefficients; default false, with a 64 MiB estimated output budget |
+
+An ordinary entry is, for example,
+`{"row":0,"column":1,"epsilon":2,"variable":"t","expression":"1/(1-t)"}`.
+It contributes `epsilon^2/(1-t)` to the `dt` connection. Native pullback
+multiplies by the derivative of `paths.t`.
+
+A logarithmic entry uses `"variable":"dlog"`, its letter in `expression`,
+and an optional exact rational string `coefficient`. The native code takes
+the logarithmic derivative along the supplied path. Canonical epsilon-linear
+systems share each letter expansion across all matrix positions.
+
+Exact expressions support integers, rationals, arithmetic, `I` and independent
+polynomial `Sqrt[...]` radicands. Paths must fix all matrix variables. The native
+parameter `x`, `I`, and internal root symbols `r0`, `r1`, etc. are reserved.
+Nested algebraic towers and nonpolynomial radicands are rejected. Decimal
+boundary input may carry Mathematica precision annotations; these become input
+uncertainty, not exact rational data. Responses are decimal strings and never
+require evaluation as code.
+
+## Partial asymptotic boundaries
+
+Each `asymptotic.constraints` entry specifies `row`, `epsilon`, exact rational
+`power`, integer `log_degree`, and numerical `value`. Repeated entries at the
+same monomial are summed. Each `asymptotic.cutoffs` entry gives a `row` and a
+power below which unlisted power/log coefficients vanish. Explicit terms above
+a cutoff are still constraints. Omit a row to leave it initially unknown.
+
+For example, `y1=x+O(x^2)` is a coefficient 1 at row 0, epsilon 0, power `"1"`,
+log degree 0, together with cutoff `"2"` at row 0. Exact linear elimination in
+the Frobenius frame must determine all constants; an underdetermined or
+inconsistent boundary returns an error. General asymptotic matching currently
+requires a rational connection. No Wolfram kernel participates in the solve.
+
+## Response and accuracy
+
+The response schema is `DiffExp.TransportResult/v1`. Each component/epsilon
+entry has decimal-string `real_midpoint`, `imaginary_midpoint`, and `radius`.
+The reported radius bounds retained ball arithmetic with injected local
+truncation estimates; `errors` reports the corresponding estimates separately.
+`parameter` is `"1"` at the requested endpoint, or the seed parameter for an
+`initial_only` request. The response includes chart count and preparation,
+numerical and total seconds. Initial-only responses report preparation and
+total time.
+
+`AccuracyGoal` uses an absolute-plus-relative criterion
+`estimated_error <= 10^(-goal) (1+abs(value))`. The engine can shorten individual
+steps within finite retry budgets; it does not rerun the complete calculation
+or silently relax the goal. Insufficient input precision or excessive propagated
+uncertainty yields an explicit error. The last retained terms estimate the
+omitted tail; they do not certify it. Consequently `omitted_tails_certified`
+is false. See [validation](validation.md) for the independent comparisons.

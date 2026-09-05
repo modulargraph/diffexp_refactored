@@ -1,10 +1,10 @@
 # Examples
 
-The built-in FT families are `bubble`, `sunrise`, `banana`, `banana_unequal`,
-`banana4`, `banana4_unequal`, `box`, `pentagon`, `pentagon_massive`, `box_bubble`,
-`box_triangle`, `double_box_planar`, `kite`, and the experimental
-`henn_double_pentagon_x0`. The fixed families and conventions are defined in
-`include/diffexp/families.hpp`; arbitrary families can be constructed in C++.
+Each Feynman-trick example has a complete editable JSON file in
+`examples/feynman/`. Pass that file to `diffexp ft` or import it as a Mathematica
+Association. Change its propagators, kinematics and requested powers to evaluate
+a new family; no name registration is needed. See
+[family configurations](feynman-families.md).
 
 For an independent comparison, the opt-in acceptance runner reports coefficients,
 reference differences and forbidden-pole checks as JSON:

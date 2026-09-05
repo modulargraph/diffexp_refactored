@@ -85,7 +85,7 @@ std::string backend_info_json() {
       {"persistent_scc_regular_singular_scalar_block_dag_column", true},
       {"persistent_scc_regular_singular_jordan_block_dag_column", true},
       {"persistent_scc_pseudo_compensation", false},
-      {"backend", "DiffExp3 C++"},
+      {"backend", "DiffExp C++"},
       {"flint", flint_version},
       {"librarylink", false},
       {"standalone_cpp", true}});

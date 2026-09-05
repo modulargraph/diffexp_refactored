@@ -1,6 +1,7 @@
 #pragma once
 #include "diffexp/canonical.hpp"
 #include "diffexp/geometry.hpp"
+#include <filesystem>
 
 namespace diffexp {
 struct RationalLineEntry {unsigned row,column,epsilon;Exact coefficient;};
@@ -93,13 +94,21 @@ inline data::Expr read_named_array(const std::string& path,const std::string& na
   return data::Reader(text.substr(start,end-start+1)).read();
 }
 
+inline data::Expr original_banana_reference(const std::string& directory,const std::string& name,unsigned epsilon_order=4) {
+  const auto path=directory+"/Reference/"+(name=="boundaryAtMinusOne"?"BananaBoundaryAtMinusOneEps7.m":"BananaEqualMassAt20.m");
+  if(std::filesystem::exists(path)) {
+    auto data=data::read_file(path);for(auto& row:data.args){if(row.args.size()<epsilon_order+1)throw std::invalid_argument("banana reference epsilon window");row.args.resize(epsilon_order+1);}return data;
+  }
+  return read_named_array(directory+"/BananaEqualMass.wl",name);
+}
+
 inline int run_original_banana_equal(const std::string& directory) {
   using B=Jet::Ball;B::set_precision(384);
   const auto start=std::chrono::steady_clock::now();
   auto a0=data::read_file(directory+"/Data/Banana/EqualMass/dt_0.m");
   auto a1=data::read_file(directory+"/Data/Banana/EqualMass/dt_1.m");
-  auto current=read_boundary(read_named_array(directory+"/BananaEqualMass.wl","boundaryAtMinusOne"),4,4,384);
-  auto reference=read_boundary(read_named_array(directory+"/BananaEqualMass.wl","referenceAt20"),4,4,384);
+  auto current=read_boundary(original_banana_reference(directory,"boundaryAtMinusOne"),4,4,384);
+  auto reference=read_boundary(original_banana_reference(directory,"referenceAt20"),4,4,384);
   const std::vector<std::pair<std::string,std::string>> legs{{"-1","-1+5*I"},{"-1+5*I","20+5*I"},{"20+5*I","20"}};
   for(const auto& [from,to]:legs) {
     ExactField field({"x","I"});Exact x(field,"x"),a(field,from),b(field,to);auto line=a+(b-a)*x;

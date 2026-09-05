@@ -61,8 +61,8 @@ inline OriginalEqualBananaRealResult original_banana_equal_real(const std::strin
   auto start=std::chrono::steady_clock::now();
   const auto a0=data::read_file(directory+"/Data/Banana/EqualMass/dt_0.m");
   const auto a1=data::read_file(directory+"/Data/Banana/EqualMass/dt_1.m");
-  auto current=read_boundary(read_named_array(directory+"/BananaEqualMass.wl","boundaryAtMinusOne"),4,4,384);
-  const auto reference=read_boundary(read_named_array(directory+"/BananaEqualMass.wl","referenceAt20"),4,4,384);
+  auto current=read_boundary(original_banana_reference(directory,"boundaryAtMinusOne"),4,4,384);
+  const auto reference=read_boundary(original_banana_reference(directory,"referenceAt20"),4,4,384);
   ExactField field({"x","eps"});Exact x(field,"x"),eps(field,"eps");
   auto matrix=[&](const Exact& coordinate,const Exact& derivative) {
     FrobeniusSeries::ExactMatrix result(4,std::vector<Exact>(4,x.constant(0)));

@@ -35,7 +35,7 @@ int main(int argc,char** argv) {
     ~Redirect(){std::cout.rdbuf(old);}
   } redirect;
   auto start=Clock::now();std::string phase="arguments";
-  json::object report{{"schema","DiffExp3.HennFTAcceptance/v1"},{"status","error"},
+  json::object report{{"schema","DiffExp.HennFTAcceptance/v1"},{"status","error"},
     {"absolute_threshold","1e-20"},{"full_evaluator_end_to_end",false},
     {"reference_is_used_as_boundary",false},{"reference_coefficient_enclosures_certified",false}};
   json::array events;unsigned built=0,reused=0;
@@ -74,6 +74,8 @@ int main(int argc,char** argv) {
     const int raw_high=std::max(0,henn::needed_scalar_high(canonical,top));
     report["requested_canonical_high"]=top;report["requested_scalar_high"]=raw_high;
     recursion::Options exact;recursion::NumericalOptions numerical;AdjointConditioningStats conditioning;
+    exact.anchors=causal::henn_anchors();
+    numerical.causal_prescription=causal::current_example("henn_double_pentagon_x0",7,exact.anchors,true);
     if(regular_anchor_trial) {
       exact.anchors=causal::henn_anchors();exact.anchors.front()=Rational("1/3");
       auto prescription=causal::current_example("henn_double_pentagon_x0",7,causal::henn_anchors(),true);

@@ -42,7 +42,7 @@ inline boost::json::object singular_endpoint_example() {
       {"plot_y",arf_get_d(arb_midref(acb_realref(value.value.coefficients[0][1].raw())),ARF_RND_NEAR)}});
   }
   if(!(max_error<1e-60))throw std::runtime_error("singular direct epsilon-one samples disagree with logarithm");
-  return {{"schema","DiffExp3.SingularEndpointExample/v1"},{"epsilon_low",0},{"epsilon_high",3},
+  return {{"schema","DiffExp.SingularEndpointExample/v1"},{"epsilon_low",0},{"epsilon_high",3},
     {"segments",json::array{json::object{{"center","0"},{"scale","1"},{"incoming_match_point","1/2"},
       {"singular",true},{"radius",nullptr},{"radius_reason","exact monomial solution on the positive real branch"}}}},
     {"sectors",json::array{json::object{{"a","0"},{"b","1"},{"p",0}}}},

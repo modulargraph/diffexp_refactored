@@ -1,6 +1,7 @@
 #include "diffexp/kernel/json_codec.hpp"
 #include "diffexp/canonical.hpp"
 #include "diffexp/cli.hpp"
+#include "diffexp/transport.hpp"
 #include "diffexp/planar.hpp"
 #include "diffexp/mpl.hpp"
 #include "diffexp/rational_transport.hpp"
@@ -13,6 +14,7 @@
 #include "diffexp/direct_examples.hpp"
 #if defined(__unix__) || defined(__APPLE__)
 #include "diffexp/recursion_graph.hpp"
+#include "diffexp/family_config.hpp"
 #include "diffexp/recursion_pipeline.hpp"
 #include "diffexp/level_cache.hpp"
 #include "diffexp/fire_modular.hpp"
@@ -29,18 +31,30 @@ int main(int argc, char** argv) {
   try {
     const std::string command = argc > 1 ? argv[1] : "--help";
     if (command == "--version") {
-      std::cout << "DiffExp 2.1.0 (standalone C++20 / FLINT)\n";
+      std::cout << "DiffExp 2.1.1 (standalone C++20 / FLINT)\n";
+    } else if(command == "transport") {
+      json_mode=true;if(argc!=3)throw std::invalid_argument("transport requires a JSON file or -");
+      return diffexp::transport::run_file(argv[2]);
+    } else if(command == "family-template") {
+#if defined(__unix__) || defined(__APPLE__)
+      if(argc!=3)throw std::invalid_argument("family-template requires one example name");
+      std::cout<<boost::json::serialize(diffexp::family_config::describe(diffexp::feynman::example_family(argv[2])))<<'\n';
+#else
+      throw std::runtime_error("Feynman preparation requires a POSIX platform");
+#endif
     } else if(command == "prepare" || command == "ft") {
 #if defined(__unix__) || defined(__APPLE__)
       for(int i=3;i<argc;++i)if(std::string(argv[i])=="--json")json_mode=true;
       auto& progress=json_mode?std::cerr:std::cout;
-      if(argc<3)throw std::invalid_argument(command+" requires a native family name");
-      diffexp::recursion::Options options;
-      diffexp::recursion::NumericalOptions numerical;
+      if(argc<3)throw std::invalid_argument(command+" requires a family configuration JSON file");
+      auto configuration=diffexp::family_config::load(argv[2]);
+      auto options=configuration.preparation;
+      auto numerical=configuration.numerical;
+      const auto preparation_start=std::chrono::steady_clock::now();
       diffexp::AdjointConditioningStats conditioning;
       numerical.adjoint.conditioning_stats=&conditioning;
-      unsigned epsilon_order=0;
-      bool epsilon_order_given=false;
+      unsigned epsilon_order=configuration.epsilon_order;
+      bool epsilon_order_given=std::string(argv[2])=="-" || std::filesystem::exists(argv[2]);
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis;
       std::filesystem::path fire_prime;
@@ -92,10 +106,11 @@ int main(int argc, char** argv) {
       options.reduction.batch_cache_directory=cache/"fire-batches";
       options.reduction.pending_cache_directory=cache/"fire-pending";
       numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";
-      std::vector<diffexp::ibp::Integral> requested;
+      auto requested=configuration.integrals;
       std::optional<diffexp::henn::CanonicalBasis> canonical_basis;
       if(!henn_basis.empty()) {
-        if(std::string(argv[2])!="henn_double_pentagon_x0")throw std::invalid_argument("--henn-basis requires henn_double_pentagon_x0");
+        if(!diffexp::family_config::same_geometry(configuration.family,diffexp::feynman::example_family("henn_double_pentagon_x0")))
+          throw std::invalid_argument("--henn-basis requires the published Henn X0 geometry and denominator order; a family label alone is insufficient");
         canonical_basis=diffexp::henn::read_x0(henn_basis);
         requested=canonical_basis->scalar_targets;
         if(!epsilon_order_given)epsilon_order=4;
@@ -113,7 +128,7 @@ int main(int argc, char** argv) {
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
-      auto graph=diffexp::recursion::prepare(diffexp::feynman::example_family(argv[2]),std::move(requested),options,provider,
+      auto graph=diffexp::recursion::prepare(configuration.family,std::move(requested),options,provider,
         [&](const auto& event) {
           progress<<"Level "<<event.depth<<": "<<event.physical_propagators<<" propagators; ";
           if(event.scalar_leaf)progress<<"analytic scalar boundary";
@@ -122,17 +137,20 @@ int main(int argc, char** argv) {
         });
       progress<<"Exact recursion prepared: "<<graph.nodes.size()<<" levels, "<<built<<" systems built, "<<reused<<" systems reused.\n"
         <<"Verified cache: "<<std::filesystem::absolute(cache)<<"\n";
-      boost::json::object report{{"schema","DiffExp.FeynmanTrick/v1"},{"family",argv[2]},
+      boost::json::object report{{"schema","DiffExp.FeynmanTrick/v1"},{"family",configuration.family.name},
         {"status",command=="prepare"?"prepared":"completed"},{"levels",graph.nodes.size()},
         {"systems_built",built},{"systems_reused",reused}};
+      report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
         numerical.progress=[&progress,start=std::chrono::steady_clock::now()](std::size_t depth,const std::string& phase,int high) {
           const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
           progress<<"Numerical level "<<depth+1<<": "<<phase<<"; epsilon through "<<high<<"; elapsed "<<elapsed<<" s\n"<<std::flush;
         };
+        const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
+        report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
         if(canonical_basis)result=diffexp::henn::project_boundary(*canonical_basis,graph.nodes.front().requested,result,epsilon_order,numerical.working_bits);
         if(json_mode) {
           // Display enough decimal digits for the working binary precision;
@@ -174,6 +192,7 @@ int main(int argc, char** argv) {
           if(!poles.pass)throw std::runtime_error("canonical negative-pole audit failed");
         }
       }
+      report["timings"].as_object()["total_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count();
       if(json_mode)std::cout<<boost::json::serialize(report)<<'\n';
 #else
       throw std::invalid_argument("native FIRE preparation currently requires a POSIX platform");
@@ -244,10 +263,15 @@ int main(int argc, char** argv) {
       return diffexp::run_henn_nonplanar(argv[2],order);
     } else if (command == "backend-info") {
 #ifdef DIFFEXP_WITH_KERNEL_RUNTIME
-      std::cout << diffexp::kernel::backend_info_json() << '\n';
+      auto information=boost::json::parse(diffexp::kernel::backend_info_json()).as_object();
+      information["compatibility_runtime"]=true;
 #else
-      std::cout << "{\"standalone_cpp\":true,\"librarylink\":false,\"compatibility_runtime\":false}\n";
+      boost::json::object information{{"standalone_cpp",true},{"librarylink",false},{"compatibility_runtime",false}};
 #endif
+      information["package_version"]="2.1.1";information["native_transport"]=true;
+      information["feynman_configuration_schema"]="DiffExp.FeynmanFamily/v1";
+      information["transport_schema"]="DiffExp.Transport/v1";
+      std::cout<<boost::json::serialize(information)<<'\n';
     } else if (command == "kernel") {
 #ifdef DIFFEXP_WITH_KERNEL_RUNTIME
       // One request/response per line; persistent handles live until EOF.
@@ -261,7 +285,7 @@ int main(int argc, char** argv) {
       throw std::invalid_argument("prepared-input compatibility runtime is not enabled in this build");
 #endif
     } else if (command == "--help") {
-      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | prepare FAMILY [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft FAMILY [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
+      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
       std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto|values (default adjoint).\n";

@@ -2,17 +2,75 @@
 
 DiffExp 2.1 computes dimensionally regulated Feynman integrals with series
 recurrences and recursive Feynman-parameter integration. The mathematical
-backend is a standalone C++20 package built on FLINT/Arb. Mathematica users can
-call the same executable through a small `RunProcess` wrapper.
+backend is a standalone C++20 package built on FLINT/Arb.
 
-DiffExp 2.1 replaces the previous application at the repository root. Earlier
-versions remain available in Git history.
+**Mathematica users can use the familiar DiffExp1 workflow:** load a
+configuration, prepare boundary conditions, transport the integrals and plot
+the results. The Mathematica interface calls the C++ backend through
+`RunProcess`; you can work with Wolfram expressions and the original function
+names directly.
 
-The numerical checks include both four-loop banana examples and all nine
-original DiffExp example groups. The full 108-component Henn Feynman-trick
-boundary reconstruction is **experimental and frozen**; it is not a completed
-example. Transport from the published Henn boundary and reconstruction of its
-first canonical component have passed separately.
+[Mathematica quick start](#mathematica-diffexp1-style-workflow) ·
+[Build and install](#build) · [Feynman-trick recursion](#feynman-trick-recursion) ·
+[Examples and timings](#examples-and-validation)
+
+## Mathematica: DiffExp1-style workflow
+
+[Build the executable once](#build), then load `DiffExp.m` in Mathematica.
+The wrapper finds `build/diffexp` automatically. For an installed executable,
+set `$DiffExpExecutable = "/your/prefix/bin/diffexp"`.
+
+This self-contained example solves `dy/dt = y/(1-t)` with `y(0) = 1`.
+For your own system, point `MatrixDirectory` at your existing matrix files
+and supply your boundary values:
+
+```wl
+Get["/path/to/DiffExp2.1/DiffExp.m"];
+
+matrixDirectory = CreateDirectory[];
+Put[{{1/(1-t)}}, FileNameJoin[{matrixDirectory, "dt_0.m"}]];
+
+LoadConfiguration[{
+  MatrixDirectory -> matrixDirectory,
+  EpsilonOrder -> 0, ExpansionOrder -> 40,
+  WorkingPrecision -> 80, AccuracyGoal -> 20
+}];
+
+boundary = PrepareBoundaryConditions[{1}, {t -> 0}];
+result = TransportTo[boundary, {t -> 1/2}];
+timings = DiffExpLastTimings[];
+result[[2]]  (* {{2}}: integral values, ordered by component and epsilon power *)
+```
+
+`TransportTo` returns `{point, values, estimatedErrors}`. Its result can be
+used as the boundary for another transport. Save a transport to obtain
+numerical functions for evaluation and plotting:
+
+```wl
+saved = TransportTo[boundary, {t -> x}, 1/2, True];
+functions = ToPiecewise[saved];
+value = functions[[1, 1]][1/4];  (* 4/3 *)
+Plot[functions[[1, 1]][x], {x, 0, 1/2}]
+```
+
+The familiar `UpdateConfiguration`, `CurrentConfiguration` and
+`IntegrateSystem` calls are also available. Supported inputs include ordinary
+`dVARIABLE_ORDER.m` and canonical `d_1.m` matrices, `SparseArray`, epsilon
+expansions, partial asymptotic boundaries and causal prescriptions.
+
+**All nine original numerical example groups have been checked through this
+Mathematica interface.** Some API differences remain: symbolic general
+solutions are not provided, and algebraic bases defined with principal
+endpoint roots can require explicit `BasisPrefactors`. See the
+[Mathematica guide](docs/mathematica.md) for the complete compatibility scope,
+the [runnable example](examples/Mathematica.wl), and
+[measured timings](docs/timings.md).
+
+The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`. Communication
+uses ordinary processes and JSON, with no LibraryLink or WSTP setup.
+The [direct native operations](docs/mathematica.md#direct-native-operations),
+including `DiffExpSeries` and `DiffExpFeynmanTrick`, are available from the
+same package.
 
 ## Build
 
@@ -46,35 +104,6 @@ cmake --install build --prefix /your/prefix
 CMake consumers use `find_package(DiffExp 2.1 CONFIG REQUIRED)` and link
 `DiffExp::core`. Public headers are under `diffexp/`, with namespace `diffexp`.
 See [the consumer example](tests/consumer) and [architecture](docs/architecture.md).
-
-## Mathematica
-
-Build once, then load the wrapper from the repository:
-
-```wl
-Get["/path/to/DiffExp2.1/DiffExp.m"];
-DiffExpBackendInfo[]
-
-result = DiffExpSeries[<|
-  "matrix" -> {{"eps/(1-x)"}},
-  "boundary" -> {{"1", "0", "0"}},
-  "center" -> "0", "taylor_order" -> 8,
-  "epsilon_low" -> 0, "epsilon_high" -> 2
-|>];
-result["coefficients"][[4, 1, 2]]  (* "1/3": x^3 eps^1 *)
-```
-
-The wrapper finds `build/diffexp` automatically. For another build or installed
-executable, set `$DiffExpExecutable = "/your/prefix/bin/diffexp"`.
-The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`.
-
-Each native call launches a process, passes ordinary command arguments and, when
-needed, JSON on stdin. There are no LibraryLink libraries, persistent native
-handles, or Mathematica-side reductions. Exact coefficients and arbitrary
-precision intervals remain strings; returned text is never evaluated as code.
-The original `LoadConfiguration`, `PrepareBoundaryConditions`, `TransportTo`
-and `ToPiecewise` workflow is also available. See [the wrapper guide](docs/mathematica.md)
-for compatibility details and the [runnable example](examples/Mathematica.wl).
 
 ## Feynman-trick recursion
 
@@ -120,6 +149,12 @@ Run `build/diffexp --help` for the remaining options.
 
 ## Examples and validation
 
+The numerical checks include both four-loop banana examples and all nine
+original DiffExp example groups. The full 108-component Henn Feynman-trick
+boundary reconstruction is **experimental and frozen**; it is not a completed
+example. Transport from the published Henn boundary and reconstruction of its
+first canonical component have passed separately.
+
 See [timings](docs/timings.md) for measured runtimes and
 [validation and limitations](docs/validation.md) for the tested families,
 precision scope and Banana4 reference comparisons. The [example guide](docs/examples.md)
@@ -128,6 +163,9 @@ describes the original-data downloads and the opt-in FT acceptance runner.
 The default build uses the new native core. The extracted prepared-input
 compatibility runtime is available with `-DDIFFEXP_BUILD_KERNEL_RUNTIME=ON`
 for inherited regression tests; the Mathematica wrapper does not use it.
+
+DiffExp 2.1 replaces the previous application at the repository root. Earlier
+versions remain available in Git history.
 
 ## License and citation
 

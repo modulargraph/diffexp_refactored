@@ -1,0 +1,464 @@
+{
+  "date": "2026-09-06",
+  "source_commit": "4a701fc1332f29f6237d14427336e60615b966e3",
+  "sha256": {
+    "Chess.wl": "b1f4b8ab409f9a9c37f319436f2df834a4c67e040680734db1134f970a6ad07b",
+    "README.md": "20db0d6efe23dcca550b3a96b49e71760d6758f8652ffb0d9ed55280168f86f6",
+    "data/DP/Atilde.txt": "403e2e1c1a47156e1073de7fa84b8f4fec14a7e9100b6b67b90e93e2c4d3de04",
+    "data/DP/dLettersLine.txt": "abb087b376a586f22aaae05d43d030e1216d6abde6121ffb248f0ad6fbf1f994",
+    "data/DP/boundary_pr1_weight6.txt": "3d49b1781a98ec2409e95a1756a590f0590c535be9e0fc7566c540fb969a0aa7",
+    "data/DP/reference_pr2_weight6.txt": "ba0a08228eec876297139f790afa41fd0210b77546faa98e277c2cd404d20abf"
+  },
+  "conversion": {
+    "preparation_seconds": 1.531602
+  },
+  "conversion_validation": {
+    "maxLetterDifference": "0",
+    "entries": 36335,
+    "roots": 8,
+    "real_root_counts_on_path": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "records": [
+    {
+      "method": "chess",
+      "nodes": 16,
+      "median_seconds": {
+        "preparation_seconds": 0.249766,
+        "numerical_seconds": 1.551666,
+        "total_seconds": 1.801432
+      },
+      "samples": [
+        {
+          "timings": {
+            "preparation_seconds": 0.259451,
+            "numerical_seconds": 1.556484,
+            "total_seconds": 1.815935
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_scaled_error": "2.40943380759556154329894349222417732511752146552589083815`40.03467764107253*^-21"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "16"
+            ],
+            "wall_seconds": 3.2595866669435054,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 0.246204,
+            "numerical_seconds": 1.529602,
+            "total_seconds": 1.775806
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_scaled_error": "2.40943380759556154329894349222417732511752146552589083815`40.03467764107253*^-21"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "16"
+            ],
+            "wall_seconds": 3.1713769589550793,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 0.249766,
+            "numerical_seconds": 1.551666,
+            "total_seconds": 1.801432
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042066081276950536362086`40.03467764107253*^-21",
+            "max_scaled_error": "2.40943380759556154329894349222417732511752146552589083815`40.03467764107253*^-21"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "16"
+            ],
+            "wall_seconds": 3.224609165918082,
+            "status": 0
+          }
+        }
+      ]
+    },
+    {
+      "method": "spectral",
+      "nodes": 16,
+      "median_seconds": {
+        "preparation_seconds": 1.635971084,
+        "numerical_seconds": 0.425032167,
+        "total_seconds": 2.080441042
+      },
+      "samples": [
+        {
+          "timings": {
+            "preparation_seconds": 1.656229791,
+            "sampling_seconds": 0.070120875,
+            "recurrence_seconds": 0.354911292,
+            "numerical_seconds": 0.425032167,
+            "total_seconds": 2.081261958
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_scaled_error": "2.4094338075955615432989434922241773300450425519954943446`44.91517023795182*^-21"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n16-g20.json",
+              "16"
+            ],
+            "wall_seconds": 2.410791500005871,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 1.635971084,
+            "sampling_seconds": 0.071016375,
+            "recurrence_seconds": 0.353954375,
+            "numerical_seconds": 0.42497075,
+            "total_seconds": 2.060941834
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_scaled_error": "2.4094338075955615432989434922241773300450425519954943446`44.91517023795182*^-21"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n16-g20.json",
+              "16"
+            ],
+            "wall_seconds": 2.1222134160343558,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 1.633554334,
+            "sampling_seconds": 0.070962833,
+            "recurrence_seconds": 0.375923875,
+            "numerical_seconds": 0.446886708,
+            "total_seconds": 2.080441042
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_normalized_error": "3.21886889009992698932052794045864042724370551407781546835`44.91517023795182*^-21",
+            "max_scaled_error": "2.4094338075955615432989434922241773300450425519954943446`44.91517023795182*^-21"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n16-g20.json",
+              "16"
+            ],
+            "wall_seconds": 2.1304316248279065,
+            "status": 0
+          }
+        }
+      ]
+    },
+    {
+      "method": "chess",
+      "nodes": 32,
+      "median_seconds": {
+        "preparation_seconds": 0.258844,
+        "numerical_seconds": 3.145165,
+        "total_seconds": 3.395047
+      },
+      "samples": [
+        {
+          "timings": {
+            "preparation_seconds": 0.258844,
+            "numerical_seconds": 3.132549,
+            "total_seconds": 3.391393
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_normalized_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_scaled_error": "5.04598692914439012528538468856589922`19.348321649646085*^-42"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "32"
+            ],
+            "wall_seconds": 4.84317179187201,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 0.249882,
+            "numerical_seconds": 3.145165,
+            "total_seconds": 3.395047
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_normalized_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_scaled_error": "5.04598692914439012528538468856589922`19.348321649646085*^-42"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "32"
+            ],
+            "wall_seconds": 4.888734749983996,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 0.262922,
+            "numerical_seconds": 3.166643,
+            "total_seconds": 3.429565
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_normalized_error": "6.74115648866172334415053692857745382`19.348321649646085*^-42",
+            "max_scaled_error": "5.04598692914439012528538468856589922`19.348321649646085*^-42"
+          },
+          "process": {
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-script",
+              "/private/tmp/diffexp-chess-20260906/run-chess.wls",
+              "32"
+            ],
+            "wall_seconds": 4.876123874913901,
+            "status": 0
+          }
+        }
+      ]
+    },
+    {
+      "method": "spectral",
+      "nodes": 32,
+      "median_seconds": {
+        "preparation_seconds": 1.638436458,
+        "numerical_seconds": 0.854430083,
+        "total_seconds": 2.493517875
+      },
+      "samples": [
+        {
+          "timings": {
+            "preparation_seconds": 1.638436458,
+            "sampling_seconds": 0.129433417,
+            "recurrence_seconds": 0.725648,
+            "numerical_seconds": 0.855081417,
+            "total_seconds": 2.493517875
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_normalized_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_scaled_error": "5.04598692914439024049213376712373708`24.203197893914027*^-42"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n32-g40.json",
+              "32"
+            ],
+            "wall_seconds": 2.5498978751711547,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 1.632022542,
+            "sampling_seconds": 0.123406666,
+            "recurrence_seconds": 0.716064167,
+            "numerical_seconds": 0.839470833,
+            "total_seconds": 2.471493375
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_normalized_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_scaled_error": "5.04598692914439024049213376712373708`24.203197893914027*^-42"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n32-g40.json",
+              "32"
+            ],
+            "wall_seconds": 2.509243292035535,
+            "status": 0
+          }
+        },
+        {
+          "timings": {
+            "preparation_seconds": 1.648057625,
+            "sampling_seconds": 0.126385625,
+            "recurrence_seconds": 0.728044458,
+            "numerical_seconds": 0.854430083,
+            "total_seconds": 2.502487708
+          },
+          "validation": {
+            "components": [
+              267,
+              7
+            ],
+            "coefficient_count": 1869,
+            "max_absolute_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_normalized_error": "6.74115648866172349806031414241377877`24.203197893914027*^-42",
+            "max_scaled_error": "5.04598692914439024049213376712373708`24.203197893914027*^-42"
+          },
+          "process": {
+            "command": [
+              "/private/tmp/diffexp-chess-20260906/spectral",
+              "/private/tmp/diffexp-chess-20260906/dp-form-n32-g40.json",
+              "32"
+            ],
+            "wall_seconds": 2.570108375046402,
+            "status": 0
+          }
+        }
+      ]
+    }
+  ],
+  "production_trials": {
+    "native40": {
+      "timings": {
+        "preparation_seconds": 24.613855875,
+        "numerical_seconds": 32.456433166,
+        "total_seconds": 57.070289041
+      },
+      "charts": 9,
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 0,
+        "series_charts": 9,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "noncanonical connection"
+      },
+      "max_absolute_error": "3.86221750188859416087002046132198468582626046657325989786`36.57659182851971*^-57",
+      "max_scaled_error": "1.2181942985911487458760019699667076692114755303063515603827`38.34180118760287*^-57"
+    },
+    "form16": {
+      "timings": {
+        "preparation_seconds": 11.535749042,
+        "numerical_seconds": 52.963789708,
+        "total_seconds": 64.49953875
+      },
+      "charts": 34,
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 0,
+        "series_charts": 34,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "finite-lag preparation time budget"
+      },
+      "max_absolute_error": "7.5456391244888798263635686078566234845814341901098445421184628416760550506655182`61.148769190752674*^-35",
+      "max_reported_radius": "3.73236585811631720446894739823082009450645919745870315864522126503288745880126953125`94.57198420805769*^-25",
+      "max_scaled_error": "5.64816978485099979626284924323936970363259231700744671340021894111346945810090843`61.148769190752674*^-35"
+    },
+    "form32": {
+      "timings": {
+        "preparation_seconds": 11.5255975,
+        "numerical_seconds": 30.878703042,
+        "total_seconds": 42.404300542
+      },
+      "charts": 13,
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 0,
+        "series_charts": 13,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "finite-lag preparation time budget"
+      },
+      "max_absolute_error": "3.7890207313048350999709698511605118333348288861060194188942027`39.469662110335555*^-54",
+      "max_reported_radius": "2.6361728540282520476308932223354817576499625744993115639934655105394601213256726762429649352779`94.42097388357351*^-47",
+      "max_scaled_error": "1.53285585069688835849905164254983547273427308485470379615301`40.30810722905595*^-55"
+    }
+  }
+}

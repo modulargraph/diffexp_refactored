@@ -228,11 +228,23 @@ asymptoticData[coefficients_,lp_] := Module[{constraints={},cutoffs={},expressio
   If[rowCutoffs=!={},AppendTo[cutoffs,<|"row"->row-1,"power"->inputString[Replace[Min[rowCutoffs],Infinity->1]]|>]],{row,Length[coefficients]}];
  <|"constraints"->constraints,"cutoffs"->cutoffs|>
 ];
-baseRequest[paths_Association,save_] := Module[{request,prefactors=configValue[BasisPrefactors]},request=<|"schema"->"DiffExp.Transport/v1","dimension"->$matrixDimension,
+baseRequest[paths_Association,save_] := Module[{request,prefactors=configValue[BasisPrefactors],aliases=<||>,renames,used=SymbolName/@Keys[paths],candidate,n=0,entries=$matrixEntries,mappedPaths},
+ (* Kinematic x is legal when LineParameter is different. Only the wire
+    representation must reserve x for the native path parameter. *)
+ Do[If[name==="x" || name==="I" || StringMatchQ[name,RegularExpression["r[0-9]+"]],
+  candidate="diffexpVariable"<>ToString[n++];While[MemberQ[used,candidate],candidate="diffexpVariable"<>ToString[n++]];
+  AssociateTo[aliases,name->candidate];AppendTo[used,candidate]],{name,SymbolName/@Keys[paths]}];
+ renames=KeyValueMap[(Symbol["Global`"<>#1]->Symbol["Global`"<>#2])&,aliases];
+ mappedPaths=Association[KeyValueMap[(Symbol["Global`"<>Lookup[aliases,SymbolName[#1],SymbolName[#1]]]->#2)&,paths]];
+ If[Length[renames]>0,
+  entries=Map[Function[e,Join[e,<|"expression"->inputString[ToExpression[e["expression"],InputForm]/.renames],
+   "variable"->Lookup[aliases,e["variable"],e["variable"]]|>]],entries];
+  prefactors=prefactors/.renames];
+ request=<|"schema"->"DiffExp.Transport/v1","dimension"->$matrixDimension,
  "epsilon_order"->configValue[EpsilonOrder],"taylor_order"->configValue[ExpansionOrder],
  "working_bits"->Ceiling[configValue[WorkingPrecision] Log[2,10]],
  "accuracy_goal"->If[NumberQ[configValue[AccuracyGoal]],configValue[AccuracyGoal],0],
- "division_order"->configValue[DivisionOrder],"save_segments"->TrueQ[save],"paths"->wirePaths[paths],"entries"->$matrixEntries|>;
+ "division_order"->configValue[DivisionOrder],"save_segments"->TrueQ[save],"paths"->wirePaths[mappedPaths],"entries"->entries|>;
  If[prefactors=!={},
   If[!ListQ[prefactors] || Length[prefactors]=!=$matrixDimension,compatFailure["BasisPrefactors","Supply one algebraic prefactor per integral."]];
   request["basis_prefactors"]=inputString/@prefactors];request];

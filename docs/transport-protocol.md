@@ -44,9 +44,17 @@ An ordinary entry is, for example,
 It contributes `epsilon^2/(1-t)` to the `dt` connection. Native pullback
 multiplies by the derivative of `paths.t`.
 
+An entry with `"variable":"form"` explicitly
+supplies an already pulled-back coefficient of `dx`, with optional exact rational
+`coefficient`; its expression is evaluated along the request paths but is not
+multiplied by another path derivative. This preserves a sparse constant-matrix
+sum of shared scalar one-forms without combining radical expressions per matrix
+position. Supplied forms at a singular initial point require explicit asymptotic
+boundary conditions; finite-boundary dlog initialization remains available.
+
 A logarithmic entry uses `"variable":"dlog"`, its letter in `expression`,
 and an optional exact rational string `coefficient`. The native code takes
-the logarithmic derivative along the supplied path. Canonical epsilon-linear
+the logarithmic derivative along the supplied path. Compatible epsilon-linear
 systems first attempt an exact diagonal root rescaling to a rational connection.
 Compatible systems use shared rational-product recurrences with O(N) arithmetic
 cost at fixed polynomial degree, precision and epsilon depth. The plan is reused
@@ -67,7 +75,8 @@ Exact expressions support integers, rationals, arithmetic, `I` and independent
 polynomial `Sqrt[...]` radicands. Paths must fix all matrix variables. The native
 parameter `x`, `I`, and internal root symbols `r0`, `r1`, etc. are reserved.
 Nested algebraic towers and nonpolynomial radicands are rejected. Decimal
-boundary input may carry Mathematica precision annotations; these become input
+boundary input may carry Mathematica precision (single-backtick) or absolute
+accuracy (double-backtick) annotations, including uncertain zeros; these become input
 uncertainty, not exact rational data. Responses are decimal strings and never
 require evaluation as code.
 
@@ -129,3 +138,6 @@ or silently relax the goal. Insufficient input precision or excessive propagated
 uncertainty yields an explicit error. The last retained terms estimate the
 omitted tail; they do not certify it. Consequently `omitted_tails_certified`
 is false. See [validation](validation.md) for the independent comparisons.
+
+The Mathematica wrapper internally renames reserved native variable names, so a
+kinematic `x` can coexist with a separately configured `LineParameter -> t`.

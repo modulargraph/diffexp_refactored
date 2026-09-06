@@ -7,6 +7,18 @@ static double real(const j::value& result,unsigned i=0,unsigned e=0) {
 }
 int main() {
  try {
+  // Mathematica uncertain zeros use absolute accuracy (two backticks).
+  Jet decimal_context(0,1,256);
+  auto uncertain_zero=decimal_context.decimal("0``40.5").at(0);
+  auto positive=Jet::Ball::from_strings("1e-41"),negative=Jet::Ball::from_strings("-1e-41");
+  if(!acb_contains(uncertain_zero.raw(),positive.raw()) || !acb_contains(uncertain_zero.raw(),negative.raw()) || uncertain_zero.is_zero())
+    throw std::runtime_error("absolute-accuracy zero lost its uncertainty");
+  auto coarse_zero=evaluate(data::Reader("0``-2").read(),decimal_context,{}).at(0);
+  if(!acb_contains(coarse_zero.raw(),Jet::Ball(10).raw()))throw std::runtime_error("negative absolute accuracy rejected");
+  auto uncertain_value=decimal_context.decimal("100``4").at(0);
+  auto inside=Jet::Ball::from_strings("100.00001"),outside=Jet::Ball::from_strings("100.001");
+  if(!acb_contains(uncertain_value.raw(),inside.raw()) || acb_overlaps(uncertain_value.raw(),outside.raw()))
+    throw std::runtime_error("absolute accuracy was treated as relative precision");
   auto request=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"division_order":4,"paths":{"t":"x/2"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
   auto result=transport::run(request);if(std::abs(real(result)-2)>1e-15)throw std::runtime_error("ordinary physical-basis transport");
   auto& r=request.as_object();r["paths"]=j::object{{"t","x"}};

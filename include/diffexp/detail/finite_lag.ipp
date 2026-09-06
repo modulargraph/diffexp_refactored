@@ -65,8 +65,8 @@ inline std::shared_ptr<const FiniteLagPlan> prepare(const Compiled& c) {
   const auto check_time=[&]{if(std::chrono::steady_clock::now()-started>std::chrono::seconds(10))
     throw std::runtime_error("finite-lag preparation time budget");};
   std::vector<std::map<unsigned,Exact>> parts;
-  for(const auto& letter:c.letters) {
-    check_time();auto p=decompose(c,c.reduced(c.derivative(letter)/letter));
+  for(unsigned letter=0;letter<c.letters.size();++letter) {
+    check_time();auto p=decompose(c,c.letter_derivative(letter));
     for(auto it=p.begin();it!=p.end();)if(it->second.is_zero())it=p.erase(it);else ++it;
     if(p.size()>1)throw std::runtime_error("letter has multiple root parities");
     parts.push_back(std::move(p));

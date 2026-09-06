@@ -79,6 +79,13 @@ partial=measured["gamma_partial_preparation",PrepareBoundaryConditions[{"?","?",
 check[ListQ[partial] && Dimensions[partial[[2]]]==={4,5},"gamma partial boundary shape"];
 If[ListQ[partial],asym=Catch[DiffExp`Private`asymptoticData[partial[[2]],x],"DiffExpCompatibility"];check[AssociationQ[asym]&&Length[asym["constraints"]]>0,"gamma power-log normalization"]];
 
+(* Kinematic x must not collide with the native path parameter. *)
+DeleteFile[FileNames["*.m",folder]];Put[{{1/(1-x)}},FileNameJoin[{folder,"dx_0.m"}]];
+LoadConfiguration[{Variables->{x},LineParameter->t,MatrixDirectory->folder,EpsilonOrder->0,AccuracyGoal->25,
+ WorkingPrecision->90,ChopPrecision->60,ExpansionOrder->40,Verbosity->0}];
+b=PrepareBoundaryConditions[{1},{x->0}];r=measured["kinematic_x",TransportTo[b,{x->1/2}]];
+check[ListQ[r]&&close[r[[2,1,1]],2],"kinematic x with separate line parameter"];
+
 family=DiffExpFamilyTemplate["bubble"];
 check[AssociationQ[family] && family["schema"]==="DiffExp.FeynmanFamily/v1","editable FT template"];
 If[AssociationQ[family],family["name"]="custom-wrapper-test";

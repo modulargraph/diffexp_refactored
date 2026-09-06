@@ -25,9 +25,12 @@ class Jet {
   Jet decimal(std::string s)const {
     auto backtick=s.find('`');
     std::string precision;
+    bool absolute_accuracy=false;
     if(backtick!=std::string::npos) {
       auto exponent=s.find("*^",backtick);
-      precision=s.substr(backtick+1,exponent==std::string::npos?std::string::npos:exponent-backtick-1);
+      absolute_accuracy=backtick+1<s.size() && s[backtick+1]=='`';
+      const auto annotation=backtick+1+(absolute_accuracy?1:0);
+      precision=s.substr(annotation,exponent==std::string::npos?std::string::npos:exponent-annotation);
       s=s.substr(0,backtick)+(exponent==std::string::npos?"":s.substr(exponent));
     }
     for(std::size_t i;(i=s.find("*^"))!=std::string::npos;)s.replace(i,2,"e");
@@ -35,12 +38,17 @@ class Jet {
     if(arb_set_str(acb_realref(b.raw()),s.c_str(),bits_) || !b.is_finite())
       throw std::invalid_argument("invalid finite decimal literal");
     if(!precision.empty()) {
-      // Published precision annotations describe significant decimal digits.
-      const auto p=static_cast<long>(std::floor(std::stod(precision)));
-      if(p<1 || p>1000000)throw std::invalid_argument("invalid input precision annotation");
+      // One backtick denotes significant digits; two denote absolute accuracy.
+      // Round down to conservatively enclose fractional digit annotations.
+      std::size_t consumed=0;
+      const double digits=std::stod(precision,&consumed);
+      if(consumed!=precision.size() || !std::isfinite(digits) || digits>1000000 || digits<(absolute_accuracy?-1000000:1))
+        throw std::invalid_argument("invalid input precision annotation");
+      const auto p=static_cast<long>(std::floor(digits));
       arb_t radius;arb_init(radius);
-      arb_abs(radius,acb_realref(b.raw()));
-      arb_t scale;arb_init(scale);arb_set_ui(scale,10);arb_pow_ui(scale,scale,p,bits_);
+      if(absolute_accuracy)arb_one(radius);else arb_abs(radius,acb_realref(b.raw()));
+      arb_t scale;arb_init(scale);arb_set_ui(scale,10);arb_pow_ui(scale,scale,p<0?-p:p,bits_);
+      if(p<0)arb_inv(scale,scale,bits_);
       arb_div(radius,radius,scale,bits_);arb_add_error(acb_realref(b.raw()),radius);
       arb_clear(scale);arb_clear(radius);
     }

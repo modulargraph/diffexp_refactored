@@ -1,0 +1,22 @@
+$HistoryLength=0; SetDirectory[Environment["CHESS_BENCHMARK_DIR"]];
+SetSystemOptions["ParallelOptions"->"ParallelThreadNumber"->1];
+{prep,unused}=AbsoluteTiming[
+Get["Chess.wl"]; dLettersLine=Get["data/DP/dLettersLine.txt"]; Atilde=SparseArray[Get["data/DP/Atilde.txt"]]; data=CHESSAtildeLinearData[];
+radicals=DeleteDuplicates[Cases[dLettersLine,Power[z_,p_Rational]:>{z,p},Infinity]];
+radRules=Map[Function[r,Module[{q=Together[r[[1]]],n,d,c,s},n=Numerator[q];d=Denominator[q];c=First[FactorList[d]][[1]];s=FullSimplify[Sqrt[d/c],0<=t<=1];Power[r[[1]],r[[2]]]->(c*s/Inactive[Sqrt][Expand[c*n]])]],radicals];
+letters=dLettersLine/.radRules;
+remaining=DeleteDuplicates[Cases[letters,Inactive[Sqrt][z_]:>{z,1/2},Infinity]];
+Put[remaining,"remaining-roots.wl"];Print["remaining roots ",Length[remaining]," polynomial ",And@@(PolynomialQ[#[[1]],t]&/@remaining)];
+str[z_]:=StringReplace[ToString[z,InputForm],"Inactive[Sqrt]"->"Sqrt"];
+bcraw=Get["data/DP/boundary_pr1_weight6.txt"]/.InputForm[z__]:>z;
+rraw=Get["data/DP/reference_pr2_weight6.txt"]/.InputForm[z__]:>z;
+bc=Table[SeriesCoefficient[z,{ep,0,k}],{z,bcraw[[2]]},{k,-4,2}];
+ref=Table[SeriesCoefficient[z,{ep,0,k}],{z,rraw[[2]]},{k,-4,2}];
+Print["boundary ",Dimensions[bc]," min precision ",Min[Precision/@Flatten[bc]]];
+entries=Flatten[Table[Map[Function[rule,<|"row"->rule[[1,1]]-1,"column"->rule[[1,2]]-1,"epsilon"->1,"variable"->"t","expression"->str[letters[[data[[2,j]]]]],"coefficient"->str[rule[[2]]]|>],Most[ArrayRules[data[[3,j]]]]],{j,Length[data[[2]]]}]];
+request=<|"schema"->"DiffExp.Transport/v1","dimension"->Length[bc],"epsilon_order"->6,"paths"-><|"t"->"x"|>,"entries"->entries,"boundary"->Map[str,bc,{2}],"taylor_order"->40,"working_bits"->300,"accuracy_goal"->20,"division_order"->4|>;
+Export["dp-shared-request.json",request,"RawJSON"];Put[bc,"boundary.wl"];Put[ref,"reference.wl"];
+Export["conversion-check.json",<|"maxLetterDifference"->str[Max[Table[Max[Abs[N[(Activate[letters]-dLettersLine)/.t->v,70]]],{v,{0,1/16,1/4,1/2,3/4,15/16,1}}]]],"entries"->Length[entries],"roots"->Length[remaining],"real_root_counts_on_path"->(CountRoots[#[[1]],{t,0,1}]&/@remaining)|>,"RawJSON"];
+];
+Export["conversion-timing.json",<|"preparation_seconds"->prep|>,"RawJSON"];
+Print["prep seconds ",prep];Quit[];

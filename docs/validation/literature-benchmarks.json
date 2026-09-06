@@ -1,0 +1,144 @@
+{
+  "metadata": {
+    "sources": {
+      "canko_pozzoli": {
+        "url": "https://zenodo.org/records/14284044/files/ancillary.tar.xz",
+        "sha256": "453836a0e239b77b2552a27b0b332732bf34595a2b9d0f85c3f0608d15dffbed"
+      },
+      "original_diffexp": {
+        "url": "https://gitlab.com/hiddingm/diffexp/-/raw/master/DiffExp.m",
+        "sha256": "67fa23a0be32f747e292debcf3142b0ecef2cf526335b5b31f5ec7dd9cdeace7"
+      }
+    },
+    "machine": "Apple M4, macOS 26.2 arm64, Wolfram 15.0.0",
+    "date": "2026-09-06",
+    "core_policy": "Sequential solver processes, OMP/BLAS threads 1; no concurrent builds or other benchmark runs during recorded measurements",
+    "accuracy_metric": "abs(value-reference)/max(1,abs(reference))",
+    "maximum_seconds_per_process": 600
+  },
+  "canko_pozzoli": [
+    {
+      "family": "RL1",
+      "masters": 27,
+      "epsilon_order": 6,
+      "original_transport_seconds": 10.608631,
+      "native_timings": {
+        "preparation_seconds": 0.008060583,
+        "numerical_seconds": 0.329936709,
+        "total_seconds": 0.337997292
+      },
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 7,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 3,
+        "preparation_note": ""
+      },
+      "maximum_scaled_cross_method_difference": "1.039206140670455121379141663526194752870389297396077213137979746622563135547431884942902151709885821717035842376807e-54",
+      "passes_40_digits": true,
+      "wrapper_seconds": 2.880715,
+      "wrapper_difference": "3.219684974147701812974016549566527239102271210301815138715470517275543922038492134328751735478564762284867817557326e-53",
+      "wrapper_passes_40_digits": true
+    },
+    {
+      "family": "RL2",
+      "masters": 25,
+      "epsilon_order": 6,
+      "original_transport_seconds": 13.324561,
+      "native_timings": {
+        "preparation_seconds": 0.009549958,
+        "numerical_seconds": 4.658172625,
+        "total_seconds": 4.667722583
+      },
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 1,
+        "series_charts": 12,
+        "finite_lag_rejections": 12,
+        "max_polynomial_degree": 2,
+        "preparation_note": ""
+      },
+      "maximum_scaled_cross_method_difference": "3.525371278114579120545546262522957805187835633711225577325072175344623597445318113116810832055198258983991747283257e-49",
+      "passes_40_digits": true,
+      "wrapper_seconds": 3.618638,
+      "wrapper_difference": "3.525359895296853240239249221094336454528010482446053074980290180872765185724421932282590245906909966417875800945462e-49",
+      "wrapper_passes_40_digits": true
+    }
+  ],
+  "epsilon_sampling": {
+    "description": "Controlled transport-only epsilon sampling: same RL1 matrix and boundary polynomial.\nThis is not AMFlow's implementation and not a full FT benchmark.\n",
+    "dimension": 27,
+    "epsilon_high": 2,
+    "working_bits": 384,
+    "taylor_order": 64,
+    "goal_digits": 40,
+    "runs": [
+      {
+        "method": "direct-series",
+        "wall_seconds": 0.39377041696570814,
+        "timings": {
+          "preparation_seconds": 0.002385292,
+          "numerical_seconds": 0.379573042,
+          "total_seconds": 0.381958334
+        }
+      },
+      {
+        "method": "direct-auto",
+        "wall_seconds": 0.5066659159492701,
+        "timings": {
+          "preparation_seconds": 0.007172416,
+          "numerical_seconds": 0.447683917,
+          "total_seconds": 0.454856333
+        }
+      },
+      {
+        "method": "cauchy-sampling",
+        "samples": 12,
+        "radius": "0.0001",
+        "wall_seconds": 12.945059248013422,
+        "timings_sum": {
+          "preparation_seconds": 0.226783082,
+          "numerical_seconds": 12.443125291,
+          "total_seconds": 12.669908373
+        },
+        "maximum_scaled_difference": "2.10321020876770953750574404942085952454685965911189135674293728227859304169371235598716527768225972425965817915998422716e-47",
+        "passes_40_digits": true
+      },
+      {
+        "method": "cauchy-sampling",
+        "samples": 16,
+        "radius": "0.0001",
+        "wall_seconds": 18.11873770877719,
+        "timings_sum": {
+          "preparation_seconds": 0.325525873,
+          "numerical_seconds": 17.290377379,
+          "total_seconds": 17.615903252
+        },
+        "maximum_scaled_difference": "2.10305717615578656951317798824228460897662006074388457629307896046161093469621137983309049516661837318717753190350855366e-47",
+        "passes_40_digits": true
+      }
+    ]
+  },
+  "validation": {
+    "tests": [
+      "transport",
+      "finite_lag_transport",
+      "frontend",
+      "cli.interface",
+      "mathematica.interface",
+      "mathematica.compatibility"
+    ],
+    "passed": 6,
+    "failed": 0,
+    "wall_seconds": 25.02
+  },
+  "chess_report": "../../tools/performance/literature/chess/results/2026-09-06-summary.json",
+  "source_files_sha256": {
+    "include/diffexp/transport.hpp": "77353948f46dd40f270bdc484f84f972419cfdc4ccc9f71bd17c85c219fd2b0e",
+    "include/diffexp/jet.hpp": "c3d9a3953d7051082d0bb4177c3850a7de70f0ce003c5d4962146e677431a84a",
+    "include/diffexp/data.hpp": "e5a2f9fdfb387f306b30bf70d2c530c01c4b96103a589f0d0eee106709bdd083",
+    "include/diffexp/detail/finite_lag.ipp": "99d3bac7608d5736f60c8b52dce252f10c4acee488051cc800c2f3ac03693431",
+    "Mathematica/DiffExp.wl": "72710732abd231eca3be378b6e6c6a4f5160de898cb9141f77d33d6eb40d961c"
+  }
+}

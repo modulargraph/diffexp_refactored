@@ -48,6 +48,7 @@ class Reader {
       while(pos_<text_.size()) {
         char t=text_[pos_];
         if(std::isdigit(static_cast<unsigned char>(t)) || t=='.' || t=='`') ++pos_;
+        else if((t=='-' || t=='+') && pos_>0 && text_[pos_-1]=='`') ++pos_;
         else if(text_.compare(pos_,2,"\\\n")==0) pos_+=2;
         else if(text_.compare(pos_,2,"*^")==0) {
           pos_+=2; if(pos_<text_.size() && (text_[pos_]=='-' || text_[pos_]=='+')) ++pos_;

@@ -182,3 +182,8 @@ versions remain available in Git history.
 
 GPL-3.0-or-later. See [LICENSE](LICENSE), [CITATION.cff](CITATION.cff), and the
 [method references](docs/citation.md).
+
+Recent [literature benchmarks](docs/literature-benchmarks.md) cover the complete
+Canko–Pozzoli RL1/RL2 systems through epsilon^6, Mathematica-wrapper timings, a
+controlled epsilon-sampling study, and an explicitly experimental
+[CHESS-style C++ spectral comparison](tools/performance/literature/chess/README.md).

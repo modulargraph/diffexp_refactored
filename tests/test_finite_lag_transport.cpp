@@ -13,6 +13,23 @@ int main(){try {
   auto request=j::parse(R"({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"t+Sqrt[1+t^2]"}]})").as_object();
   auto c=transport::compile(request,2,2,384);auto plan=transport::finite_lag_plan(c);
   check(plan && plan->gauge.size()==2 && plan->gauge[0]!=plan->gauge[1],"root gauge was not selected");
+  // A supplied one-form uses its derivative directly, with a separate exact weight.
+  auto forms=j::parse(R"({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"form","expression":"1/Sqrt[1+x^2]","coefficient":"2"}]})").as_object();
+  auto form_system=transport::compile(forms,2,2,384);
+  check(form_system.canonical && transport::finite_lag_plan(form_system),"supplied form lost sparse finite-lag support");
+  Boundary form_initial{{B(0),B(0),B(0)},{B(1),B(0),B(0)}};
+  B form_center=B::from_strings("1/4"),form_step=B::from_strings("1/32");
+  auto form_roots=transport::principal_roots_at(form_system,form_center);
+  auto form_result=transport::chart(form_system,transport::numerical_entries(form_system),form_initial,form_roots,form_center,form_step,80,false,110);
+  auto form_series=transport::chart(form_system,transport::numerical_entries(form_system),form_initial,form_roots,form_center,form_step,80,false,110,true,10000000,true,false);
+  B form_a,form_b;acb_asinh(form_a.raw(),form_center.raw(),384);acb_asinh(form_b.raw(),(form_center+form_step).raw(),384);
+  check(form_result.finite_lag,"supplied form did not select finite-lag recurrence");
+  close(form_result.values[0][1],B(2)*(form_b-form_a),"supplied form analytic result");
+  close(form_series.values[0][1],form_result.values[0][1],"supplied form series fallback");
+  // Identical syntax has distinct meaning as a letter and as a one-form.
+  forms["entries"].as_array().push_back(j::parse(R"({"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"1/Sqrt[1+x^2]"})"));
+  auto mixed=transport::compile(forms,2,2,384);
+  check(mixed.letters.size()==2 && mixed.letter_forms[0] && !mixed.letter_forms[1],"mixed letter/form cache collision");
   // Translation must preserve a polynomial at a nonzero complex chart center.
   std::vector<B> p{B(1),B(2),B(3),B(4)};B at=B::from_strings("1/4","1/8"),step=B::from_strings("1/32");
   auto q=transport::finite_lag_detail::shifted(p,at);B left,right;

@@ -48,6 +48,8 @@ struct Compiled {
   std::vector<Exact> squares,root_derivatives;
   std::vector<Entry> entries;
   std::vector<Exact> letters,basis_prefactors;
+  // True means the supplied scalar is already the one-form coefficient in x.
+  std::vector<bool> letter_forms;
   std::vector<CanonicalEntry> canonical_entries;
   bool canonical=true;
   std::vector<B> singularities;
@@ -61,6 +63,9 @@ struct Compiled {
   }
   Exact derivative(const Exact& q) const {
     auto out=q.derivative(0);for(unsigned r=0;r<root_derivatives.size();++r)out=out+q.derivative(2+r)*root_derivatives[r];return reduced(out);
+  }
+  Exact letter_derivative(unsigned index) const {
+    return letter_forms[index]?letters[index]:reduced(derivative(letters[index])/letters[index]);
   }
   Exact norm(Exact p) const {
     for(unsigned r=squares.size();r-->0;)p=polynomial_norm(p.numerator(),2+r,squares[r]);
@@ -104,12 +109,12 @@ inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong 
     else {
       coefficient=evaluate_exact(expressions[index],x,vars);
       if(variable=="dlog")coefficient=out.derivative(coefficient)/coefficient;
-      else {auto it=vars.find(variable);if(it==vars.end())throw std::invalid_argument("matrix variable absent from path: "+variable);coefficient=coefficient*out.derivative(it->second);}
+      else if(variable!="form") {auto it=vars.find(variable);if(it==vars.end())throw std::invalid_argument("matrix variable absent from path: "+variable);coefficient=coefficient*out.derivative(it->second);}
       coefficient=out.reduced(coefficient);prepared_coefficients.emplace(std::move(key),coefficient);
     }
-    if(variable=="dlog" && eps==1) {
-      const auto letter_key=expression_key(expressions[index]);auto [it,added]=letter_ids.try_emplace(letter_key,out.letters.size());
-      if(added)out.letters.push_back(evaluate_exact(expressions[index],x,vars));
+    if((variable=="dlog" || variable=="form") && eps==1) {
+      const auto letter_key=variable+":"+expression_key(expressions[index]);auto [it,added]=letter_ids.try_emplace(letter_key,out.letters.size());
+      if(added){out.letters.push_back(variable!="dlog"?coefficient:evaluate_exact(expressions[index],x,vars));out.letter_forms.push_back(variable!="dlog");}
       out.canonical_entries.push_back({row,col,it->second,o.if_contains("coefficient")?Rational(string(o.at("coefficient"))):Rational(1)});
     } else out.canonical=false;
     ++index;
@@ -330,7 +335,7 @@ inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,
   }
   AcbArray coeffs(static_cast<slong>(c.canonical?c.letters.size():entries.size())*order),values(static_cast<slong>(base_cells)*columns);
   if(c.canonical) {
-    for(unsigned l=0;l<c.letters.size();++l){auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=letter.derivative()/letter;
+    for(unsigned l=0;l<c.letters.size();++l){auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=c.letter_forms[l]?letter:letter.derivative()/letter;
       for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+l*order+n,value.raw());}}
   } else for(unsigned e=0;e<entries.size();++e) {auto jet=evaluate(entries[e].coefficient,x,vars);for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+e*order+n,value.raw());}}
   const slong stride=static_cast<slong>(columns)*d*w;
@@ -559,7 +564,7 @@ inline json::value run(const json::value& input) {
   for(const auto& p:c.square_polynomials){B root;auto value=p.evaluate_polynomial(initial_center);acb_sqrt(root.raw(),value.raw(),bits);root_values.push_back(root);}
   auto entries=numerical_entries(c);
   if(center==0 && std::any_of(c.singularities.begin(),c.singularities.end(),[](const B& p){return p.contains_zero();})) {
-    if(!c.canonical)throw std::invalid_argument("a singular initial point requires asymptotic boundary conditions");
+    if(!c.canonical || std::any_of(c.letter_forms.begin(),c.letter_forms.end(),[](bool form){return form;}))throw std::invalid_argument("a singular initial point with ordinary or supplied-form entries requires asymptotic boundary conditions");
     auto finite=c.singularities;finite.erase(std::remove_if(finite.begin(),finite.end(),[](const B& p){return p.contains_zero();}),finite.end());
     auto next=std::min(1.0,clearance_endpoint(0,finite)*4.0/division);B end;acb_set_d(end.raw(),next);
     Jet x(0,order+4,bits);x.set(1,B(1));std::map<std::string,Jet> vars{{"x",x}};

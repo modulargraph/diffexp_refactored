@@ -24,6 +24,7 @@ ExpansionOrder::usage = "DiffExp configuration or boundary-input symbol.";
 LineParameter::usage = "DiffExp configuration or boundary-input symbol.";
 LogFile::usage = "DiffExp configuration or boundary-input symbol.";
 MatrixDirectory::usage = "DiffExp configuration or boundary-input symbol.";
+Recurrence::usage = "Recurrence selects native transport: auto (default), taylor, series, or spectral. Spectral requires positive AccuracyGoal and an ordinary epsilon-linear system.";
 RadiusOfConvergence::usage = "DiffExp configuration or boundary-input symbol.";
 SegmentationStrategy::usage = "DiffExp configuration or boundary-input symbol.";
 IntegrationStrategy::usage = "DiffExp configuration or boundary-input symbol.";
@@ -95,7 +96,7 @@ DiffExpBackendInfo[OptionsPattern[]] :=
 eps := \[Epsilon];
 $defaultConfiguration = <|AccuracyGoal -> "?", BasisPrefactors -> {}, ChopPrecision -> 250,
  DeltaPrescriptions -> {}, DivisionOrder -> 3, EpsilonOrder -> 4, ExpansionOrder -> 50,
- LineParameter -> Global`x, MatrixDirectory -> "", RadiusOfConvergence -> 1,
+ LineParameter -> Global`x, MatrixDirectory -> "", RadiusOfConvergence -> 1, Recurrence -> "auto",
  SegmentationStrategy -> "Predivision", IntegrationStrategy -> "Default", UseMobius -> False,
  UsePade -> False, Variables -> {}, Verbosity -> 1, WorkingPrecision -> 500|>;
 If[!AssociationQ[$configuration], $configuration = $defaultConfiguration];
@@ -117,6 +118,7 @@ UpdateConfiguration[configuration_Association] := Module[{previous=$configuratio
   compatFailure["Configuration", "EpsilonOrder must be nonnegative and ExpansionOrder must be at least two."]];
  If[!NumericQ[configValue[WorkingPrecision]] || configValue[WorkingPrecision]<16,
   compatFailure["Configuration", "WorkingPrecision must be at least 16 decimal digits."]];
+ If[!MemberQ[{"auto","taylor","series","spectral"},configValue[Recurrence]], compatFailure["Configuration", "Recurrence must be auto, taylor, series, or spectral."]];
  If[MemberQ[configValue[Variables], configValue[LineParameter]], compatFailure["Configuration", "LineParameter cannot be a matrix variable."]];
  If[KeyExistsQ[updates, MatrixDirectory] || (KeyExistsQ[updates, EpsilonOrder] && configValue[MatrixDirectory] =!= ""), loadMatrices[]];
  CurrentConfiguration[]], "DiffExpCompatibility"];
@@ -231,7 +233,7 @@ asymptoticData[coefficients_,lp_] := Module[{constraints={},cutoffs={},expressio
 baseRequest[paths_Association,save_] := Module[{request,prefactors=configValue[BasisPrefactors],aliases=<||>,renames,used=SymbolName/@Keys[paths],candidate,n=0,entries=$matrixEntries,mappedPaths},
  (* Kinematic x is legal when LineParameter is different. Only the wire
     representation must reserve x for the native path parameter. *)
- Do[If[name==="x" || name==="I" || StringMatchQ[name,RegularExpression["r[0-9]+"]],
+ Do[If[name==="x" || name==="I" || name==="form" || StringMatchQ[name,RegularExpression["r[0-9]+"]],
   candidate="diffexpVariable"<>ToString[n++];While[MemberQ[used,candidate],candidate="diffexpVariable"<>ToString[n++]];
   AssociateTo[aliases,name->candidate];AppendTo[used,candidate]],{name,SymbolName/@Keys[paths]}];
  renames=KeyValueMap[(Symbol["Global`"<>#1]->Symbol["Global`"<>#2])&,aliases];
@@ -244,7 +246,7 @@ baseRequest[paths_Association,save_] := Module[{request,prefactors=configValue[B
  "epsilon_order"->configValue[EpsilonOrder],"taylor_order"->configValue[ExpansionOrder],
  "working_bits"->Ceiling[configValue[WorkingPrecision] Log[2,10]],
  "accuracy_goal"->If[NumberQ[configValue[AccuracyGoal]],configValue[AccuracyGoal],0],
- "division_order"->configValue[DivisionOrder],"save_segments"->TrueQ[save],"paths"->wirePaths[mappedPaths],"entries"->entries|>;
+ "recurrence"->configValue[Recurrence],"division_order"->configValue[DivisionOrder],"save_segments"->TrueQ[save],"paths"->wirePaths[mappedPaths],"entries"->entries|>;
  If[prefactors=!={},
   If[!ListQ[prefactors] || Length[prefactors]=!=$matrixDimension,compatFailure["BasisPrefactors","Supply one algebraic prefactor per integral."]];
   request["basis_prefactors"]=inputString/@prefactors];request];

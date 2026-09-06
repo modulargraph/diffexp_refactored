@@ -2,6 +2,8 @@
 
 Compatible canonical differential equations now use the rational finite-lag recurrence automatically, including through the Mathematica process wrapper. The solver derives a diagonal root gauge from the supplied connection, keeps the original dimension, and prepares shared rational products once. Distinct coefficient polynomials are translated once per chart and shared over source components. No example-name dispatch is involved.
 
+The newer [adaptive spectral selector](adaptive-spectral.md) may handle suitable global intervals first. The finite-lag implementation described here remains the accelerated local solver and can be selected with `recurrence: "taylor"`.
+
 This changes ordinary differential-equation transport. The separate Feynman-trick and singular-start algorithms retain their existing implementations. The retained recurrence has O(N) arithmetic cost at fixed polynomial degree, epsilon depth and working precision; fallback charts still use Taylor convolutions.
 
 ## Full-path one-loop check

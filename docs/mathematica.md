@@ -23,6 +23,26 @@ result = TransportTo[boundary, {t -> 20}];
 DiffExpLastTimings[]
 ```
 
+## Adaptive solver selection
+
+The wrapper forwards `Recurrence -> "auto"` by default. Suitable larger
+ordinary epsilon-linear systems can use adaptive Chebyshev spectral transport;
+other systems retain local finite-lag/Taylor transport. This works with ordinary
+`dVARIABLE_1.m` matrices as well as canonical logarithmic input; no family name
+or special Mathematica extension is needed.
+
+```wolfram
+UpdateConfiguration[Recurrence -> "spectral", AccuracyGoal -> 40];
+result = TransportTo[boundary, target];
+DiffExpLastTimings[]
+```
+
+Explicit `"spectral"` rejects unsupported systems or failed accuracy checks.
+`"auto"` falls back; `"taylor"` selects the local solver with finite-lag
+acceleration, and `"series"` forces Taylor convolution. Native Taylor-segment export and asymptotic initialization require local
+methods. Mathematica’s saved physical-point replay remains available for
+ordinary spectral results. See [method and measured scope](adaptive-spectral.md).
+
 ## Original API
 
 | Function | Behavior |

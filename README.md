@@ -67,6 +67,15 @@ endpoint roots can require explicit `BasisPrefactors`. See the
 the [runnable example](examples/Mathematica.wl), and
 [measured timings](docs/timings.md).
 
+**Adaptive spectral transport is available through the same Mathematica interface.**
+`Recurrence -> "auto"` selects it for suitable larger epsilon-linear systems,
+with local series as a fallback. Use `UpdateConfiguration[Recurrence -> "spectral"]`
+to request it explicitly with a positive `AccuracyGoal`; `"taylor"` selects
+local finite-lag/Taylor transport. See [adaptive transport](docs/adaptive-spectral.md)
+for accuracy checks, timings and applicability. In the complete RL1/RL2
+40-digit examples, Mathematica `TransportTo` now takes 0.65 s / 1.20 s on the
+test laptop, versus 2.88 s / 3.62 s previously (single observations).
+
 The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`. Communication
 uses ordinary processes and JSON, with no LibraryLink or WSTP setup.
 The [direct native operations](docs/mathematica.md#direct-native-operations),
@@ -185,5 +194,5 @@ GPL-3.0-or-later. See [LICENSE](LICENSE), [CITATION.cff](CITATION.cff), and the
 
 Recent [literature benchmarks](docs/literature-benchmarks.md) cover the complete
 Canko–Pozzoli RL1/RL2 systems through epsilon^6, Mathematica-wrapper timings, a
-controlled epsilon-sampling study, and an explicitly experimental
+controlled epsilon-sampling study, and the original fixed-resolution
 [CHESS-style C++ spectral comparison](tools/performance/literature/chess/README.md).

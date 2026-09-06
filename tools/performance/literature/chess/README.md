@@ -110,3 +110,10 @@ hashes, conversion checks, and prior production trials. Compressed first-repeat
 CHESS values and complete prototype responses retain all 1,869 cells without
 checking in duplicated 17-MB converted requests. Upstream source/data are fetched
 at the pinned commit rather than redistributed here.
+
+## Adaptive production follow-up
+
+The fixed-resolution prototype above is now complemented by the native adaptive
+transport backend. See [production results and reproduction](../../../../docs/adaptive-spectral.md).
+Its automatic resolution checks add work and should not be conflated with the
+fixed-node numerical timings above.

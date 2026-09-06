@@ -35,7 +35,7 @@ zero-based. The retained epsilon window is `0..epsilon_order`.
 | `taylor_order` | Retained local series order; default 50 |
 | `working_bits` | Binary working precision; default 384 |
 | `accuracy_goal` | Requested decimal digits under the reported error estimate; 0 disables this check |
-| `recurrence` | `auto` (default) selects the finite-lag solver when supported and suitable; `series` forces the previous Taylor-convolution solver |
+| `recurrence` | `auto` (default) selects adaptive spectral or local transport; `spectral` requires adaptive collocation; `taylor` selects local finite-lag/Taylor; `series` forces Taylor convolution |
 | `division_order` | Local step control; default 4 |
 | `save_segments` | Export local retained Taylor coefficients; default false, with a 64 MiB estimated output budget |
 
@@ -45,7 +45,9 @@ It contributes `epsilon^2/(1-t)` to the `dt` connection. Native pullback
 multiplies by the derivative of `paths.t`.
 
 An entry with `"variable":"form"` explicitly
-supplies an already pulled-back coefficient of `dx`, with optional exact rational
+supplies an already pulled-back coefficient of `dx` when no path variable named
+`form` exists. A path variable of that name keeps its ordinary derivative
+semantics; rename it to use the explicit marker. Supplied forms accept an optional exact rational
 `coefficient`; its expression is evaluated along the request paths but is not
 multiplied by another path derivative. This preserves a sparse constant-matrix
 sum of shared scalar one-forms without combining radical expressions per matrix
@@ -68,6 +70,15 @@ continue to use the series solver so their exported coefficients remain in the
 physical basis. Singular starts retain the existing boundary treatment. Tail
 estimates are transported back through the gauge and fed into the existing
 accuracy checks; they remain estimates, not certified infinite-tail bounds.
+Before local preparation, `auto` may attempt [adaptive spectral transport](adaptive-spectral.md)
+for ordinary epsilon-linear systems with at least 16 components, positive
+accuracy goal and no saved segments. Ordinary derivative entries are shared
+internally when eligible. Spectral transport continues independent polynomial
+square roots and honors endpoint `basis_prefactors`. It does not require an
+exact rationalizing gauge. Explicit `spectral` also permits smaller systems.
+The `spectral` output object records whether it was attempted/accepted, tested
+resolutions and the rejection reason. `spectral_charts` is one on success.
+
 The output `recurrence` object reports accepted finite-lag and series chart counts,
 rejected candidates in adaptive checking, and any preparation fallback reason.
 

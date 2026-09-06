@@ -5,6 +5,7 @@
 #include "diffexp/canonical.hpp"
 #include <chrono>
 #include <memory>
+#include <complex>
 
 namespace diffexp::transport {
 namespace json=boost::json;
@@ -72,15 +73,23 @@ struct Compiled {
     return polynomial_norm(p.numerator(),1,p.constant(-1));
   }
 };
-inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong bits) {
+inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong bits,bool share_ordinary=false) {
   Algebra algebra;std::map<std::string,data::Expr> paths;
   for(const auto& kv:request.at("paths").as_object()) {
     auto name=std::string(kv.key());
     if(name=="x" || name=="I" || (name.size()>1 && name[0]=='r' && std::all_of(name.begin()+1,name.end(),[](unsigned char c){return std::isdigit(c);})))throw std::invalid_argument("path variable collides with a reserved native symbol: "+name);
   }
   for(const auto& kv:request.at("paths").as_object())paths.emplace(std::string(kv.key()),algebra.extract(data::Reader(string(kv.value())).read()));
-  std::vector<data::Expr> expressions;
-  for(const auto& v:request.at("entries").as_array())expressions.push_back(algebra.extract(data::Reader(string(v.as_object().at("expression"))).read()));
+  // Scalar forms are shared by many sparse matrix entries. Parse/extract each
+  // input expression once, rather than rebuilding its algebraic tree per edge.
+  std::vector<data::Expr> expressions;std::vector<unsigned> expression_indices;
+  std::map<std::string,unsigned> expression_ids;
+  for(const auto& v:request.at("entries").as_array()) {
+    auto source=string(v.as_object().at("expression"));
+    auto [it,inserted]=expression_ids.try_emplace(source,expressions.size());
+    if(inserted)expressions.push_back(algebra.extract(data::Reader(std::move(source)).read()));
+    expression_indices.push_back(it->second);
+  }
   std::vector<data::Expr> prefactors;
   if(auto supplied=request.if_contains("basis_prefactors")) {
     if(!supplied->is_array() || supplied->as_array().size()!=d)throw std::invalid_argument("basis_prefactors requires one expression string per component");
@@ -99,23 +108,34 @@ inline Compiled compile(const json::object& request,unsigned d,unsigned k,slong 
     auto derivative=out.derivative(square)/(x.constant(2)*x.variable(out.squares.size()+1));out.root_derivatives.push_back(std::move(derivative));
   }
   for(const auto& prefactor:prefactors)out.basis_prefactors.push_back(out.reduced(evaluate_exact(prefactor,x,vars)));
-  unsigned index=0;std::map<std::pair<std::string,std::string>,Exact> prepared_coefficients;std::map<std::string,unsigned> letter_ids;
+  unsigned index=0;std::map<std::pair<std::string,unsigned>,Exact> prepared_coefficients;std::map<std::pair<std::string,unsigned>,unsigned> letter_ids;
   for(const auto& v:request.at("entries").as_array()) {
     const auto& o=v.as_object();known_keys(o,{"row","column","epsilon","variable","expression","coefficient"},"matrix entry");unsigned row=integer(o,"row",-1,0,d-1),col=integer(o,"column",-1,0,d-1),eps=integer(o,"epsilon",0,0,100);
     if(row>=d || col>=d)throw std::invalid_argument("matrix position exceeds dimension");
-    const auto variable=string(o.at("variable"));auto key=std::make_pair(variable,expression_key(expressions[index]));
+    const auto variable=string(o.at("variable"));
+    // Existing kinematic variables take precedence over the new form marker.
+    const bool supplied_form=variable=="form" && !paths.contains(variable);
+    auto key=std::make_pair(variable,expression_indices[index]);
     auto found=prepared_coefficients.find(key);Exact coefficient(x.constant(0));
     if(found!=prepared_coefficients.end())coefficient=found->second;
     else {
-      coefficient=evaluate_exact(expressions[index],x,vars);
+      coefficient=evaluate_exact(expressions[expression_indices[index]],x,vars);
       if(variable=="dlog")coefficient=out.derivative(coefficient)/coefficient;
-      else if(variable!="form") {auto it=vars.find(variable);if(it==vars.end())throw std::invalid_argument("matrix variable absent from path: "+variable);coefficient=coefficient*out.derivative(it->second);}
+      else if(!supplied_form) {auto it=vars.find(variable);if(it==vars.end())throw std::invalid_argument("matrix variable absent from path: "+variable);coefficient=coefficient*out.derivative(it->second);}
       coefficient=out.reduced(coefficient);prepared_coefficients.emplace(std::move(key),coefficient);
     }
-    if((variable=="dlog" || variable=="form") && eps==1) {
-      const auto letter_key=variable+":"+expression_key(expressions[index]);auto [it,added]=letter_ids.try_emplace(letter_key,out.letters.size());
-      if(added){out.letters.push_back(variable!="dlog"?coefficient:evaluate_exact(expressions[index],x,vars));out.letter_forms.push_back(variable!="dlog");}
-      out.canonical_entries.push_back({row,col,it->second,o.if_contains("coefficient")?Rational(string(o.at("coefficient"))):Rational(1)});
+    std::optional<Rational> shared_weight;
+    if((variable=="dlog" || supplied_form || share_ordinary) && eps==1) {
+      try { shared_weight=o.if_contains("coefficient")?Rational(string(o.at("coefficient"))):Rational(1); }
+      catch(const std::exception&) {
+        if(variable=="dlog" || supplied_form)throw;
+        // Ordinary inputs may carry non-rational exact prefactors.
+      }
+    }
+    if(shared_weight) {
+      const auto letter_key=std::make_pair(variable,expression_indices[index]);auto [it,added]=letter_ids.try_emplace(letter_key,out.letters.size());
+      if(added){out.letters.push_back(variable!="dlog"?coefficient:evaluate_exact(expressions[expression_indices[index]],x,vars));out.letter_forms.push_back(variable!="dlog");}
+      out.canonical_entries.push_back({row,col,it->second,*shared_weight});
     } else out.canonical=false;
     ++index;
     if(auto p=o.if_contains("coefficient"))coefficient=coefficient*Exact(out.field,string(*p));
@@ -295,6 +315,7 @@ struct AcbArray {
 struct Chart {Boundary values,errors,truncation_errors;json::object saved;bool centered=false;bool finite_lag=false;};
 } // namespace diffexp::transport
 #include "diffexp/detail/finite_lag.ipp"
+#include "diffexp/detail/spectral.ipp"
 namespace diffexp::transport {
 inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
     const std::vector<B>& root_values,const B& center,const B& step,unsigned order,bool save,long digits,
@@ -515,10 +536,69 @@ inline json::value run(const json::value& input) {
   if(goal*3.32193>bits-32)throw std::invalid_argument("working precision has insufficient reserve for AccuracyGoal");
   B::set_precision(bits);const long digits=bits*30103/100000+5;bool save=r.if_contains("save_segments") && r.at("save_segments").as_bool();
   std::cerr<<"Preparing generic transport: "<<d<<" components, epsilon 0.."<<k<<"\n";
-  auto c=compile(r,d,k,bits);
   std::string recurrence=r.if_contains("recurrence")?string(r.at("recurrence")):"auto";
-  if(recurrence!="auto" && recurrence!="series")throw std::invalid_argument("recurrence must be auto or series");
-  c.finite_lag_enabled=recurrence=="auto";
+  if(recurrence!="auto" && recurrence!="series" && recurrence!="taylor" && recurrence!="spectral")
+    throw std::invalid_argument("recurrence must be auto, series, taylor or spectral");
+  const bool ordinary_start=!r.if_contains("asymptotic");
+  const bool spectral_requested=recurrence=="spectral";
+  if(spectral_requested && (save || !ordinary_start || goal==0))
+    throw std::invalid_argument("spectral transport requires an ordinary boundary, positive AccuracyGoal and no saved Taylor segments");
+  const bool spectral_size_candidate=recurrence=="auto" && d>=16 && k>0 && goal>0 && !save && ordinary_start;
+  auto c=compile(r,d,k,bits,spectral_requested || spectral_size_candidate);
+  json::object spectral_diagnostic{{"attempted",false},{"accepted",false}};
+  bool spectral_candidate=spectral_requested || spectral_size_candidate;
+  // Estimate how many global nodes nearby complex singularities could demand.
+  // This is a performance selector only; acceptance uses computed refinements.
+  if(spectral_candidate && !spectral_requested) {
+    const auto forecast=spectral_detail::node_forecast(c,goal);
+    if(std::isfinite(forecast))spectral_diagnostic["forecast_nodes"]=forecast;
+    if(forecast>256) {
+      spectral_candidate=false;spectral_diagnostic["reason"]="nearby singularities favor local series";
+    }
+  }
+  if(spectral_candidate) {
+    spectral_diagnostic["attempted"]=true;
+    SpectralOptions options;options.accuracy_goal=goal;options.seconds_budget=spectral_requested?30:8;
+    SpectralDiagnostics diagnostic;
+    auto initial=boundary(r,d,k,bits);
+    auto spectral=spectral_try(c,initial,options,diagnostic);
+    json::array nodes;for(auto n:diagnostic.nodes_tried)nodes.push_back(n);
+    spectral_diagnostic["nodes_tried"]=std::move(nodes);
+    spectral_diagnostic["selected_nodes"]=diagnostic.selected_nodes;
+    spectral_diagnostic["absolute_stability_components"]=diagnostic.absolute_stability_components;
+    spectral_diagnostic["reason"]=diagnostic.rejection_reason;
+    if(spectral) {
+      auto values=std::move(spectral->values),tail=std::move(spectral->errors);
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        arb_add_error(acb_realref(values[i][e].raw()),acb_realref(tail[i][e].raw()));
+        arb_add_error(acb_imagref(values[i][e].raw()),acb_realref(tail[i][e].raw()));
+      }
+      auto roots=std::move(spectral->endpoint_roots);
+      apply_basis_prefactors(c,B(1),roots,values,tail);
+      bool meets_goal=true;auto tolerance=B::from_strings("1e-"+std::to_string(goal));
+      for(const auto& row:values)for(const auto& value:row)
+        if(!arb_le(acb_realref(arithmetic_error(value).raw()),acb_realref(((magnitude(value)+B(1))*tolerance).raw())))meets_goal=false;
+      if(meets_goal) {
+        spectral_diagnostic["accepted"]=true;
+        const double total=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+        const double numerical=diagnostic.numerical_seconds;
+        json::object output{{"schema","DiffExp.TransportResult/v1"},{"parameter","1"},
+          {"values",matrix_json(values,digits)},{"errors",matrix_json(tail,digits)},{"charts",1},{"segments",json::array{}},
+          {"omitted_tails_certified",false},{"spectral",spectral_diagnostic},
+          {"timings",json::object{{"preparation_seconds",total-numerical},{"numerical_seconds",numerical},{"total_seconds",total}}},
+          {"recurrence",json::object{{"requested",recurrence},{"spectral_charts",1},{"finite_lag_charts",0},{"series_charts",0},{"finite_lag_rejections",0},{"max_polynomial_degree",0},{"preparation_note","adaptive spectral collocation"}}}};
+        if(!c.basis_prefactors.empty()) {
+          output["basis_convention"]="principal_endpoint";output["segments_basis_convention"]="continued";
+          output["endpoint_roots_continued"]=matrix_json(Boundary{roots},digits).at(0);
+          output["endpoint_roots_principal"]=matrix_json(Boundary{principal_roots_at(c,B(1))},digits).at(0);
+        }
+        return output;
+      }
+      spectral_diagnostic["reason"]="endpoint basis uncertainty exceeds AccuracyGoal";
+    }
+    if(spectral_requested)throw std::runtime_error("spectral transport rejected: "+string(spectral_diagnostic.at("reason")));
+  }
+  c.finite_lag_enabled=recurrence=="auto" || recurrence=="taylor";
   if(!save)finite_lag_plan(c);
   unsigned finite_lag_charts=0,series_charts=0,finite_lag_rejections=0;
   const auto prepared=std::chrono::steady_clock::now();
@@ -662,7 +742,8 @@ inline json::value run(const json::value& input) {
     {"errors",matrix_json(errors,digits)},{"charts",charts},{"segments",std::move(segments)},{"omitted_tails_certified",false},
     {"timings",json::object{{"preparation_seconds",std::chrono::duration<double>(prepared-start).count()},
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
-  output["recurrence"]=json::object{{"requested",recurrence},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
+  output["spectral"]=spectral_diagnostic;
+  output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
     {"max_polynomial_degree",c.finite_lag?c.finite_lag->max_degree:0},
     {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason}};
   if(!c.basis_prefactors.empty()) {

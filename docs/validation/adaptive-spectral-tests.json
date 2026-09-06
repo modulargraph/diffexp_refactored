@@ -1,0 +1,428 @@
+{
+  "date": "2026-09-06",
+  "scope": "Native tests, seven original reference checks, CLI and Mathematica. Frozen heavy banana reconstructions and external IBP acceptance excluded. Final naming fix receives a separate targeted rerun.",
+  "tests": [
+    {
+      "name": "transport",
+      "seconds": 0.920146,
+      "passed": true
+    },
+    {
+      "name": "spectral_transport",
+      "seconds": 0.3454,
+      "passed": true
+    },
+    {
+      "name": "finite_lag_transport",
+      "seconds": 0.268281,
+      "passed": true
+    },
+    {
+      "name": "frontend",
+      "seconds": 0.00567625,
+      "passed": true
+    },
+    {
+      "name": "data_geometry",
+      "seconds": 0.00645225,
+      "passed": true
+    },
+    {
+      "name": "tadpole_bubble",
+      "seconds": 0.0198088,
+      "passed": true
+    },
+    {
+      "name": "ibp",
+      "seconds": 0.114699,
+      "passed": true
+    },
+    {
+      "name": "sunrise_ibp",
+      "seconds": 0.286733,
+      "passed": true
+    },
+    {
+      "name": "deepest_beta",
+      "seconds": 0.146375,
+      "passed": true
+    },
+    {
+      "name": "sunrise_pipeline",
+      "seconds": 2.24746,
+      "passed": true
+    },
+    {
+      "name": "frobenius",
+      "seconds": 0.00970671,
+      "passed": true
+    },
+    {
+      "name": "certified_tail",
+      "seconds": 0.00737325,
+      "passed": true
+    },
+    {
+      "name": "certified_bubble",
+      "seconds": 0.0880608,
+      "passed": true
+    },
+    {
+      "name": "banana_oracle",
+      "seconds": 1.70974,
+      "passed": true
+    },
+    {
+      "name": "henn_observables",
+      "seconds": 0.00842279,
+      "passed": true
+    },
+    {
+      "name": "certified_deepest_beta",
+      "seconds": 1.02778,
+      "passed": true
+    },
+    {
+      "name": "merge_pullback",
+      "seconds": 0.0115043,
+      "passed": true
+    },
+    {
+      "name": "fuchsify",
+      "seconds": 0.0126991,
+      "passed": true
+    },
+    {
+      "name": "affine_frobenius",
+      "seconds": 0.0123058,
+      "passed": true
+    },
+    {
+      "name": "epsilon_gauge",
+      "seconds": 0.00842579,
+      "passed": true
+    },
+    {
+      "name": "laurent_transport",
+      "seconds": 0.0101578,
+      "passed": true
+    },
+    {
+      "name": "affine_matching",
+      "seconds": 0.0270273,
+      "passed": true
+    },
+    {
+      "name": "direct_examples",
+      "seconds": 0.00895725,
+      "passed": true
+    },
+    {
+      "name": "singular_transport",
+      "seconds": 0.00725704,
+      "passed": true
+    },
+    {
+      "name": "family_config",
+      "seconds": 0.0138447,
+      "passed": true
+    },
+    {
+      "name": "fire_native",
+      "seconds": 1.01792,
+      "passed": true
+    },
+    {
+      "name": "level_preparation",
+      "seconds": 0.00942808,
+      "passed": true
+    },
+    {
+      "name": "recursion_graph",
+      "seconds": 0.301478,
+      "passed": true
+    },
+    {
+      "name": "artifact_store",
+      "seconds": 0.0159634,
+      "passed": true
+    },
+    {
+      "name": "certified_rational_transport",
+      "seconds": 0.0689653,
+      "passed": true
+    },
+    {
+      "name": "gaussian_boundary",
+      "seconds": 0.161313,
+      "passed": true
+    },
+    {
+      "name": "level_cache",
+      "seconds": 0.0234748,
+      "passed": true
+    },
+    {
+      "name": "scalar_functional",
+      "seconds": 1.49312,
+      "passed": true
+    },
+    {
+      "name": "recursion_leaf",
+      "seconds": 1.24895,
+      "passed": true
+    },
+    {
+      "name": "fire_session",
+      "seconds": 0.00896067,
+      "passed": true
+    },
+    {
+      "name": "recursion_pipeline",
+      "seconds": 15.8098,
+      "passed": true
+    },
+    {
+      "name": "fire_batch_cache",
+      "seconds": 0.0116957,
+      "passed": true
+    },
+    {
+      "name": "box_oracle",
+      "seconds": 0.0089125,
+      "passed": true
+    },
+    {
+      "name": "henn_boundary",
+      "seconds": 0.0071505,
+      "passed": true
+    },
+    {
+      "name": "causal",
+      "seconds": 0.0102018,
+      "passed": true
+    },
+    {
+      "name": "causal_contour",
+      "seconds": 0.0253676,
+      "passed": true
+    },
+    {
+      "name": "pentagon_oracle",
+      "seconds": 0.00843104,
+      "passed": true
+    },
+    {
+      "name": "affine_operator",
+      "seconds": 0.0267578,
+      "passed": true
+    },
+    {
+      "name": "adjoint_transport",
+      "seconds": 0.0102066,
+      "passed": true
+    },
+    {
+      "name": "linear_boundary",
+      "seconds": 0.00851896,
+      "passed": true
+    },
+    {
+      "name": "polynomial_transport",
+      "seconds": 0.012507,
+      "passed": true
+    },
+    {
+      "name": "henn_scalar_leaf",
+      "seconds": 1.56005,
+      "passed": true
+    },
+    {
+      "name": "box_bubble_oracle",
+      "seconds": 0.00872538,
+      "passed": true
+    },
+    {
+      "name": "double_box_oracle",
+      "seconds": 0.00626592,
+      "passed": true
+    },
+    {
+      "name": "box_triangle_oracle",
+      "seconds": 0.18132,
+      "passed": true
+    },
+    {
+      "name": "fire_checkpoint",
+      "seconds": 0.0104948,
+      "passed": true
+    },
+    {
+      "name": "adjoint_scaling",
+      "seconds": 0.271266,
+      "passed": true
+    },
+    {
+      "name": "endpoint_gauge",
+      "seconds": 0.0118008,
+      "passed": true
+    },
+    {
+      "name": "scalar_accumulator",
+      "seconds": 1.29253,
+      "passed": true
+    },
+    {
+      "name": "affine_large",
+      "seconds": 0.50471,
+      "passed": true
+    },
+    {
+      "name": "fire_backward_checkpoint",
+      "seconds": 0.00810296,
+      "passed": true
+    },
+    {
+      "name": "affine_finite_lag",
+      "seconds": 0.0134043,
+      "passed": true
+    },
+    {
+      "name": "conditioned_adjoint",
+      "seconds": 0.015155,
+      "passed": true
+    },
+    {
+      "name": "cached_affine",
+      "seconds": 0.042538,
+      "passed": true
+    },
+    {
+      "name": "factored_transport",
+      "seconds": 0.00828492,
+      "passed": true
+    },
+    {
+      "name": "factored_pipeline",
+      "seconds": 22.1054,
+      "passed": true
+    },
+    {
+      "name": "pipeline_preflight",
+      "seconds": 4.79598,
+      "passed": true
+    },
+    {
+      "name": "centered_adjoint",
+      "seconds": 0.338851,
+      "passed": true
+    },
+    {
+      "name": "prepared_stage",
+      "seconds": 0.0136394,
+      "passed": true
+    },
+    {
+      "name": "adjoint_checkpoint",
+      "seconds": 0.666289,
+      "passed": true
+    },
+    {
+      "name": "modular_reconstruction",
+      "seconds": 0.00925979,
+      "passed": true
+    },
+    {
+      "name": "fire_modular",
+      "seconds": 0.00736708,
+      "passed": true
+    },
+    {
+      "name": "univariate_rational",
+      "seconds": 0.0276515,
+      "passed": true
+    },
+    {
+      "name": "cached_affine_columns",
+      "seconds": 0.0754186,
+      "passed": true
+    },
+    {
+      "name": "affine_endpoint_domain",
+      "seconds": 0.139813,
+      "passed": true
+    },
+    {
+      "name": "original_mpl",
+      "seconds": 7.35161,
+      "passed": true
+    },
+    {
+      "name": "original_henn_nonplanar",
+      "seconds": 46.5255,
+      "passed": true
+    },
+    {
+      "name": "original_planar.1loop",
+      "seconds": 8.42411,
+      "passed": true
+    },
+    {
+      "name": "original_planar.zmz",
+      "seconds": 167.235,
+      "passed": true
+    },
+    {
+      "name": "original_planar.mzz",
+      "seconds": 143.06,
+      "passed": true
+    },
+    {
+      "name": "original_planar.zzz",
+      "seconds": 184.155,
+      "passed": true
+    },
+    {
+      "name": "singular_transport.original",
+      "seconds": 1.38325,
+      "passed": true
+    },
+    {
+      "name": "cli.interface",
+      "seconds": 0.0622566,
+      "passed": true
+    },
+    {
+      "name": "mathematica.interface",
+      "seconds": 3.38318,
+      "passed": true
+    },
+    {
+      "name": "mathematica.compatibility",
+      "seconds": 20.6967,
+      "passed": true
+    }
+  ],
+  "final_naming_fix_checks": [
+    {
+      "name": "transport",
+      "seconds": 1.17105,
+      "passed": true
+    },
+    {
+      "name": "spectral_transport",
+      "seconds": 0.431209,
+      "passed": true
+    },
+    {
+      "name": "finite_lag_transport",
+      "seconds": 0.301404,
+      "passed": true
+    },
+    {
+      "name": "mathematica.compatibility",
+      "seconds": 30.9662,
+      "passed": true
+    }
+  ]
+}

@@ -19,3 +19,12 @@ For the recursive Feynman-trick workflow:
 > [arXiv:2206.14790](https://arxiv.org/abs/2206.14790).
 
 `CITATION.cff` contains machine-readable metadata for the software repository.
+
+For the sequential-epsilon Chebyshev collocation method used by the spectral backend:
+
+> Yuanche Liu and Yang Zhang, CHESS (2026),
+> [arXiv:2606.26691](https://arxiv.org/abs/2606.26691).
+
+The spectral backend is an independent C++ implementation of this method, with
+shared-expression preparation, adaptive refinement and DiffExp path/boundary
+integration. These implementation changes are not a claim of a new collocation method.

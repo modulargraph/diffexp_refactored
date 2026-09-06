@@ -86,6 +86,20 @@ LoadConfiguration[{Variables->{x},LineParameter->t,MatrixDirectory->folder,Epsil
 b=PrepareBoundaryConditions[{1},{x->0}];r=measured["kinematic_x",TransportTo[b,{x->1/2}]];
 check[ListQ[r]&&close[r[[2,1,1]],2],"kinematic x with separate line parameter"];
 
+(* The ordinary matrix interface can request the adaptive spectral engine. *)
+DeleteFile[FileNames["*.m",folder]];Put[{{1/(1-x)}},FileNameJoin[{folder,"dx_1.m"}]];
+LoadConfiguration[{Variables->{x},LineParameter->t,MatrixDirectory->folder,EpsilonOrder->2,AccuracyGoal->25,
+ WorkingPrecision->90,ChopPrecision->60,ExpansionOrder->40,Recurrence->"spectral",Verbosity->0}];
+b=PrepareBoundaryConditions[{1},{x->0}];r=measured["spectral_wrapper",TransportTo[b,{x->1/2}]];
+check[ListQ[r]&&And@@MapThread[(close[#1,#2,10^-25])&,{r[[2,1]],{1,Log[2],Log[2]^2/2}}],"spectral ordinary matrix wrapper"];
+check[DiffExp`Private`$lastRequest["recurrence"]==="spectral","spectral selection forwarded"];
+DeleteFile[FileNames["*.m",folder]];Put[{{1}},FileNameJoin[{folder,"dform_1.m"}]];
+LoadConfiguration[{Variables->{form},LineParameter->t,MatrixDirectory->folder,EpsilonOrder->1,AccuracyGoal->25,
+ WorkingPrecision->90,ExpansionOrder->40,Recurrence->"spectral",Verbosity->0}];
+b=PrepareBoundaryConditions[{1},{form->0}];r=measured["kinematic_form",TransportTo[b,{form->2}]];
+check[ListQ[r]&&close[r[[2,1,2]],2,10^-25],"kinematic form retains path derivative"];
+check[FailureQ[UpdateConfiguration[Recurrence->"unknown"]],"invalid recurrence rejected"];
+
 family=DiffExpFamilyTemplate["bubble"];
 check[AssociationQ[family] && family["schema"]==="DiffExp.FeynmanFamily/v1","editable FT template"];
 If[AssociationQ[family],family["name"]="custom-wrapper-test";

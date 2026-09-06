@@ -1,0 +1,562 @@
+{
+  "request_sha256": "7c8cde9f8dfb5e8cf2058f66159e2a410fb2c04b9300342b3b9350957cb784ec",
+  "executable_sha256": "26432d8833d2c1d9d7140d28a5bc7ad92c8f2638e08e1fcb74dcbddf61655b9f",
+  "records": [
+    {
+      "name": "auto-20-r1",
+      "goal": 20,
+      "repeat": 1,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 2.0632844171486795,
+      "timings": {
+        "preparation_seconds": 0.5535015839999999,
+        "numerical_seconds": 1.196351333,
+        "total_seconds": 1.749852917
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 83.2842959152794,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24
+        ],
+        "selected_nodes": 24,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    },
+    {
+      "name": "auto-40-r1",
+      "goal": 40,
+      "repeat": 1,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 3.5384595419745892,
+      "timings": {
+        "preparation_seconds": 0.4934693320000001,
+        "numerical_seconds": 2.741757834,
+        "total_seconds": 3.235227166
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 152.68787584467887,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48
+        ],
+        "selected_nodes": 48,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    },
+    {
+      "name": "auto-20-r2",
+      "goal": 20,
+      "repeat": 2,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 1.951579375192523,
+      "timings": {
+        "preparation_seconds": 0.4927597910000001,
+        "numerical_seconds": 1.157667542,
+        "total_seconds": 1.650427333
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 83.2842959152794,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24
+        ],
+        "selected_nodes": 24,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    },
+    {
+      "name": "auto-40-r2",
+      "goal": 40,
+      "repeat": 2,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 3.5215721670538187,
+      "timings": {
+        "preparation_seconds": 0.4950162920000003,
+        "numerical_seconds": 2.722340583,
+        "total_seconds": 3.217356875
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 152.68787584467887,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48
+        ],
+        "selected_nodes": 48,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    },
+    {
+      "name": "auto-20-r3",
+      "goal": 20,
+      "repeat": 3,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 1.955682208063081,
+      "timings": {
+        "preparation_seconds": 0.4938630420000001,
+        "numerical_seconds": 1.163271625,
+        "total_seconds": 1.657134667
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 83.2842959152794,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24
+        ],
+        "selected_nodes": 24,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    },
+    {
+      "name": "auto-40-r3",
+      "goal": 40,
+      "repeat": 3,
+      "mode": "auto",
+      "working_bits": 200,
+      "taylor_order": 40,
+      "wall_seconds": 3.4440487909596413,
+      "timings": {
+        "preparation_seconds": 0.48346233399999994,
+        "numerical_seconds": 2.658775333,
+        "total_seconds": 3.142237667
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 152.68787584467887,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48
+        ],
+        "selected_nodes": 48,
+        "absolute_stability_components": 0,
+        "reason": ""
+      },
+      "recurrence": {
+        "requested": "auto",
+        "spectral_charts": 1,
+        "finite_lag_charts": 0,
+        "series_charts": 0,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": "adaptive spectral collocation"
+      }
+    }
+  ],
+  "scope": "Native total includes exact compilation and adaptive refinement; wall adds process startup, JSON input/output. Input conversion, reference validation and compilation excluded. Sequential runs; no concurrent compiler.",
+  "controls": {
+    "executable_sha256": "688141137a31fcc945ad365c949b78f7c02e86477cb1fba262b13aaa47bb7b6d",
+    "records": [
+      {
+        "name": "taylor-20-r1",
+        "goal": 20,
+        "repeat": 1,
+        "mode": "taylor",
+        "working_bits": 200,
+        "taylor_order": 40,
+        "wall_seconds": 51.810769457835704,
+        "timings": {
+          "preparation_seconds": 18.410064458,
+          "numerical_seconds": 33.080403208,
+          "total_seconds": 51.490467666
+        },
+        "spectral": {
+          "attempted": false,
+          "accepted": false
+        },
+        "recurrence": {
+          "requested": "taylor",
+          "spectral_charts": 0,
+          "finite_lag_charts": 0,
+          "series_charts": 9,
+          "finite_lag_rejections": 0,
+          "max_polynomial_degree": 0,
+          "preparation_note": "noncanonical connection"
+        }
+      },
+      {
+        "name": "taylor-40-r1",
+        "goal": 40,
+        "repeat": 1,
+        "mode": "taylor",
+        "working_bits": 200,
+        "taylor_order": 40,
+        "wall_seconds": 49.351183166960254,
+        "timings": {
+          "preparation_seconds": 17.800760625,
+          "numerical_seconds": 31.234842542,
+          "total_seconds": 49.035603167
+        },
+        "spectral": {
+          "attempted": false,
+          "accepted": false
+        },
+        "recurrence": {
+          "requested": "taylor",
+          "spectral_charts": 0,
+          "finite_lag_charts": 0,
+          "series_charts": 9,
+          "finite_lag_rejections": 0,
+          "max_polynomial_degree": 0,
+          "preparation_note": "noncanonical connection"
+        }
+      }
+    ],
+    "note": "Controls precede the final absolute-stability safeguard and size-threshold extension; the forced local algorithm is unchanged."
+  },
+  "validation": [
+    {
+      "file": "auto-20-r1.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "max_normalized_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "requested_digits": 20,
+      "passed": true
+    },
+    {
+      "file": "auto-20-r2.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "max_normalized_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "requested_digits": 20,
+      "passed": true
+    },
+    {
+      "file": "auto-20-r3.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "max_normalized_error": "0.0000000000000000000000000000001365485267160246878541115860572204824633662192415657337664132220927458725783182139290491742626941681416165019068745",
+      "requested_digits": 20,
+      "passed": true
+    },
+    {
+      "file": "auto-40-r1.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "1.184646789279554681987363011704063368018147527918923974375076772812522783180796259338935388841688798871140173117483e-56",
+      "max_normalized_error": "1.158161260410239720903137883384563435320211519191832128564260242084535957360306944464555628563562495213902853065231e-56",
+      "requested_digits": 40,
+      "passed": true
+    },
+    {
+      "file": "auto-40-r2.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "1.184646789279554681987363011704063368018147527918923974375076772812522783180796259338935388841688798871140173117483e-56",
+      "max_normalized_error": "1.158161260410239720903137883384563435320211519191832128564260242084535957360306944464555628563562495213902853065231e-56",
+      "requested_digits": 40,
+      "passed": true
+    },
+    {
+      "file": "auto-40-r3.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "1.184646789279554681987363011704063368018147527918923974375076772812522783180796259338935388841688798871140173117483e-56",
+      "max_normalized_error": "1.158161260410239720903137883384563435320211519191832128564260242084535957360306944464555628563562495213902853065231e-56",
+      "requested_digits": 40,
+      "passed": true
+    },
+    {
+      "file": "taylor-20-r1.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "2.109826250041943359706462154973562828433298487972628452191070865641353371532399648131776713779681223027809863537435e-56",
+      "max_normalized_error": "2.109826250041943359706462154973562828433298487972628452191070865641353371532399648131776713779681223027809863537435e-56",
+      "requested_digits": 20,
+      "passed": true
+    },
+    {
+      "file": "taylor-40-r1.json.gz",
+      "coefficient_count": 1869,
+      "max_absolute_error": "2.109826250041943359706462154973562828433298487972628452191070865641353371532399648131776713779681223027809863537435e-56",
+      "max_normalized_error": "2.109826250041943359706462154973562828433298487972628452191070865641353371532399648131776713779681223027809863537435e-56",
+      "requested_digits": 40,
+      "passed": true
+    }
+  ],
+  "medians": [
+    {
+      "goal": 20,
+      "preparation_seconds": 0.4938630420000001,
+      "numerical_seconds": 1.163271625,
+      "total_seconds": 1.657134667,
+      "wall_seconds": 1.955682208063081
+    },
+    {
+      "goal": 40,
+      "preparation_seconds": 0.4934693320000001,
+      "numerical_seconds": 2.722340583,
+      "total_seconds": 3.217356875,
+      "wall_seconds": 3.5215721670538187
+    }
+  ],
+  "cp": [
+    {
+      "family": "RL1",
+      "mode": "auto",
+      "wall_seconds": 0.6411049589514732,
+      "timings": {
+        "preparation_seconds": 0.012456332999999986,
+        "numerical_seconds": 0.277686834,
+        "total_seconds": 0.290143167
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 114.3504906147094,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48,
+          64,
+          96
+        ],
+        "selected_nodes": 96,
+        "absolute_stability_components": 6,
+        "reason": ""
+      }
+    },
+    {
+      "family": "RL1",
+      "mode": "spectral",
+      "wall_seconds": 0.2858895000535995,
+      "timings": {
+        "preparation_seconds": 0.003661000999999997,
+        "numerical_seconds": 0.274208833,
+        "total_seconds": 0.277869834
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48,
+          64,
+          96
+        ],
+        "selected_nodes": 96,
+        "absolute_stability_components": 6,
+        "reason": ""
+      }
+    },
+    {
+      "family": "RL2",
+      "mode": "auto",
+      "wall_seconds": 0.5197278750129044,
+      "timings": {
+        "preparation_seconds": 0.0042061249999999495,
+        "numerical_seconds": 0.506858083,
+        "total_seconds": 0.511064208
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "forecast_nodes": 114.3504906147094,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48,
+          64,
+          96,
+          128
+        ],
+        "selected_nodes": 128,
+        "absolute_stability_components": 5,
+        "reason": ""
+      }
+    },
+    {
+      "family": "RL2",
+      "mode": "spectral",
+      "wall_seconds": 0.5186099999118596,
+      "timings": {
+        "preparation_seconds": 0.004292084000000029,
+        "numerical_seconds": 0.505900833,
+        "total_seconds": 0.510192917
+      },
+      "spectral": {
+        "attempted": true,
+        "accepted": true,
+        "nodes_tried": [
+          8,
+          12,
+          16,
+          24,
+          32,
+          48,
+          64,
+          96,
+          128
+        ],
+        "selected_nodes": 128,
+        "absolute_stability_components": 5,
+        "reason": ""
+      }
+    }
+  ],
+  "cp_validation": [
+    {
+      "family": "RL1",
+      "mode": "auto",
+      "scaled_difference": "6.829842226727243171302834150107180792261161122853927132369811866810035065882812129808821232137902903043430154328496e-50",
+      "passes_40_digits": true
+    },
+    {
+      "family": "RL1",
+      "mode": "spectral",
+      "scaled_difference": "6.829842226727243171302834150107180792261161122853927132369811866810035065882812129808821232137902903043430154328496e-50",
+      "passes_40_digits": true
+    },
+    {
+      "family": "RL2",
+      "mode": "auto",
+      "scaled_difference": "2.461172586475298730718057240303677533250273051585312728155517798015730640280834999961968050889891897697507169953659e-49",
+      "passes_40_digits": true
+    },
+    {
+      "family": "RL2",
+      "mode": "spectral",
+      "scaled_difference": "2.461172586475298730718057240303677533250273051585312728155517798015730640280834999961968050889891897697507169953659e-49",
+      "passes_40_digits": true
+    }
+  ],
+  "machine": "Apple M4, macOS 26.2, FLINT 3.4",
+  "reference_sources": "See ../2026-09-06-summary.json and docs/validation/literature-benchmarks.json for pinned source hashes and conversion.",
+  "source_sha256": {
+    "include/diffexp/transport.hpp": "d1cfef9a0812c675685c674d6bc7705f9b5f6275313f834ed92c4e1d2a8233a8",
+    "include/diffexp/detail/spectral.ipp": "3df15935bd80e9da6e3f1d30992060daa0247649a7cdc611963b9719bed28dbd",
+    "Mathematica/DiffExp.wl": "94e0a550901ff72a2369dab33296486ba48e0265e42d28536d89a06805ac0fbc"
+  },
+  "mathematica_followup": {
+    "analytic_spectral_wrapper": "passed manually against {1,Log[2],Log[2]^2/2}; the first suite assertion used a scalar helper on a vector and was corrected",
+    "extended_RL_wrapper_timing": "Passed via wolframscript launcher after initial direct-kernel activation stall; final 40-digit comparisons passed.",
+    "historical_wrapper_timings": "See docs/validation/literature-benchmarks.json; these precede adaptive selection.",
+    "compatibility_suite": "Passed in final broad 80-test run, including adaptive spectral transport and kinematic form alias."
+  },
+  "final_source_sha256": {
+    "include/diffexp/transport.hpp": "83dfda25c33e105f53bf78e3d8b61a49f146ec5d01f835ccc4091f7ce247b1ae",
+    "include/diffexp/detail/spectral.ipp": "3df15935bd80e9da6e3f1d30992060daa0247649a7cdc611963b9719bed28dbd",
+    "Mathematica/DiffExp.wl": "c9596af8148604c26350de2aba9fc9969441075d11f545a68c04522f74ef559f"
+  },
+  "final_compatibility_note": "Final naming fix preserves the ordinary derivative for a kinematic variable named form. Timed benchmark inputs do not use that name.",
+  "wrapper": [
+    {
+      "family": "RL1",
+      "seconds": 0.654343,
+      "scaled_difference": "6.829842226727243171302834150107180792261161122853927132530966765818252827150432765917024906784230320330209088620866e-50",
+      "passes_40_digits": true
+    },
+    {
+      "family": "RL2",
+      "seconds": 1.203467,
+      "scaled_difference": "2.461172586475298730718057240303677533250273051585312728155517798015730640280834999961968050889891897697507169953659e-49",
+      "passes_40_digits": true
+    }
+  ],
+  "wrapper_process": [
+    {
+      "family": "RL1",
+      "wall_seconds": 3.2231810421217233,
+      "status": 0
+    },
+    {
+      "family": "RL2",
+      "wall_seconds": 3.512799250194803,
+      "status": 0
+    }
+  ]
+}

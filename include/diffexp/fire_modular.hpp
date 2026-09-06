@@ -8,7 +8,8 @@ namespace fs=std::filesystem;
 struct Options {
   fs::path executable,cache_directory;
   using SampleProvider=std::function<fire::Result(const std::vector<ibp::Integral>&,const std::vector<modular::Word>&,modular::Word,const fire::Options&)>;
-  SampleProvider sample_provider;
+  SampleProvider sample_provider,validation_provider;
+  bool sparse_lifting=false;
   std::function<modular::Word(unsigned)> modulus=modular::prime;
   std::string provider_identity="FIRE7p",prime_table="FIRE7-primes-1-through-16";
   unsigned max_degree=16,max_primes=8,probe_timeout_seconds=20;
@@ -129,22 +130,23 @@ class Session {
         fire::ModularPoint input;input.prime_index=prime_index;for(auto value:point)input.values.push_back(value);
         const auto path=result.directory/("sample-"+std::to_string(prime_index)+"-"+std::to_string(ordinal)+".json");
         json::array coordinates;for(auto value:point)coordinates.emplace_back(std::to_string(value));
-        json::object payload;
+        json::object payload;std::optional<std::map<ibp::Integral,ibp::Relation>> fresh_rows;
         if(fs::exists(path)) {payload=detail::read(path);++hits;}
         else {
           auto opts=limits;opts.executable=options_.executable;opts.threads=1;opts.simplifier_threads=1;
           opts.max_completed_forward_sectors=opts.max_completed_backward_sectors=0;
           opts.timeout_seconds=std::min(options_.probe_timeout_seconds,remaining());
-          auto reduced=options_.sample_provider?options_.sample_provider(requested,point,options_.modulus(prime_index),opts):fire::reduce(basis_,dimension_,field_,requested,opts,nullptr,nullptr,false,&input);
+          const auto& provider=ordinal>=100000&&options_.validation_provider?options_.validation_provider:options_.sample_provider;
+          auto reduced=provider?provider(requested,point,options_.modulus(prime_index),opts):fire::reduce(basis_,dimension_,field_,requested,opts,nullptr,nullptr,false,&input);
           if(!reduced.success)throw std::runtime_error("finite-field probe failed: "+reduced.reason);
           fire_batch::validate(reduced,basis_,dimension_,requested);
-          auto tables=options_.sample_provider?detail::table(reduced.reductions,symbols):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
+          auto tables=provider?detail::table(reduced.reductions,symbols):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
           payload={{"schema","DiffExp3.ModularSample/v1"},{"identity",identity},{"prime_index",prime_index},{"modulus",std::to_string(options_.modulus(prime_index))},{"point",coordinates},{"tables",tables},{"directory",reduced.directory.string()}};
-          detail::save(path,payload);++fresh;
+          detail::save(path,payload);if(provider)fresh_rows=std::move(reduced.reductions);++fresh;
         }
         if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(prime_index))||payload.at("prime_index").to_number<unsigned>()!=prime_index)
           throw std::runtime_error("modular sample identity, point or prime mismatch");
-        auto rows=load_rows(payload);fire::Result check;check.success=true;check.reductions=rows;fire_batch::validate(check,basis_,dimension_,requested);
+        auto rows=fresh_rows?std::move(*fresh_rows):load_rows(payload);fire::Result check;check.success=true;check.reductions=rows;fire_batch::validate(check,basis_,dimension_,requested);
         for(const auto& [a,row]:rows)for(const auto& [b,c]:row)if(!c.is_rational())throw std::runtime_error("nonconstant finite-field output");
         return {point,std::move(rows)};
       };
@@ -170,9 +172,12 @@ class Session {
         if(count==options_.max_samples_per_prime)throw std::runtime_error("modular sample/degree budget exhausted; progress retained");
         count=std::min(count*2,options_.max_samples_per_prime);
       }
+      if(options_.sparse_lifting)for(auto& image:images)image=modular::compact_support(image);
+      std::size_t lifting_samples=probes.size();
+      if(options_.sparse_lifting){lifting_samples=8;for(const auto& image:images)lifting_samples=std::max(lifting_samples,image.coefficients.size()+2);lifting_samples=std::min(lifting_samples,probes.size());}
       std::vector<modular::Lift> lifts;for(const auto& image:images)lifts.emplace_back(image,options_.modulus(1));
       for(unsigned pi=2;pi<=options_.max_primes;++pi) {
-        std::vector<detail::Probe> next;for(std::size_t i=0;i<probes.size();++i)next.push_back(probe(pi,i));
+        std::vector<detail::Probe> next;for(std::size_t i=0;i<lifting_samples;++i)next.push_back(probe(pi,i));
         auto samples=flatten(next,pi);std::vector<modular::Image> next_images;
         for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,options_.modulus(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
         for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));

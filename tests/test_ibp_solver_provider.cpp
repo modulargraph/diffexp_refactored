@@ -12,6 +12,15 @@ int main(int argc,char** argv){try{
   auto malformed=basis;malformed.denominators.pop_back();bool rejected=false;try{ibp_solver::Sampler invalid(malformed,d,options);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"incomplete denominator basis was accepted");
   ibp_solver::Session session(basis,d,field,options);fire::Options limits;limits.timeout_seconds=90;
   std::vector<diffexp::ibp::Integral> requests{{2,1},{1,2}};auto result=session(requests,limits);require(result.success,result.reason.c_str());require(session.statistics().probes>0,"upstream solver was not called");
+  require(session.statistics().trace_replays>0&&session.statistics().full_solves<session.statistics().probes,"repeated probes did not use arithmetic replay");
+  require(session.statistics().templates==1&&session.statistics().full_solves>=10,"template reuse and independent held-out full reductions");
+  // A sample-specific massless cancellation must trigger guarded relearning.
+  ibp_solver::Sampler guarded(basis,d,options),independent(basis,d,options);
+  auto special=guarded(requests,{0,12345},ibp_solver::prime(1),limits);require(special.success,special.reason.c_str());
+  auto general=guarded(requests,{7,23456},ibp_solver::prime(1),limits);
+  auto reference=independent(requests,{7,23456},ibp_solver::prime(1),limits,true);
+  require(general.success&&reference.success&&general.reductions==reference.reductions,"exceptional point relearning disagrees with full reduction");
+  require(guarded.statistics().trace_fallbacks>0,"sample-specific cancellation was not guarded");
   diffexp::ibp::Generator generator(basis,d);diffexp::ibp::ExactReducer exact(d);
   for(int a=-1;a<=4;++a)for(int b=-1;b<=4;++b)for(auto row:generator.relations({a,b}))exact.insert(std::move(row));
   for(const auto& [a,row]:result.reductions){diffexp::ibp::Relation residual{{a,d.constant(1)}};diffexp::ibp::add_scaled(residual,row,d.constant(-1));require(exact.reduce(residual).remainder.empty(),"reconstruction differs from independent exact IBPs");}

@@ -27,9 +27,15 @@ Alternatively set `preparation.ibp_provider` to `"ibp-solver"` in the family JSO
 
 ## Mathematics and checks
 
-At each recursive stage, DiffExp already owns the exact affine denominator basis and its inverse scalar-product map. The adapter converts its differentiated contractions to finite-field coefficients and calls the upstream `Geometry`, `generate`, `Field` and `Solver` interfaces. It preserves the supplied denominator order and auxiliary coordinates. It never dispatches on a family name or substitutes a fixed merge anchor for the variable being integrated.
+At each recursive stage, DiffExp owns the exact affine denominator basis and its inverse scalar-product map. The adapter compiles the IBP equation structure once per requested batch and seed policy using upstream `InputGeometry` and `ParametricProgram`. The dimension and changing contraction coefficients are explicit inputs. A full reduction learns the relevant equations; `ArithmeticTrace` replays their arithmetic at subsequent parameter points. Integral and row identities remain fixed even if a coefficient vanishes at a sample. The supplied denominator order and auxiliary coordinates are preserved; there is no family-name dispatch or fixed merge anchor substituted for the integration variable.
 
-The modular reconstruction driver fits rational functions in all active variables, including the current merge parameter and dimension/epsilon. Reconstruction starts at the 61-bit prime 2^61−1, then uses distinct descending 61-bit primes. Two further primes, each at three fresh points, validate the result. Applicable native IBP identities are checked exactly; the level preparer separately checks exact derivative and target closure relative to the imported relations. This is not a proof of globally minimal masters or an unconditional exact certificate for every reconstructed coefficient.
+The integral ordering compares total extra denominator and numerator powers, eliminating numerator integrals first at equal degree. This general basis heuristic removes a numerical integration penalty seen in Sunrise. It does not claim to find an optimal basis for every family.
+
+Each prime has its own trace. Zero pivots and sample-specific cancellations trigger full reduction and relearning. The first changed sample is also compared with full elimination. Reconstruction fits rational functions in every active variable, including the current merge parameter and dimension/epsilon. After degree discovery, later primes fit only the observed nonzero monomial support, using fewer samples. That support is a hypothesis that must pass independent validation.
+
+Reconstruction starts at the 61-bit prime 2^61−1 and uses distinct descending 61-bit primes. Two further primes, each at three fresh points, validate the result **using full elimination, without the reconstruction trace**. Applicable native IBP identities are checked exactly; the level preparer separately checks exact derivative and target closure relative to the imported relations. These checks do not prove globally minimal masters or provide an unconditional exact certificate for every reconstructed coefficient.
+
+`ibp_statistics` reports compiled templates, equations actually generated, full solves, successful trace replays and fallbacks. It separates full-elimination, trace-learning and trace-replay time. The first changed replay is also fully checked, so replay and full-solve counts can overlap. Generation and elimination totals include surrounding adapter work; the detailed times are components of those totals, not additional costs. Fresh native rows remain in memory instead of being serialized and immediately reparsed, while durable sample checkpoints are retained.
 
 Completed reconstructions and sample records are stored under `--cache/ibp-solver`. Provider/version, seed controls, scientific inputs and prime policy identify sample records. Completion reload checks independently retained validation samples. The existing exact level cache can also reuse previously verified FIRE-produced closures; `systems_reused` and `ibp_statistics.fresh_probes` distinguish reuse from new solver work.
 
@@ -37,22 +43,24 @@ The adapter supports at most four loops, sixteen scalar products and twelve phys
 
 ## Measured complete runs
 
-Apple M4, native release build, separate cold caches and no persistent numerical checkpoint files. Both providers receive the same family configurations and requested epsilon coefficients. Sunrise figures are medians of three interleaved runs; box and box-triangle are single observations. These are complete process times, not isolated finite-field kernel speeds.
+Apple M4, native release build, separate cold caches and no persistent numerical checkpoint files. Both providers receive the same family configurations and requested epsilon coefficients. All figures below are medians of three interleaved runs. Complete times include process startup, preparation and numerical integration.
 
-| Family | IBP Solver | FIRE7 | IBP preparation / FIRE preparation |
-|---|---:|---:|---:|
-| Sunrise | 1.21 s | 0.99 s | 0.326 / 0.219 s |
-| Box | 0.41 s | 0.72 s | 0.110 / 0.422 s |
-| Box-triangle | 37.13 s | 17.96 s | 32.09 / 12.91 s |
+| Family | IBP Solver complete | FIRE7 complete | Complete speedup | IBP preparation / FIRE preparation |
+|---|---:|---:|---:|---:|
+| Sunrise | 0.89 s | 0.99 s | 1.12× | 0.121 / 0.218 s |
+| Box | 0.35 s | 0.67 s | 1.95× | 0.047 / 0.420 s |
+| Box-triangle | 9.27 s | 17.95 s | 1.94× | 4.260 / 12.943 s |
 
-The two providers can choose different valid bases, which can also change numerical transport cost. The integration improves the box run; it does not yet beat FIRE on all complete recursive workloads. The multivariate sampling strategy currently rebuilds and solves the bounded finite-field system at each point. It does not yet exploit upstream arithmetic traces across varying merge parameters, or GPU batch replay. Consequently the standalone package's warmed trace/GPU speedups do not transfer directly to these complete FT timings.
+The first adapter rebuilt and fully eliminated a system at every point. Its box-triangle run took 37.13 seconds, including 32.09 seconds of IBP preparation; the [earlier measurements](benchmarks/ibp-solver/integration-before-parametric.json) are retained. Parametric equation reuse and guarded replay remove that repeated work. Full independent verification remains a substantial part of the improved box-triangle preparation cost.
+
+The standalone package's 10.7× result measures fixed-kinematics rational reconstruction in the dimension for ten double-box targets. It is a different workload and is not an end-to-end FT speedup claim. The FT adapter currently uses CPU parametric replay; standalone Metal batch timings do not apply to these runs.
 
 The provider tests also check ten ordinary double-box targets against exact FIRE reductions after basis conversion at two dimensions and two 61-bit primes. Complete native FT, cache reuse, Mathematica and installed C++ consumer tests pass.
 
 The full comparison records, coefficient differences and executable hash are in [integration.json](benchmarks/ibp-solver/integration.json). Reproduce them with:
 
 ```sh
-python3 docs/benchmarks/ibp-solver/run.py --fire /path/to/FIRE7 --output /new/result/directory
+python3 docs/benchmarks/ibp-solver/run.py --fire /path/to/FIRE7 --output /new/result/directory --repeats 3
 ```
 
 Reported Arb radii still omit the general recursion's unbounded series tails. Agreement between providers is a numerical regression check, not a new full-integral error certificate.
@@ -61,4 +69,4 @@ Reported Arb radii still omit the general recursion's unbounded series tails. Ag
 
 Include `diffexp/ibp_solver_provider.hpp`, construct `diffexp::ibp_solver::Session` with the stage basis, dimension, exact field and a cache directory, then supply it through `diffexp::level::Provider`. `Sampler` is available for finite-field reductions. Qualify the existing `diffexp::ibp` namespace explicitly when also using the upstream `::ibp` types.
 
-The unmodified core headers are pinned at upstream commit `574c5bd3a0140a141515facafb44b563727efd4f` under `third_party/ibp-solver`, with the upstream license. Builds and installed CMake consumers need no network download or separate IBP executable. The standalone repository retains its own CLI, reconstruction experiments and Metal batch implementation.
+The unmodified core headers are pinned at upstream commit `8d803554c33ac691877ef72c3dd338929c862abc` under `third_party/ibp-solver`, with the upstream license. Builds and installed CMake consumers need no network download or separate IBP executable. The standalone repository retains its own CLI, reconstruction experiments and Metal batch implementation.

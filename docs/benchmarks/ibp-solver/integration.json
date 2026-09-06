@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "cf7a4e436b1fd9de201271b6a9720027ff194b73de8fb6325ce9fa7859d44472",
+  "binary_sha256": "265a3237f3efdf7aac1e45ed7fba5647ce10c268e9f1e6cc41accfceb8a42857",
   "scope": "sequential cold caches, identical complete FT requests, no numerical checkpoint cache; 61-bit native reconstruction versus symbolic FIRE7",
   "cases": [
     {
@@ -8,38 +8,52 @@
         {
           "provider": "ibp-solver",
           "repeat": 0,
-          "process_seconds": 1.2196444999426603,
+          "process_seconds": 0.8889763751067221,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.325501291,
-            "numerical_seconds": 0.844649541,
-            "ordinary_seconds": 0.259080833,
-            "spectral_seconds": 0.002140167,
-            "total_seconds": 1.170522208
+            "preparation_seconds": 0.118721125,
+            "numerical_seconds": 0.726789833,
+            "ordinary_seconds": 0.206534625,
+            "spectral_seconds": 0.004626834,
+            "total_seconds": 0.845870542
           },
           "ibp_statistics": {
-            "fresh_probes": 396,
-            "generated_equations": 142560,
-            "probe_generation_seconds": 0.080972425,
-            "probe_elimination_seconds": 0.09889054199999997
+            "full_solve_seconds": 0.005746417,
+            "trace_learning_seconds": 0.00016741599999999998,
+            "trace_replay_seconds": 0.0003151279999999999,
+            "compiled_templates": 2,
+            "full_solves": 20,
+            "trace_replays": 189,
+            "trace_fallbacks": 0,
+            "fresh_probes": 205,
+            "generated_equations": 720,
+            "probe_generation_seconds": 0.003991165000000003,
+            "probe_elimination_seconds": 0.008252754000000003
           },
           "message": null
         },
         {
           "provider": "fire",
           "repeat": 0,
-          "process_seconds": 0.9987923330627382,
+          "process_seconds": 0.9937992079649121,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.219401166,
-            "numerical_seconds": 0.734023041,
-            "ordinary_seconds": 0.208792,
-            "spectral_seconds": 0.004673167,
-            "total_seconds": 0.953785875
+            "preparation_seconds": 0.217384125,
+            "numerical_seconds": 0.729411084,
+            "ordinary_seconds": 0.207626292,
+            "spectral_seconds": 0.004508417,
+            "total_seconds": 0.947179916
           },
           "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
             "fresh_probes": 0,
             "generated_equations": 0,
             "probe_generation_seconds": 0.0,
@@ -50,17 +64,24 @@
         {
           "provider": "fire",
           "repeat": 1,
-          "process_seconds": 0.9946325831115246,
+          "process_seconds": 1.0497689158655703,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.217661542,
-            "numerical_seconds": 0.734044458,
-            "ordinary_seconds": 0.208751875,
-            "spectral_seconds": 0.004470959,
-            "total_seconds": 0.952083708
+            "preparation_seconds": 0.247642834,
+            "numerical_seconds": 0.754492042,
+            "ordinary_seconds": 0.22043520900000002,
+            "spectral_seconds": 0.004540499999999999,
+            "total_seconds": 1.002490042
           },
           "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
             "fresh_probes": 0,
             "generated_equations": 0,
             "probe_generation_seconds": 0.0,
@@ -71,59 +92,80 @@
         {
           "provider": "ibp-solver",
           "repeat": 1,
-          "process_seconds": 1.1995848750229925,
+          "process_seconds": 0.8897118330933154,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.324122334,
-            "numerical_seconds": 0.844476042,
-            "ordinary_seconds": 0.256767541,
-            "spectral_seconds": 0.0021692079999999997,
-            "total_seconds": 1.168981167
+            "preparation_seconds": 0.121000542,
+            "numerical_seconds": 0.732514292,
+            "ordinary_seconds": 0.208175584,
+            "spectral_seconds": 0.00448025,
+            "total_seconds": 0.853898833
           },
           "ibp_statistics": {
-            "fresh_probes": 396,
-            "generated_equations": 142560,
-            "probe_generation_seconds": 0.08160212000000003,
-            "probe_elimination_seconds": 0.09985146499999993
+            "full_solve_seconds": 0.005903500999999999,
+            "trace_learning_seconds": 0.000151084,
+            "trace_replay_seconds": 0.000318413,
+            "compiled_templates": 2,
+            "full_solves": 20,
+            "trace_replays": 189,
+            "trace_fallbacks": 0,
+            "fresh_probes": 205,
+            "generated_equations": 720,
+            "probe_generation_seconds": 0.004086375999999999,
+            "probe_elimination_seconds": 0.008416917000000005
           },
           "message": null
         },
         {
           "provider": "ibp-solver",
           "repeat": 2,
-          "process_seconds": 1.2063796250149608,
+          "process_seconds": 0.8837886669207364,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.333043,
-            "numerical_seconds": 0.84115975,
-            "ordinary_seconds": 0.255936791,
-            "spectral_seconds": 0.002254834,
-            "total_seconds": 1.174567917
+            "preparation_seconds": 0.122402542,
+            "numerical_seconds": 0.734740708,
+            "ordinary_seconds": 0.207816834,
+            "spectral_seconds": 0.004591292,
+            "total_seconds": 0.857490875
           },
           "ibp_statistics": {
-            "fresh_probes": 396,
-            "generated_equations": 142560,
-            "probe_generation_seconds": 0.08282037400000011,
-            "probe_elimination_seconds": 0.10017341299999996
+            "full_solve_seconds": 0.006019502,
+            "trace_learning_seconds": 0.00015958299999999998,
+            "trace_replay_seconds": 0.0003259930000000002,
+            "compiled_templates": 2,
+            "full_solves": 20,
+            "trace_replays": 189,
+            "trace_fallbacks": 0,
+            "fresh_probes": 205,
+            "generated_equations": 720,
+            "probe_generation_seconds": 0.004011581000000004,
+            "probe_elimination_seconds": 0.008563667999999998
           },
           "message": null
         },
         {
           "provider": "fire",
           "repeat": 2,
-          "process_seconds": 0.9915572500322014,
+          "process_seconds": 0.9938033339567482,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.218716375,
-            "numerical_seconds": 0.733673416,
-            "ordinary_seconds": 0.210104,
-            "spectral_seconds": 0.004519166,
-            "total_seconds": 0.952746875
+            "preparation_seconds": 0.2180835,
+            "numerical_seconds": 0.739888375,
+            "ordinary_seconds": 0.213283249,
+            "spectral_seconds": 0.004646167,
+            "total_seconds": 0.958370041
           },
           "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
             "fresh_probes": 0,
             "generated_equations": 0,
             "probe_generation_seconds": 0.0,
@@ -132,7 +174,17 @@
           "message": null
         }
       ],
-      "maximum_coefficient_midpoint_difference": "2E-46"
+      "maximum_coefficient_midpoint_difference": "0",
+      "median_process_seconds": {
+        "ibp-solver": 0.8889763751067221,
+        "fire": 0.9938033339567482
+      },
+      "median_preparation_seconds": {
+        "ibp-solver": 0.121000542,
+        "fire": 0.2180835
+      },
+      "complete_speedup": 1.1179187229103154,
+      "preparation_speedup": 1.8023349019378774
     },
     {
       "family": "box",
@@ -140,38 +192,164 @@
         {
           "provider": "ibp-solver",
           "repeat": 0,
-          "process_seconds": 0.40628983289934695,
+          "process_seconds": 0.3508347908500582,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.109971958,
-            "numerical_seconds": 0.245668041,
-            "ordinary_seconds": 0.083968459,
-            "spectral_seconds": 0.001865209,
-            "total_seconds": 0.355834333
+            "preparation_seconds": 0.050762792,
+            "numerical_seconds": 0.246274084,
+            "ordinary_seconds": 0.08445074999999999,
+            "spectral_seconds": 0.0019386670000000003,
+            "total_seconds": 0.297234208
           },
           "ibp_statistics": {
-            "fresh_probes": 184,
-            "generated_equations": 63360,
-            "probe_generation_seconds": 0.034044750000000006,
-            "probe_elimination_seconds": 0.030229626000000002
+            "full_solve_seconds": 0.008252125,
+            "trace_learning_seconds": 0.000298165,
+            "trace_replay_seconds": 0.00012541600000000002,
+            "compiled_templates": 4,
+            "full_solves": 40,
+            "trace_replays": 104,
+            "trace_fallbacks": 0,
+            "fresh_probes": 136,
+            "generated_equations": 1472,
+            "probe_generation_seconds": 0.0033779179999999997,
+            "probe_elimination_seconds": 0.009477123999999996
           },
           "message": null
         },
         {
           "provider": "fire",
           "repeat": 0,
-          "process_seconds": 0.7191415000706911,
+          "process_seconds": 0.6737325419671834,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 0.422093875,
-            "numerical_seconds": 0.24482325,
-            "ordinary_seconds": 0.08362312400000001,
-            "spectral_seconds": 0.001870709,
-            "total_seconds": 0.667106167
+            "preparation_seconds": 0.41952675,
+            "numerical_seconds": 0.24498775,
+            "ordinary_seconds": 0.08312333400000001,
+            "spectral_seconds": 0.0018336659999999999,
+            "total_seconds": 0.664698958
           },
           "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 1,
+          "process_seconds": 0.6729831250850111,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.410398291,
+            "numerical_seconds": 0.243871041,
+            "ordinary_seconds": 0.082894083,
+            "spectral_seconds": 0.001850666,
+            "total_seconds": 0.654450791
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 1,
+          "process_seconds": 0.34309470816515386,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.046352583,
+            "numerical_seconds": 0.244478041,
+            "ordinary_seconds": 0.082861667,
+            "spectral_seconds": 0.001837208,
+            "total_seconds": 0.291011541
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.007503998,
+            "trace_learning_seconds": 0.00025849900000000003,
+            "trace_replay_seconds": 0.000117078,
+            "compiled_templates": 4,
+            "full_solves": 40,
+            "trace_replays": 104,
+            "trace_fallbacks": 0,
+            "fresh_probes": 136,
+            "generated_equations": 1472,
+            "probe_generation_seconds": 0.003222710000000001,
+            "probe_elimination_seconds": 0.008591374999999998
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 2,
+          "process_seconds": 0.34581700013950467,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.047206792,
+            "numerical_seconds": 0.244762834,
+            "ordinary_seconds": 0.083445542,
+            "spectral_seconds": 0.0019034179999999998,
+            "total_seconds": 0.292171833
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.007846830000000003,
+            "trace_learning_seconds": 0.00026562300000000004,
+            "trace_replay_seconds": 0.00011441500000000001,
+            "compiled_templates": 4,
+            "full_solves": 40,
+            "trace_replays": 104,
+            "trace_fallbacks": 0,
+            "fresh_probes": 136,
+            "generated_equations": 1472,
+            "probe_generation_seconds": 0.0032693739999999994,
+            "probe_elimination_seconds": 0.008940287999999998
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 2,
+          "process_seconds": 0.7724387079942971,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.506579583,
+            "numerical_seconds": 0.244999125,
+            "ordinary_seconds": 0.083384792,
+            "spectral_seconds": 0.0018884169999999999,
+            "total_seconds": 0.7517715
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
             "fresh_probes": 0,
             "generated_equations": 0,
             "probe_generation_seconds": 0.0,
@@ -180,7 +358,17 @@
           "message": null
         }
       ],
-      "maximum_coefficient_midpoint_difference": "0"
+      "maximum_coefficient_midpoint_difference": "0",
+      "median_process_seconds": {
+        "ibp-solver": 0.34581700013950467,
+        "fire": 0.6737325419671834
+      },
+      "median_preparation_seconds": {
+        "ibp-solver": 0.047206792,
+        "fire": 0.41952675
+      },
+      "complete_speedup": 1.9482343022332493,
+      "preparation_speedup": 8.886999777489647
     },
     {
       "family": "box_triangle",
@@ -188,38 +376,164 @@
         {
           "provider": "ibp-solver",
           "repeat": 0,
-          "process_seconds": 37.1299556249287,
+          "process_seconds": 9.24709187517874,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 32.09395025,
-            "numerical_seconds": 5.001507625,
-            "ordinary_seconds": 3.1808560420000003,
-            "spectral_seconds": 0.125173082,
-            "total_seconds": 37.096068209
+            "preparation_seconds": 4.25952725,
+            "numerical_seconds": 4.938988541,
+            "ordinary_seconds": 3.146995042000001,
+            "spectral_seconds": 0.130557083,
+            "total_seconds": 9.199127125
           },
           "ibp_statistics": {
-            "fresh_probes": 726,
-            "generated_equations": 7526980,
-            "probe_generation_seconds": 4.5903847240000015,
-            "probe_elimination_seconds": 26.763543787000003
+            "full_solve_seconds": 3.7587490399999997,
+            "trace_learning_seconds": 0.014876789999999999,
+            "trace_replay_seconds": 0.008162788999999997,
+            "compiled_templates": 9,
+            "full_solves": 90,
+            "trace_replays": 427,
+            "trace_fallbacks": 0,
+            "fresh_probes": 499,
+            "generated_equations": 100790,
+            "probe_generation_seconds": 0.12715688600000002,
+            "probe_elimination_seconds": 3.798914948
           },
           "message": null
         },
         {
           "provider": "fire",
           "repeat": 0,
-          "process_seconds": 17.960840082960203,
+          "process_seconds": 18.018302832962945,
           "returncode": 0,
           "status": "completed",
           "timings": {
-            "preparation_seconds": 12.9071035,
-            "numerical_seconds": 4.993873375,
-            "ordinary_seconds": 3.1742135000000005,
-            "spectral_seconds": 0.13127537500000003,
-            "total_seconds": 17.901611333
+            "preparation_seconds": 12.943064959,
+            "numerical_seconds": 5.063002958,
+            "ordinary_seconds": 3.2419329589999997,
+            "spectral_seconds": 0.12269395899999999,
+            "total_seconds": 18.006677417
           },
           "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 1,
+          "process_seconds": 17.86451091687195,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 12.873712416,
+            "numerical_seconds": 4.970149542,
+            "ordinary_seconds": 3.1638024590000002,
+            "spectral_seconds": 0.12406087499999999,
+            "total_seconds": 17.844478916
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 1,
+          "process_seconds": 9.281358124921098,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 4.260301541,
+            "numerical_seconds": 5.014659709,
+            "ordinary_seconds": 3.222783668000001,
+            "spectral_seconds": 0.130297626,
+            "total_seconds": 9.275601291
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 3.7598005439999995,
+            "trace_learning_seconds": 0.01485975,
+            "trace_replay_seconds": 0.008210214999999998,
+            "compiled_templates": 9,
+            "full_solves": 90,
+            "trace_replays": 427,
+            "trace_fallbacks": 0,
+            "fresh_probes": 499,
+            "generated_equations": 100790,
+            "probe_generation_seconds": 0.12737490499999998,
+            "probe_elimination_seconds": 3.800085797
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 2,
+          "process_seconds": 9.272931500105187,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 4.266462209,
+            "numerical_seconds": 4.985229334,
+            "ordinary_seconds": 3.17141175,
+            "spectral_seconds": 0.130871707,
+            "total_seconds": 9.252313625
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 3.7633282520000004,
+            "trace_learning_seconds": 0.014808959,
+            "trace_replay_seconds": 0.008177044000000003,
+            "compiled_templates": 9,
+            "full_solves": 90,
+            "trace_replays": 427,
+            "trace_fallbacks": 0,
+            "fresh_probes": 499,
+            "generated_equations": 100790,
+            "probe_generation_seconds": 0.128386707,
+            "probe_elimination_seconds": 3.8032311349999985
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 2,
+          "process_seconds": 17.945814749924466,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 12.964509,
+            "numerical_seconds": 4.955757958,
+            "ordinary_seconds": 3.1561660840000005,
+            "spectral_seconds": 0.122637667,
+            "total_seconds": 17.92092775
+          },
+          "ibp_statistics": {
+            "full_solve_seconds": 0.0,
+            "trace_learning_seconds": 0.0,
+            "trace_replay_seconds": 0.0,
+            "compiled_templates": 0,
+            "full_solves": 0,
+            "trace_replays": 0,
+            "trace_fallbacks": 0,
             "fresh_probes": 0,
             "generated_equations": 0,
             "probe_generation_seconds": 0.0,
@@ -228,7 +542,18 @@
           "message": null
         }
       ],
-      "maximum_coefficient_midpoint_difference": "0"
+      "maximum_coefficient_midpoint_difference": "0",
+      "median_process_seconds": {
+        "ibp-solver": 9.272931500105187,
+        "fire": 17.945814749924466
+      },
+      "median_preparation_seconds": {
+        "ibp-solver": 4.260301541,
+        "fire": 12.943064959
+      },
+      "complete_speedup": 1.9352903393841416,
+      "preparation_speedup": 3.038063112303065
     }
-  ]
+  ],
+  "upstream_ibp_commit": "8d803554c33ac691877ef72c3dd338929c862abc"
 }

@@ -61,6 +61,20 @@ struct Ansatz {
   std::size_t pivot=0;
 };
 struct Image {Ansatz ansatz;std::vector<Word> coefficients;};
+// Discover support at one prime, then fit only that support at later primes.
+// This is a hypothesis: independent held-out primes must still validate it.
+inline Image compact_support(const Image& image) {
+  if(image.coefficients.size()!=image.ansatz.numerator.size()+image.ansatz.denominator.size()||image.ansatz.pivot>=image.ansatz.denominator.size())throw std::invalid_argument("invalid modular image shape");
+  Image result;const auto n=image.ansatz.numerator.size();
+  for(std::size_t i=0;i<n;++i)if(image.coefficients[i]){result.ansatz.numerator.push_back(image.ansatz.numerator[i]);result.coefficients.push_back(image.coefficients[i]);}
+  // Keep a numerator slot for the identically zero function.
+  if(result.ansatz.numerator.empty()){if(!n)throw std::invalid_argument("empty modular numerator");result.ansatz.numerator.push_back(image.ansatz.numerator[0]);result.coefficients.push_back(0);}
+  for(std::size_t i=0;i<image.ansatz.denominator.size();++i)if(image.coefficients[n+i]){
+    if(i==image.ansatz.pivot)result.ansatz.pivot=result.ansatz.denominator.size();
+    result.ansatz.denominator.push_back(image.ansatz.denominator[i]);result.coefficients.push_back(image.coefficients[n+i]);}
+  if(!image.coefficients[n+image.ansatz.pivot])throw std::invalid_argument("zero modular normalization pivot");
+  return result;
+}
 inline std::optional<Word> evaluate(const Image& image,const std::vector<Word>& point,Word p) {
   nmod_t mod;nmod_init(&mod,p);auto n=values(image.ansatz.numerator,point,mod),d=values(image.ansatz.denominator,point,mod);
   Word numerator=0,denominator=0;

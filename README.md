@@ -104,8 +104,11 @@ Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and pkg-con
 The tested platform is macOS; the recursive FIRE process provider uses POSIX
 facilities. Mathematica is optional. A pinned core of the separate
 [IBP Solver](https://github.com/modulargraph/ibp-solver) package is included for
-cold finite-field reductions and reconstruction. FIRE7 and FIRE7p remain
-selectable providers for larger or unsupported reductions.
+cold finite-field reductions and reconstruction. It reuses parameterized IBP
+equations and guarded arithmetic traces as the Feynman parameter and dimension
+change, with independent full reductions for verification. The Mathematica
+wrapper uses the same optimized path. See the [complete FT timings](docs/ibp-solver.md#measured-complete-runs).
+FIRE7 and FIRE7p remain selectable providers for larger or unsupported reductions.
 
 On macOS, dependencies can be installed with Homebrew:
 

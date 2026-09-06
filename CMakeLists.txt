@@ -45,7 +45,7 @@ if(DIFFEXP_BUILD_KERNEL_RUNTIME)
 endif()
 
 if(BUILD_TESTING)
-  set(native_tests transport frontend data_geometry tadpole_bubble ibp sunrise_ibp
+  set(native_tests transport finite_lag_transport frontend data_geometry tadpole_bubble ibp sunrise_ibp
     deepest_beta sunrise_pipeline frobenius certified_tail certified_bubble
     banana_oracle henn_observables certified_deepest_beta merge_pullback fuchsify affine_frobenius
     epsilon_gauge laurent_transport affine_matching direct_examples singular_transport)

@@ -1,0 +1,131 @@
+{
+  "schema": "DiffExp.FiniteLagDefaultValidation/v1",
+  "status": "full_path_passed",
+  "family": "original planar 1loop",
+  "dimension": 13,
+  "epsilon_order": 4,
+  "working_bits": 499,
+  "machine": "Apple M4, macOS 26.2, FLINT 3.4.0; C++20 -O3 -DNDEBUG",
+  "comparison": {
+    "maximum_normalized_midpoint_difference": "3.97295078833597361749861710367295245320756903184791823454029201473588820121037763000884794571042586349254662600406417265082018640206922759632242657388048365433037667405112956651908E-98",
+    "maximum_normalized_output_radius": "1.34348329892115133011145993978931006663816571943042481528676229132948292436671245899006368943277191275128645125667279644137964013571742481732046717306899308605816771031713763764919E-87",
+    "speedup": 1.1569310801022323
+  },
+  "ordinary_endpoint_balls_identical": true,
+  "observations": {
+    "ordinary-series": {
+      "timings": {
+        "preparation_seconds": 0.18221075,
+        "numerical_seconds": 9.911380541,
+        "total_seconds": 10.093591291
+      },
+      "charts": 176,
+      "recurrence": {
+        "requested": "series",
+        "finite_lag_charts": 0,
+        "series_charts": 176,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": ""
+      },
+      "omitted_tails_certified": false
+    },
+    "final-ordinary-auto": {
+      "timings": {
+        "preparation_seconds": 0.356330209,
+        "numerical_seconds": 10.03977875,
+        "total_seconds": 10.396108959
+      },
+      "charts": 176,
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 0,
+        "series_charts": 176,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 48,
+        "preparation_note": ""
+      },
+      "omitted_tails_certified": false
+    },
+    "order200-series": {
+      "timings": {
+        "preparation_seconds": 0.179886958,
+        "numerical_seconds": 75.978013,
+        "total_seconds": 76.157899958
+      },
+      "charts": 116,
+      "recurrence": {
+        "requested": "series",
+        "finite_lag_charts": 0,
+        "series_charts": 116,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 0,
+        "preparation_note": ""
+      },
+      "omitted_tails_certified": false
+    },
+    "order200-auto": {
+      "timings": {
+        "preparation_seconds": 0.362131333,
+        "numerical_seconds": 65.465385334,
+        "total_seconds": 65.827516667
+      },
+      "charts": 116,
+      "recurrence": {
+        "requested": "auto",
+        "finite_lag_charts": 41,
+        "series_charts": 75,
+        "finite_lag_rejections": 0,
+        "max_polynomial_degree": 48,
+        "preparation_note": ""
+      },
+      "omitted_tails_certified": false
+    }
+  },
+  "request_sha256": "f0c2f5314ada534ff2504513c3bce12655a30f2cc843fbe6432387fc45b68e4d",
+  "rejected_development_trials": [
+    "Unguarded order40 auto: failed local refinement after 47.248 seconds.",
+    "Intermediate guarded order100 auto: failed final propagated-error check after 47.716 seconds.",
+    "Order160, 700-bit forced-series baseline: 150-second timeout; excluded from comparison."
+  ],
+  "zzz_first_production_chart": {
+    "finite_lag": true,
+    "order": 230,
+    "dimension": 86,
+    "series_seconds": 10.050441791,
+    "default_seconds": 5.5911865,
+    "maximum_normalized_midpoint_difference": "1.0143022792739994516e-143"
+  },
+  "regressions": {
+    "passed": 6,
+    "failed": 0,
+    "tests": [
+      "transport",
+      "finite_lag_transport",
+      "frontend",
+      "cli.interface",
+      "mathematica.interface",
+      "mathematica.compatibility"
+    ],
+    "total_seconds": 25.13
+  },
+  "zzz_adaptive_segment": {
+    "description": "Original first segment reparameterized onto [0,1], tested through the production CLI with the original 128-digit goal. This is not a full original-path run.",
+    "accuracy_goal": 128,
+    "working_bits": 931,
+    "charts": 1,
+    "recurrence": {
+      "requested": "auto",
+      "finite_lag_charts": 1,
+      "series_charts": 0,
+      "finite_lag_rejections": 0,
+      "max_polynomial_degree": 55,
+      "preparation_note": ""
+    },
+    "timings": {
+      "preparation_seconds": 8.442013292,
+      "numerical_seconds": 8.045797667,
+      "total_seconds": 16.487810959
+    }
+  }
+}

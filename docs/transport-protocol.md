@@ -35,6 +35,7 @@ zero-based. The retained epsilon window is `0..epsilon_order`.
 | `taylor_order` | Retained local series order; default 50 |
 | `working_bits` | Binary working precision; default 384 |
 | `accuracy_goal` | Requested decimal digits under the reported error estimate; 0 disables this check |
+| `recurrence` | `auto` (default) selects the finite-lag solver when supported and suitable; `series` forces the previous Taylor-convolution solver |
 | `division_order` | Local step control; default 4 |
 | `save_segments` | Export local retained Taylor coefficients; default false, with a 64 MiB estimated output budget |
 
@@ -46,7 +47,21 @@ multiplies by the derivative of `paths.t`.
 A logarithmic entry uses `"variable":"dlog"`, its letter in `expression`,
 and an optional exact rational string `coefficient`. The native code takes
 the logarithmic derivative along the supplied path. Canonical epsilon-linear
-systems share each letter expansion across all matrix positions.
+systems first attempt an exact diagonal root rescaling to a rational connection.
+Compatible systems use shared rational-product recurrences with O(N) arithmetic
+cost at fixed polynomial degree, precision and epsilon depth. The plan is reused
+across charts. Noncanonical systems, inconsistent root gauges, preparation-budget
+limits, low orders relative to polynomial degree, and ill-conditioned charts
+retain the previous series solver. The selector uses the supplied mathematics,
+not a family name.
+
+The same default applies through the Mathematica process wrapper. Saved segments
+continue to use the series solver so their exported coefficients remain in the
+physical basis. Singular starts retain the existing boundary treatment. Tail
+estimates are transported back through the gauge and fed into the existing
+accuracy checks; they remain estimates, not certified infinite-tail bounds.
+The output `recurrence` object reports accepted finite-lag and series chart counts,
+rejected candidates in adaptive checking, and any preparation fallback reason.
 
 Exact expressions support integers, rationals, arithmetic, `I` and independent
 polynomial `Sqrt[...]` radicands. Paths must fix all matrix variables. The native

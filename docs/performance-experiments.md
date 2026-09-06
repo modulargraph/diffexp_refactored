@@ -1,5 +1,7 @@
 # Bounded chart performance experiments
 
+The [high-precision zzz algebraic recurrence experiment](algebraic-zzz-experiment.md) removes the roots with an exact diagonal basis change and measures a finite-lag O(N) recurrence: 1.80–1.86× faster at order 230 on the first chart. The [production follow-up](finite-lag-default.md) integrates it as a guarded default.
+
 The grouped `acb_dot` experiment accelerates this retained Taylor-chart workload, but changes interval radii. A follow-up shadow implementation passes five targeted transport tests using the existing precision/radius guard and scalar fallback; fallback-heavy cases can still slow down. Neither raw Acb storage nor in-place Horner evaluation alone shows a compelling benefit. `acb_dot_precise` is substantially slower here. The guarded candidate was subsequently integrated into the production rational chart, with the scalar fallback and existing accuracy controls retained. The five targeted production tests passed again after integration.
 
 ## Scope and reproducibility

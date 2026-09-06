@@ -37,7 +37,13 @@ struct Algebra {
   }
 };
 struct Entry {unsigned row,column,epsilon;Exact coefficient;};
+struct FiniteLagPlan;
 struct Compiled {
+  bool finite_lag_enabled=true;
+  mutable bool finite_lag_attempted=false;
+  mutable slong finite_lag_bits=0;
+  mutable std::shared_ptr<const FiniteLagPlan> finite_lag;
+  mutable std::string finite_lag_reason;
   ExactField field;
   std::vector<Exact> squares,root_derivatives;
   std::vector<Entry> entries;
@@ -281,10 +287,29 @@ inline bool zero_order_feedback(const Compiled& c) {
 struct AcbArray {
   slong size;acb_ptr p;explicit AcbArray(slong n):size(n),p(_acb_vec_init(n)){}~AcbArray(){_acb_vec_clear(p,size);}AcbArray(const AcbArray&)=delete;
 };
-struct Chart {Boundary values,errors,truncation_errors;json::object saved;bool centered=false;};
+struct Chart {Boundary values,errors,truncation_errors;json::object saved;bool centered=false;bool finite_lag=false;};
+} // namespace diffexp::transport
+#include "diffexp/detail/finite_lag.ipp"
+namespace diffexp::transport {
 inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
     const std::vector<B>& root_values,const B& center,const B& step,unsigned order,bool save,long digits,
-    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true) {
+    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,bool use_finite_lag=true) {
+  if(use_finite_lag && !save && order>=4)if(auto plan=finite_lag_plan(c)) {
+    try{if(order>=4*plan->max_degree) {
+      auto candidate=finite_lag_chart(c,*plan,initial,root_values,center,step,order);
+      // Reject severe interval amplification even without a requested goal.
+      B budget(1);acb_mul_2exp_si(budget.raw(),budget.raw(),32-B::precision());
+      for(const auto& row:initial)for(const auto& v:row) {
+        auto relative=arithmetic_error(v)/(magnitude(v)+B(1));
+        arb_max(acb_realref(budget.raw()),acb_realref(budget.raw()),acb_realref(relative.raw()),B::precision());
+      }
+      budget=budget*B(16);bool stable=true;
+      for(const auto& row:candidate.values)for(const auto& v:row)
+        if(!arb_le(acb_realref(arithmetic_error(v).raw()),acb_realref(((magnitude(v)+B(1))*budget).raw())))stable=false;
+      if(stable)return candidate;
+    }}
+    catch(const std::runtime_error&) { /* Singular/unsupported chart retains the series solver. */ }
+  }
   const auto bits=B::precision();const unsigned d=c.dimension,w=c.epsilon_order+1;
   // Separate inherited uncertainty before the recurrence can repeatedly use it.
   // This selector changes only the enclosing arithmetic, never accuracy controls.
@@ -472,7 +497,7 @@ inline std::optional<std::pair<Boundary,Boundary>> finite_start(const Compiled& 
 
 inline json::value run(const json::value& input) {
   const auto start=std::chrono::steady_clock::now();const auto& r=input.as_object();
-  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors"},"transport");
+  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors","recurrence"},"transport");
   if(auto a=r.if_contains("asymptotic")) {
     known_keys(a->as_object(),{"constraints","cutoffs"},"asymptotic");
     for(const auto& v:a->as_object().at("constraints").as_array())known_keys(v.as_object(),{"row","epsilon","power","log_degree","value"},"asymptotic constraint");
@@ -485,7 +510,13 @@ inline json::value run(const json::value& input) {
   if(goal*3.32193>bits-32)throw std::invalid_argument("working precision has insufficient reserve for AccuracyGoal");
   B::set_precision(bits);const long digits=bits*30103/100000+5;bool save=r.if_contains("save_segments") && r.at("save_segments").as_bool();
   std::cerr<<"Preparing generic transport: "<<d<<" components, epsilon 0.."<<k<<"\n";
-  auto c=compile(r,d,k,bits);const auto prepared=std::chrono::steady_clock::now();
+  auto c=compile(r,d,k,bits);
+  std::string recurrence=r.if_contains("recurrence")?string(r.at("recurrence")):"auto";
+  if(recurrence!="auto" && recurrence!="series")throw std::invalid_argument("recurrence must be auto or series");
+  c.finite_lag_enabled=recurrence=="auto";
+  if(!save)finite_lag_plan(c);
+  unsigned finite_lag_charts=0,series_charts=0,finite_lag_rejections=0;
+  const auto prepared=std::chrono::steady_clock::now();
   Boundary current,errors(d,std::vector<B>(k+1,B(0)));double center=0;json::array segments;unsigned charts=0;std::uint64_t saved_budget_used=0;
   if(auto a=r.if_contains("asymptotic")) {
     if(!c.squares.empty())throw std::invalid_argument("asymptotic matching currently requires a rational connection");
@@ -565,14 +596,37 @@ inline json::value run(const json::value& input) {
       saved_budget_used+=estimate;
     }
     auto result=chart(c,entries,current,root_values,at,end-at,order,save,digits);
+    bool use_finite_lag=true;
     if(goal>0) {
       // Bounded local refinement at a fixed expansion order. No retry of the
       // complete transport, and no relaxation of the requested accuracy.
       B tolerance=B::from_strings("1e-"+std::to_string(goal+8));unsigned attempts=0;
       const auto acceptable=[&]() {for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e){auto scale=magnitude(result.values[i][e])+B(1);if(!arb_le(acb_realref(result.truncation_errors[i][e].raw()),acb_realref((scale*tolerance).raw())))return false;}return true;};
+      // A rational gauge may be poorly conditioned on a particular chart.
+      // Retry the physical series at the same step before shrinking it, and
+      // before carrying any candidate roundoff amplification into the boundary.
+      const auto candidate_roundoff_ok=[&]() {
+        auto budget=B::from_strings("1e-"+std::to_string(goal+16));
+        // Do not demand more precision than the supplied boundary carries.
+        // Allow bounded propagation, but retain reserve against the final goal.
+        for(const auto& row:current)for(const auto& v:row) {
+          auto inherited=B(16)*arithmetic_error(v)/(magnitude(v)+B(1));
+          arb_max(acb_realref(budget.raw()),acb_realref(budget.raw()),acb_realref(inherited.raw()),bits);
+        }
+        auto cap=B::from_strings("1e-"+std::to_string(goal+2));
+        arb_min(acb_realref(budget.raw()),acb_realref(budget.raw()),acb_realref(cap.raw()),bits);
+        for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e)
+          if(!arb_le(acb_realref(arithmetic_error(result.values[i][e]).raw()),
+              acb_realref(((magnitude(result.values[i][e])+B(1))*budget).raw())))return false;
+        return true;
+      };
+      if(result.finite_lag && (!acceptable() || !candidate_roundoff_ok())) {
+        ++finite_lag_rejections;use_finite_lag=false;
+        result=chart(c,entries,current,root_values,at,end-at,order,save,digits,true,10000000,true,false);
+      }
       while(!acceptable()) {
         if(++attempts>20)throw std::runtime_error("chart could not meet AccuracyGoal within 20 local refinements");
-        next=(center+next)/2;acb_set_d(end.raw(),next);result=chart(c,entries,current,root_values,at,end-at,order,save,digits);
+        next=(center+next)/2;acb_set_d(end.raw(),next);result=chart(c,entries,current,root_values,at,end-at,order,save,digits,true,10000000,true,use_finite_lag);
       }
     }
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
@@ -583,6 +637,7 @@ inline json::value run(const json::value& input) {
       arb_add_error(acb_realref(result.values[i][e].raw()),acb_realref(tail.raw()));
       arb_add_error(acb_imagref(result.values[i][e].raw()),acb_realref(tail.raw()));
     }
+    if(result.finite_lag)++finite_lag_charts;else ++series_charts;
     if(save)segments.push_back(std::move(result.saved));current=std::move(result.values);
     for(unsigned root=0;root<root_values.size();++root)root_values[root]=continue_polynomial_sqrt(c.square_polynomials[root],at,end,root_values[root]);
     center=next;
@@ -602,6 +657,9 @@ inline json::value run(const json::value& input) {
     {"errors",matrix_json(errors,digits)},{"charts",charts},{"segments",std::move(segments)},{"omitted_tails_certified",false},
     {"timings",json::object{{"preparation_seconds",std::chrono::duration<double>(prepared-start).count()},
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
+  output["recurrence"]=json::object{{"requested",recurrence},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
+    {"max_polynomial_degree",c.finite_lag?c.finite_lag->max_degree:0},
+    {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason}};
   if(!c.basis_prefactors.empty()) {
     output["basis_convention"]="principal_endpoint";
     output["segments_basis_convention"]="continued";

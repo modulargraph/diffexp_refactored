@@ -148,6 +148,11 @@ with `--fire-seconds`, `--level-seconds` and `--total-seconds`. These bound exac
 preparation, not the duration of the full numerical calculation.
 Run `build/diffexp --help` for the remaining options.
 
+Compatible algebraic differential equations now automatically use a finite-lag
+O(N) recurrence, with the existing series solver retained for unsuitable charts.
+This also applies through Mathematica. The [production comparison](docs/finite-lag-default.md)
+records a complete smaller-family test and high-precision chart timings.
+
 ## Examples and validation
 
 The numerical checks include both four-loop banana examples and all nine

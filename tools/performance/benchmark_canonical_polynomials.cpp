@@ -60,7 +60,7 @@ int main(int argc,char** argv) {
   auto entries=transport::numerical_entries(compiled);std::vector<B> roots;
   for(const auto& polynomial:compiled.square_polynomials){B value;acb_sqrt(value.raw(),polynomial.at(0).raw(),bits);roots.push_back(value);}
   const auto step=B::from_strings(Rational(argv[2]).str());
-  auto start=std::chrono::steady_clock::now();auto baseline=transport::chart(compiled,entries,initial,roots,B(0),step,order,false,30);
+  auto start=std::chrono::steady_clock::now();auto baseline=transport::chart(compiled,entries,initial,roots,B(0),step,order,false,30,true,10000000,true,false);
   auto mid=std::chrono::steady_clock::now();auto candidate=polynomial_chart(compiled,initial,roots,B(0),step,order);
   auto end=std::chrono::steady_clock::now();
   unsigned overlaps=0,finite=0;long accuracy=bits;double max_radius_ratio=0;

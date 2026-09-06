@@ -17,6 +17,7 @@ set_target_properties(diffexp_core PROPERTIES EXPORT_NAME core)
 target_compile_features(diffexp_core INTERFACE cxx_std_20)
 target_include_directories(diffexp_core INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/ibp-solver/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(diffexp_core INTERFACE PkgConfig::FLINT Boost::json Threads::Threads)
 
@@ -50,7 +51,7 @@ if(BUILD_TESTING)
     banana_oracle henn_observables certified_deepest_beta merge_pullback fuchsify affine_frobenius
     epsilon_gauge laurent_transport affine_matching direct_examples singular_transport)
   if(UNIX)
-    list(APPEND native_tests family_config fire_native level_preparation recursion_graph artifact_store certified_rational_transport
+    list(APPEND native_tests ibp_solver_provider family_config fire_native level_preparation recursion_graph artifact_store certified_rational_transport
       gaussian_boundary level_cache scalar_functional recursion_leaf fire_session recursion_pipeline fire_batch_cache)
     list(APPEND native_tests box_oracle henn_boundary causal causal_contour pentagon_oracle affine_operator adjoint_transport linear_boundary
       polynomial_transport henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
@@ -121,6 +122,8 @@ if(BUILD_TESTING)
     set_tests_properties(fire_modular.external PROPERTIES TIMEOUT 180)
   endif()
   if(UNIX AND DIFFEXP_FIRE_EXECUTABLE)
+    add_test(NAME ibp_solver_provider.external COMMAND diffexp_test_ibp_solver_provider "${DIFFEXP_FIRE_EXECUTABLE}")
+    set_tests_properties(ibp_solver_provider.external PROPERTIES TIMEOUT 120)
     add_test(NAME family_config.external COMMAND diffexp_test_family_config "${DIFFEXP_FIRE_EXECUTABLE}")
     set_tests_properties(family_config.external PROPERTIES TIMEOUT 180)
     add_test(NAME fire_native.external COMMAND diffexp_test_fire_native "${DIFFEXP_FIRE_EXECUTABLE}")
@@ -172,6 +175,9 @@ install(TARGETS ${diffexp_install_targets} EXPORT DiffExpTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY third_party/ibp-solver/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES third_party/ibp-solver/LICENSE third_party/ibp-solver/README.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/diffexp/third_party/ibp-solver)
 install(EXPORT DiffExpTargets NAMESPACE DiffExp:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DiffExp)
 configure_package_config_file(cmake/DiffExpConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/DiffExpConfig.cmake
@@ -205,6 +211,9 @@ if(BUILD_TESTING)
     add_test(NAME mathematica.compatibility COMMAND ${CMAKE_COMMAND} -E env
       "DIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>" ${DIFFEXP_WOLFRAMSCRIPT} ${diffexp_wolfram_arguments}
       -file ${CMAKE_CURRENT_SOURCE_DIR}/tests/mathematica/compatibility.wl)
-    set_tests_properties(mathematica.interface mathematica.compatibility PROPERTIES TIMEOUT 120 RESOURCE_LOCK wolfram_kernel)
+    add_test(NAME mathematica.ibp_solver COMMAND ${CMAKE_COMMAND} -E env
+      "DIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>" ${DIFFEXP_WOLFRAMSCRIPT} ${diffexp_wolfram_arguments}
+      -file ${CMAKE_CURRENT_SOURCE_DIR}/tests/mathematica/ibp-solver.wl)
+    set_tests_properties(mathematica.interface mathematica.compatibility mathematica.ibp_solver PROPERTIES TIMEOUT 120 RESOURCE_LOCK wolfram_kernel)
   endif()
 endif()

@@ -1,0 +1,234 @@
+{
+  "binary_sha256": "cf7a4e436b1fd9de201271b6a9720027ff194b73de8fb6325ce9fa7859d44472",
+  "scope": "sequential cold caches, identical complete FT requests, no numerical checkpoint cache; 61-bit native reconstruction versus symbolic FIRE7",
+  "cases": [
+    {
+      "family": "sunrise",
+      "runs": [
+        {
+          "provider": "ibp-solver",
+          "repeat": 0,
+          "process_seconds": 1.2196444999426603,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.325501291,
+            "numerical_seconds": 0.844649541,
+            "ordinary_seconds": 0.259080833,
+            "spectral_seconds": 0.002140167,
+            "total_seconds": 1.170522208
+          },
+          "ibp_statistics": {
+            "fresh_probes": 396,
+            "generated_equations": 142560,
+            "probe_generation_seconds": 0.080972425,
+            "probe_elimination_seconds": 0.09889054199999997
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 0,
+          "process_seconds": 0.9987923330627382,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.219401166,
+            "numerical_seconds": 0.734023041,
+            "ordinary_seconds": 0.208792,
+            "spectral_seconds": 0.004673167,
+            "total_seconds": 0.953785875
+          },
+          "ibp_statistics": {
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 1,
+          "process_seconds": 0.9946325831115246,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.217661542,
+            "numerical_seconds": 0.734044458,
+            "ordinary_seconds": 0.208751875,
+            "spectral_seconds": 0.004470959,
+            "total_seconds": 0.952083708
+          },
+          "ibp_statistics": {
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 1,
+          "process_seconds": 1.1995848750229925,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.324122334,
+            "numerical_seconds": 0.844476042,
+            "ordinary_seconds": 0.256767541,
+            "spectral_seconds": 0.0021692079999999997,
+            "total_seconds": 1.168981167
+          },
+          "ibp_statistics": {
+            "fresh_probes": 396,
+            "generated_equations": 142560,
+            "probe_generation_seconds": 0.08160212000000003,
+            "probe_elimination_seconds": 0.09985146499999993
+          },
+          "message": null
+        },
+        {
+          "provider": "ibp-solver",
+          "repeat": 2,
+          "process_seconds": 1.2063796250149608,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.333043,
+            "numerical_seconds": 0.84115975,
+            "ordinary_seconds": 0.255936791,
+            "spectral_seconds": 0.002254834,
+            "total_seconds": 1.174567917
+          },
+          "ibp_statistics": {
+            "fresh_probes": 396,
+            "generated_equations": 142560,
+            "probe_generation_seconds": 0.08282037400000011,
+            "probe_elimination_seconds": 0.10017341299999996
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 2,
+          "process_seconds": 0.9915572500322014,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.218716375,
+            "numerical_seconds": 0.733673416,
+            "ordinary_seconds": 0.210104,
+            "spectral_seconds": 0.004519166,
+            "total_seconds": 0.952746875
+          },
+          "ibp_statistics": {
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        }
+      ],
+      "maximum_coefficient_midpoint_difference": "2E-46"
+    },
+    {
+      "family": "box",
+      "runs": [
+        {
+          "provider": "ibp-solver",
+          "repeat": 0,
+          "process_seconds": 0.40628983289934695,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.109971958,
+            "numerical_seconds": 0.245668041,
+            "ordinary_seconds": 0.083968459,
+            "spectral_seconds": 0.001865209,
+            "total_seconds": 0.355834333
+          },
+          "ibp_statistics": {
+            "fresh_probes": 184,
+            "generated_equations": 63360,
+            "probe_generation_seconds": 0.034044750000000006,
+            "probe_elimination_seconds": 0.030229626000000002
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 0,
+          "process_seconds": 0.7191415000706911,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 0.422093875,
+            "numerical_seconds": 0.24482325,
+            "ordinary_seconds": 0.08362312400000001,
+            "spectral_seconds": 0.001870709,
+            "total_seconds": 0.667106167
+          },
+          "ibp_statistics": {
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        }
+      ],
+      "maximum_coefficient_midpoint_difference": "0"
+    },
+    {
+      "family": "box_triangle",
+      "runs": [
+        {
+          "provider": "ibp-solver",
+          "repeat": 0,
+          "process_seconds": 37.1299556249287,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 32.09395025,
+            "numerical_seconds": 5.001507625,
+            "ordinary_seconds": 3.1808560420000003,
+            "spectral_seconds": 0.125173082,
+            "total_seconds": 37.096068209
+          },
+          "ibp_statistics": {
+            "fresh_probes": 726,
+            "generated_equations": 7526980,
+            "probe_generation_seconds": 4.5903847240000015,
+            "probe_elimination_seconds": 26.763543787000003
+          },
+          "message": null
+        },
+        {
+          "provider": "fire",
+          "repeat": 0,
+          "process_seconds": 17.960840082960203,
+          "returncode": 0,
+          "status": "completed",
+          "timings": {
+            "preparation_seconds": 12.9071035,
+            "numerical_seconds": 4.993873375,
+            "ordinary_seconds": 3.1742135000000005,
+            "spectral_seconds": 0.13127537500000003,
+            "total_seconds": 17.901611333
+          },
+          "ibp_statistics": {
+            "fresh_probes": 0,
+            "generated_equations": 0,
+            "probe_generation_seconds": 0.0,
+            "probe_elimination_seconds": 0.0
+          },
+          "message": null
+        }
+      ],
+      "maximum_coefficient_midpoint_difference": "0"
+    }
+  ]
+}

@@ -50,7 +50,7 @@ inline Result prepare(const ibp::PropagatorBasis& basis,const Exact& dimension,
       std::vector<ibp::Integral> batch(demand.begin(),demand.end());
       auto reduced=provider(batch,provider_options);++result.passes;result.demands=demand.size();
       if(!reduced.directory.empty())result.fire_directories.push_back(reduced.directory);
-      if(!reduced.success)throw std::runtime_error("level FIRE pass failed: "+reduced.reason);
+      if(!reduced.success)throw std::runtime_error("level IBP pass failed: "+reduced.reason);
       for(const auto& a:batch)if(!reduced.reductions.count(a))throw std::runtime_error("level provider omitted a demanded integral");
       for(const auto& [a,row]:reduced.reductions) {
         // A reduction is a complete relation, including the zero case. Identity

@@ -18,6 +18,7 @@
 #include "diffexp/recursion_pipeline.hpp"
 #include "diffexp/level_cache.hpp"
 #include "diffexp/fire_modular.hpp"
+#include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/henn_boundary.hpp"
 #endif
 #include <iostream>
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis;
       std::filesystem::path fire_prime;
+      auto ibp_provider=configuration.ibp_provider;auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
@@ -66,6 +68,12 @@ int main(int argc, char** argv) {
         if(i+1>=argc)throw std::invalid_argument("missing "+command+" option value");
         const char* option_value=argv[++i];
         if(option=="--fire")options.reduction.provider.executable=option_value;
+        else if(option=="--ibp-provider")ibp_provider=option_value;
+        else if(option=="--ibp-dots"||option=="--ibp-numerators"){
+          const std::string value=option_value;unsigned n=0;auto parsed=std::from_chars(value.data(),value.data()+value.size(),n);
+          if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
+          (option=="--ibp-dots"?ibp_dots:ibp_numerators)=n;
+        }
         else if(option=="--fire-prime")fire_prime=option_value;
         else if(option=="--cache")cache=option_value;
         else if(option=="--henn-basis")henn_basis=option_value;
@@ -111,6 +119,10 @@ int main(int argc, char** argv) {
           else throw std::invalid_argument("unknown FT option: "+option);
         } else throw std::invalid_argument("unknown prepare option: "+option);
       }
+      if(ibp_provider=="auto")ibp_provider=!fire_prime.empty()?"fire-modular":!options.reduction.provider.executable.empty()?"fire":"ibp-solver";
+      if(ibp_provider!="ibp-solver"&&ibp_provider!="fire"&&ibp_provider!="fire-modular")throw std::invalid_argument("IBP provider must be auto, ibp-solver, fire or fire-modular");
+      if(ibp_provider=="fire-modular"&&fire_prime.empty())throw std::invalid_argument("fire-modular requires --fire-prime PATH");
+      if(ibp_provider=="fire"&&options.reduction.provider.executable.empty())throw std::invalid_argument("fire provider requires --fire PATH");
       options.reduction.batch_cache_directory=cache/"fire-batches";
       options.reduction.pending_cache_directory=cache/"fire-pending";
       if(numerical_cache){numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
@@ -124,15 +136,22 @@ int main(int argc, char** argv) {
         if(!epsilon_order_given)epsilon_order=4;
       }
       diffexp::artifacts::Store store(cache);unsigned reused=0,built=0;
+      diffexp::ibp_solver::Statistics ibp_statistics;
       auto provider=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget) {
         diffexp::level::Provider fallback;
-        if(!fire_prime.empty()) {
+        std::shared_ptr<diffexp::ibp_solver::Session> native_session;
+        if(ibp_provider=="ibp-solver"){
+          diffexp::ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.dots=ibp_dots;native.numerators=ibp_numerators;
+          native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
+          fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
+        }else if(ibp_provider=="fire-modular") {
           diffexp::fire_modular::Options modular;modular.executable=fire_prime;modular.cache_directory=cache/"fire-modular";
           modular.progress=[](const std::string& message){std::cerr<<message<<'\n';};
           auto session=std::make_shared<diffexp::fire_modular::Session>(basis,dimension,field,modular,budget.batch_cache_directory);
           fallback=[session](const auto& batch,const auto& limits){return (*session)(batch,limits);};
         }
         auto result=diffexp::cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
+        if(native_session){const auto& stats=native_session->statistics();ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;}
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
@@ -148,6 +167,8 @@ int main(int argc, char** argv) {
       boost::json::object report{{"schema","DiffExp.FeynmanTrick/v1"},{"family",configuration.family.name},
         {"status",command=="prepare"?"prepared":"completed"},{"levels",graph.nodes.size()},
         {"systems_built",built},{"systems_reused",reused}};
+      report["ibp_provider"]=ibp_provider;
+      report["ibp_statistics"]=boost::json::object{{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
@@ -283,6 +304,11 @@ int main(int argc, char** argv) {
 #endif
       information["package_version"]="2.1.1";information["native_transport"]=true;
       information["feynman_configuration_schema"]="DiffExp.FeynmanFamily/v1";
+#if defined(__unix__) || defined(__APPLE__)
+      information["ibp_solver"]=true;information["ibp_default_provider"]="ibp-solver";information["ibp_prime_bits"]=61;
+#else
+      information["ibp_solver"]=false;
+#endif
       information["transport_schema"]="DiffExp.Transport/v1";
       std::cout<<boost::json::serialize(information)<<'\n';
     } else if (command == "kernel") {
@@ -300,6 +326,7 @@ int main(int argc, char** argv) {
     } else if (command == "--help") {
       std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
+      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N.\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
       std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint); --no-numerical-cache disables numerical checkpoint files while retaining exact reductions.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";

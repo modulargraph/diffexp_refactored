@@ -13,7 +13,8 @@ names directly.
 [Mathematica quick start](#mathematica-diffexp1-style-workflow) ·
 [Build and install](#build) · [Feynman-trick recursion](#feynman-trick-recursion) ·
 [Examples and timings](#examples-and-validation) ·
-[AMFlow 2.0 comparison](docs/amflow-comparison.md)
+[AMFlow 2.0 comparison](docs/amflow-comparison.md) ·
+[Built-in IBP Solver](docs/ibp-solver.md)
 
 ## Mathematica: DiffExp1-style workflow
 
@@ -85,6 +86,12 @@ For the massive-pentagon FT example, matched runs show **2.9–3.6× faster
 ordinary transport and about 1.5× faster complete calculations**. Other tested
 families retain local recurrence where the spectral approach does not help.
 
+**The built-in IBP Solver also works through Mathematica.**
+Use `DiffExpFeynmanTrick[family, {"--ibp-provider", "ibp-solver",
+"--cache", "/path/to/cache"}]` with a JSON filename or family Association.
+It prepares coefficients depending on both the merge parameter and dimension,
+without launching FIRE. See [provider selection and validation](docs/ibp-solver.md).
+
 The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`. Communication
 uses ordinary processes and JSON, with no LibraryLink or WSTP setup.
 The [direct native operations](docs/mathematica.md#direct-native-operations),
@@ -95,8 +102,10 @@ same package.
 
 Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and pkg-config.
 The tested platform is macOS; the recursive FIRE process provider uses POSIX
-facilities. Mathematica is optional. FIRE7 or FIRE7p is needed for larger cold
-IBP reductions, but not for building or running the basic examples.
+facilities. Mathematica is optional. A pinned core of the separate
+[IBP Solver](https://github.com/modulargraph/ibp-solver) package is included for
+cold finite-field reductions and reconstruction. FIRE7 and FIRE7p remain
+selectable providers for larger or unsupported reductions.
 
 On macOS, dependencies can be installed with Homebrew:
 

@@ -49,15 +49,18 @@ integrals share preparation and recursive source work.
 ```sh
 build/diffexp family-template sunrise > my-family.json
 # Edit masses, scalar products, propagators, powers and controls.
-build/diffexp prepare my-family.json --fire /path/to/FIRE7 --cache /path/to/cache --json
-build/diffexp ft my-family.json --fire /path/to/FIRE7 --cache /path/to/cache --json
+build/diffexp prepare my-family.json --ibp-provider ibp-solver --cache /path/to/cache --json
+build/diffexp ft my-family.json --ibp-provider ibp-solver --cache /path/to/cache --json
 ```
 
 Use `-` as the configuration path to read JSON from stdin. Template names
 remain a convenience, and older named CLI invocations still work. The primary
 interface is the complete configuration. `prepare` constructs and verifies the
-recursion without reporting an integral value. Cold IBP preparation requires
-FIRE when the internal scalar/reduction cases do not suffice. Previously
+recursion without reporting an integral value. Cold IBP preparation defaults to the bundled IBP Solver core when no explicit
+FIRE executable is supplied. It reconstructs the full parameter-dependent
+coefficients; no family-name special case is used. `--fire /path/to/FIRE7` and
+`--fire-prime /path/to/FIRE7p` select the existing providers. The native provider
+has bounded seed and reconstruction budgets; see [scope and controls](ibp-solver.md). Previously
 verified preparation can be reused from the selected cache.
 
 For runs that do not need numerical restart files, add `--no-numerical-cache`.
@@ -68,7 +71,9 @@ recomputed on a later invocation. This is useful when disk space is limited.
 See [the laptop examples](ft-laptop-examples.md) for cold runs with this option.
 
 Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
-`level_seconds`, `fire_seconds`, and `max_sources_per_level`. A merge is a pair
+`level_seconds`, `fire_seconds`, `max_sources_per_level`, `ibp_provider`,
+`ibp_dots`, and `ibp_numerators`. Provider choices are `auto`, `ibp-solver`,
+`fire`, and `fire-modular`. Seed controls are integers from 0 through 8. A merge is a pair
 of zero-based positions in the current physical propagator list, after earlier
 merges. Anchors are exact rationals. CLI resource options override JSON fields.
 Optional numerical fields also include `contour_height` and `overlap`.
@@ -108,7 +113,7 @@ family["external_gram"] = {{"-3"}};
 family = ReplacePart[family,
   {Key["propagators"], 1, Key["mass_squared"]} -> "2"];
 result = DiffExpFeynmanTrick[family,
-  {"--fire", "/path/to/FIRE7", "--cache", "/path/to/cache"}];
+  {"--ibp-provider", "ibp-solver", "--cache", "/path/to/cache"}];
 result["timings"]
 ```
 

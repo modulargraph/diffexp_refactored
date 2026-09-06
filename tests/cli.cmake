@@ -70,3 +70,26 @@ if(EXISTS "${transient_cache}/affine-series" OR EXISTS "${transient_cache}/ordin
   message(FATAL_ERROR "Transient FT mode created numerical checkpoint directories")
 endif()
 file(REMOVE_RECURSE "${transient_cache}")
+
+# Complete native IBP recursion must actually call the bundled solver on a cold cache.
+set(ibp_cache "${CMAKE_CURRENT_BINARY_DIR}/cli-ibp-${transient_id}")
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --ibp-provider ibp-solver --cache "${ibp_cache}" --no-numerical-cache --json
+  OUTPUT_VARIABLE native ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(NOT status EQUAL 0)
+  message(FATAL_ERROR "Native IBP recursion failed: ${errors} ${native}")
+endif()
+string(JSON provider GET "${native}" ibp_provider)
+string(JSON probes GET "${native}" ibp_statistics fresh_probes)
+if(NOT provider STREQUAL "ibp-solver" OR probes LESS 1)
+  message(FATAL_ERROR "Native IBP provider was not executed")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --cache "${ibp_cache}" --no-numerical-cache --json
+  OUTPUT_VARIABLE resumed ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON reused GET "${resumed}" systems_reused)
+string(JSON probes GET "${resumed}" ibp_statistics fresh_probes)
+if(NOT status EQUAL 0 OR reused LESS 1 OR NOT probes EQUAL 0)
+  message(FATAL_ERROR "Native IBP closure cache was not reused")
+endif()
+file(REMOVE_RECURSE "${ibp_cache}")

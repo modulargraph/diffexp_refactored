@@ -7,6 +7,10 @@ namespace json=boost::json;
 namespace fs=std::filesystem;
 struct Options {
   fs::path executable,cache_directory;
+  using SampleProvider=std::function<fire::Result(const std::vector<ibp::Integral>&,const std::vector<modular::Word>&,modular::Word,const fire::Options&)>;
+  SampleProvider sample_provider;
+  std::function<modular::Word(unsigned)> modulus=modular::prime;
+  std::string provider_identity="FIRE7p",prime_table="FIRE7-primes-1-through-16";
   unsigned max_degree=16,max_primes=8,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   std::function<void(const std::string&)> progress;
@@ -55,14 +59,14 @@ inline modular::Word coefficient(const Probe& sample,const Key& key,modular::Wor
 } // namespace detail
 
 // Completed symbolic batches remain reusable. An uncached demand uses only
-// FIRE7p, native FLINT interpolation and CRT; there is no symbolic fallback.
+// the selected finite-field provider, native FLINT interpolation and CRT; there is no symbolic fallback.
 // The generic level preparer subsequently proves its derivative/target closure
 // conditional on these imported identities, exactly as for symbolic FIRE.
 class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||options_.executable.empty()||!options_.max_degree||options_.max_degree>32||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>32||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
     if(!exact_batches.empty())exact_batches_=std::make_unique<fire_batch::Cache>(std::move(exact_batches));
   }
@@ -75,7 +79,11 @@ class Session {
       fire::SymbolMap symbols(field_.variables());auto source=fire::start(basis_,dimension_,limits.zero_sectors,&symbols);
       auto active=detail::active_variables(source,symbols);
       json::array active_json;for(auto i:active)active_json.push_back(i);
-      const auto identity=artifacts::detail::sha256(artifacts::detail::canonical(json::object{{"schema","DiffExp3.NativeModularProvider/v1"},{"science",semantic.json_value()},{"active",active_json},{"prime_table","FIRE7-primes-1-through-16"}}));
+      json::object identity_input{{"schema","DiffExp3.NativeModularProvider/v1"},{"science",semantic.json_value()},{"active",active_json},{"prime_table",options_.prime_table}};
+      // Preserve existing FIRE sample/checkpoint identities. Native providers
+      // additionally bind their implementation and seed policy.
+      if(options_.sample_provider||options_.provider_identity!="FIRE7p")identity_input["provider"]=options_.provider_identity;
+      const auto identity=artifacts::detail::sha256(artifacts::detail::canonical(identity_input));
       result.directory=fs::absolute(options_.cache_directory)/identity;fs::create_directories(result.directory);
       detail::publish(result.directory/"family.start",source);
       auto status=[&](std::string message){if(options_.progress)options_.progress(message);};
@@ -104,9 +112,9 @@ class Session {
           auto payload=detail::read(result.directory/expected);auto point=modular::point(field_.variables().size(),pi,ordinal);
           for(std::size_t i=0;i<point.size();++i)if(std::find(active.begin(),active.end(),i)==active.end())point[i]=3;
           json::array coordinates;for(auto value:point)coordinates.emplace_back(std::to_string(value));
-          if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||payload.at("prime_index").to_number<unsigned>()!=pi||artifacts::detail::string(payload.at("modulus"))!=std::to_string(modular::prime(pi)))throw std::runtime_error("modular held-out sample identity mismatch");
+          if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||payload.at("prime_index").to_number<unsigned>()!=pi||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(pi)))throw std::runtime_error("modular held-out sample identity mismatch");
           auto check=load_rows(payload);std::map<ibp::Integral,ibp::Relation> image;
-          for(const auto& [a,row]:result.reductions){image.emplace(a,ibp::Relation{});for(const auto& [b,c]:row){auto value=modular::evaluate(c,point,modular::prime(pi));if(value)image.at(a).emplace(b,dimension_.parse(std::to_string(value)));}}
+          for(const auto& [a,row]:result.reductions){image.emplace(a,ibp::Relation{});for(const auto& [b,c]:row){auto value=modular::evaluate(c,point,options_.modulus(pi));if(value)image.at(a).emplace(b,dimension_.parse(std::to_string(value)));}}
           if(image!=check)throw std::runtime_error("cached modular reconstruction fails independent sample replay");
         }
         verify_native(result.reductions);
@@ -127,14 +135,14 @@ class Session {
           auto opts=limits;opts.executable=options_.executable;opts.threads=1;opts.simplifier_threads=1;
           opts.max_completed_forward_sectors=opts.max_completed_backward_sectors=0;
           opts.timeout_seconds=std::min(options_.probe_timeout_seconds,remaining());
-          auto reduced=fire::reduce(basis_,dimension_,field_,requested,opts,nullptr,nullptr,false,&input);
+          auto reduced=options_.sample_provider?options_.sample_provider(requested,point,options_.modulus(prime_index),opts):fire::reduce(basis_,dimension_,field_,requested,opts,nullptr,nullptr,false,&input);
           if(!reduced.success)throw std::runtime_error("finite-field probe failed: "+reduced.reason);
           fire_batch::validate(reduced,basis_,dimension_,requested);
-          auto tables=fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
-          payload={{"schema","DiffExp3.ModularSample/v1"},{"identity",identity},{"prime_index",prime_index},{"modulus",std::to_string(modular::prime(prime_index))},{"point",coordinates},{"tables",tables},{"directory",reduced.directory.string()}};
+          auto tables=options_.sample_provider?detail::table(reduced.reductions,symbols):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
+          payload={{"schema","DiffExp3.ModularSample/v1"},{"identity",identity},{"prime_index",prime_index},{"modulus",std::to_string(options_.modulus(prime_index))},{"point",coordinates},{"tables",tables},{"directory",reduced.directory.string()}};
           detail::save(path,payload);++fresh;
         }
-        if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||artifacts::detail::string(payload.at("modulus"))!=std::to_string(modular::prime(prime_index))||payload.at("prime_index").to_number<unsigned>()!=prime_index)
+        if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(prime_index))||payload.at("prime_index").to_number<unsigned>()!=prime_index)
           throw std::runtime_error("modular sample identity, point or prime mismatch");
         auto rows=load_rows(payload);fire::Result check;check.success=true;check.reductions=rows;fire_batch::validate(check,basis_,dimension_,requested);
         for(const auto& [a,row]:rows)for(const auto& [b,c]:row)if(!c.is_rational())throw std::runtime_error("nonconstant finite-field output");
@@ -146,7 +154,7 @@ class Session {
         std::vector<modular::Sample> out;for(const auto& p:all) {
           if(detail::masters(p)!=terminal)throw std::runtime_error("modular master basis changed at a sample; no reconstruction accepted");
           modular::Sample row;for(auto i:active)row.point.push_back(p.point[i]);
-          for(const auto& key:keys)row.coefficients.push_back(detail::coefficient(p,key,modular::prime(pi)));out.push_back(std::move(row));
+          for(const auto& key:keys)row.coefficients.push_back(detail::coefficient(p,key,options_.modulus(pi)));out.push_back(std::move(row));
         }return out;
       };
       std::size_t count=8;
@@ -155,19 +163,19 @@ class Session {
         terminal=detail::masters(probes.front());std::set<detail::Key> all_keys;
         for(const auto& p:probes)for(const auto& [a,row]:p.rows)for(const auto& [b,c]:row)all_keys.emplace(a,b);
         keys.assign(all_keys.begin(),all_keys.end());auto samples=flatten(probes,1);images.clear();
-        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::discover(samples,i,active.size(),options_.max_degree,modular::prime(1));if(!image)break;images.push_back(std::move(*image));}
+        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::discover(samples,i,active.size(),options_.max_degree,options_.modulus(1));if(!image)break;images.push_back(std::move(*image));}
         detail::save(result.directory/"progress.json",{{"schema","DiffExp3.ModularProgress/v1"},{"identity",identity},{"stage","degree-discovery"},{"samples_per_prime",probes.size()},{"coefficients",keys.size()},{"discovered",images.size()},{"fresh_samples",fresh},{"reused_samples",hits}});
         status("modular samples "+std::to_string(probes.size())+", reconstructed shapes "+std::to_string(images.size())+"/"+std::to_string(keys.size()));
         if(images.size()==keys.size())break;
         if(count==options_.max_samples_per_prime)throw std::runtime_error("modular sample/degree budget exhausted; progress retained");
         count=std::min(count*2,options_.max_samples_per_prime);
       }
-      std::vector<modular::Lift> lifts;for(const auto& image:images)lifts.emplace_back(image,modular::prime(1));
+      std::vector<modular::Lift> lifts;for(const auto& image:images)lifts.emplace_back(image,options_.modulus(1));
       for(unsigned pi=2;pi<=options_.max_primes;++pi) {
         std::vector<detail::Probe> next;for(std::size_t i=0;i<probes.size();++i)next.push_back(probe(pi,i));
         auto samples=flatten(next,pi);std::vector<modular::Image> next_images;
-        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,modular::prime(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
-        for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],modular::prime(pi));
+        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,options_.modulus(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
+        for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));
         std::vector<Exact> coefficients;for(const auto& lift:lifts){auto c=lift.reconstruct(dimension_,active);if(!c)break;coefficients.push_back(*c);}
         bool valid=coefficients.size()==keys.size();std::vector<std::string> validation_files;
         if(valid)for(unsigned check_prime=pi+1;check_prime<=pi+2&&valid;++check_prime)for(std::size_t j=0;j<3&&valid;++j) {
@@ -175,8 +183,8 @@ class Session {
           validation_files.push_back("sample-"+std::to_string(check_prime)+"-"+std::to_string(ordinal)+".json");
           if(detail::masters(check)!=terminal){valid=false;break;}
           std::map<ibp::Integral,ibp::Relation> candidate;for(const auto& [a,row]:probes.front().rows)candidate.emplace(a,ibp::Relation{});
-          try{for(std::size_t k=0;k<keys.size();++k){const auto actual=modular::evaluate(coefficients[k],check.point,modular::prime(check_prime));
-              if(actual!=detail::coefficient(check,keys[k],modular::prime(check_prime))){valid=false;break;}
+          try{for(std::size_t k=0;k<keys.size();++k){const auto actual=modular::evaluate(coefficients[k],check.point,options_.modulus(check_prime));
+              if(actual!=detail::coefficient(check,keys[k],options_.modulus(check_prime))){valid=false;break;}
               if(actual)candidate.at(keys[k].first).emplace(keys[k].second,dimension_.parse(std::to_string(actual)));}
             if(valid&&candidate!=check.rows)valid=false;
           }catch(const std::domain_error&){valid=false;}
@@ -190,7 +198,7 @@ class Session {
         result.success=true;fire_batch::validate(result,basis_,dimension_,requested);auto verified=verify_native(result.reductions);
         json::array checks;for(const auto& file:validation_files)checks.emplace_back(file);
         auto tables=detail::table(result.reductions,symbols);
-        detail::save(result.directory/"completed.json",{{"schema","DiffExp3.ModularCompleted/v1"},{"identity",identity},{"tables",tables},{"verification","fresh-two-primes-three-points-and-applicable-native-IBPs"},{"validation_samples",checks},{"reconstruction_primes",pi},{"samples_per_prime",probes.size()},{"native_ibp_identities_checked",verified},{"assumptions","FIRE finite-field IBP reductions and declared zero sectors; rational reconstruction verified probabilistically, with exact checks of applicable native identities. Level closure is checked separately."}});
+        detail::save(result.directory/"completed.json",{{"schema","DiffExp3.ModularCompleted/v1"},{"identity",identity},{"tables",tables},{"verification","fresh-two-primes-three-points-and-applicable-native-IBPs"},{"validation_samples",checks},{"reconstruction_primes",pi},{"samples_per_prime",probes.size()},{"native_ibp_identities_checked",verified},{"assumptions",options_.provider_identity+" finite-field IBP reductions and declared zero sectors; rational reconstruction verified probabilistically, with exact checks of applicable native identities. Level closure is checked separately."}});
         status("accepted modular reduction; exact native IBP checks "+std::to_string(verified));return result;
       }
       throw std::runtime_error("modular rational coefficient prime budget exhausted; all samples retained");

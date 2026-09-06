@@ -18,7 +18,9 @@ int main(int argc,char** argv) {
   o["epsilon_order"]=0;o["integrals"]=boost::json::array{boost::json::array{1,1}};
   o.at("numerical").as_object()["transport"]="spectral";
   o.at("numerical").as_object()["transport_digits"]=32;
+  o["preparation"]=boost::json::object{{"ibp_provider","ibp-solver"},{"ibp_dots",2},{"ibp_numerators",3}};
   auto config=family_config::parse(document);
+  if(config.ibp_provider!="ibp-solver"||config.ibp_dots!=2||config.ibp_numerators!=3)throw std::runtime_error("IBP provider configuration forwarding");
   if(config.numerical.ordinary_method!=recursion::OrdinaryMethod::spectral || config.numerical.spectral.accuracy_goal!=32)throw std::runtime_error("FT solver configuration forwarding");
   auto graph=recursion::prepare(config.family,config.integrals,config.preparation);
   auto result=recursion::Evaluator(graph,config.numerical).evaluate(0);

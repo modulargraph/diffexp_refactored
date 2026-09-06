@@ -15,6 +15,9 @@ int main(int argc,char** argv){try{
   ibp::PropagatorBasis basis(ibp::quadratic_family(feynman::banana(1,{Rational(1),Rational(2)}),d));
   fire_modular::Session session(basis,d,field,opts);fire::Options limits;limits.timeout_seconds=120;
   auto reduced=session({{2,1},{1,2}},limits);if(!reduced.success)throw std::runtime_error(reduced.reason);
+  auto semantic=fire_batch::identity(basis,d,field,{{2,1},{1,2}},limits);
+  auto legacy_identity=artifacts::detail::sha256(artifacts::detail::canonical(boost::json::object{{"schema","DiffExp3.NativeModularProvider/v1"},{"science",semantic.json_value()},{"active",boost::json::array{0}},{"prime_table","FIRE7-primes-1-through-16"}}));
+  if(reduced.directory.filename()!=legacy_identity)throw std::runtime_error("existing FIRE checkpoint identity changed");
   ibp::Generator generator(basis,d);ibp::ExactReducer reducer(d);
   for(int a=-1;a<=4;++a)for(int b=-1;b<=4;++b)for(auto row:generator.relations({a,b}))reducer.insert(std::move(row));
   for(const auto& [a,row]:reduced.reductions){ibp::Relation residual{{a,d.constant(1)}};ibp::add_scaled(residual,row,d.constant(-1));

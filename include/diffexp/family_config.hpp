@@ -10,7 +10,8 @@ struct Configuration {
   std::vector<ibp::Integral> integrals;
   recursion::Options preparation;
   recursion::NumericalOptions numerical;
-  unsigned epsilon_order=0;
+  unsigned epsilon_order=0,ibp_dots=1,ibp_numerators=2;
+  std::string ibp_provider="auto";
 };
 inline bool same_geometry(const feynman::ExampleFamily& a,const feynman::ExampleFamily& b) {
   if(a.physical_count!=b.physical_count || a.dimension_at_epsilon_zero!=b.dimension_at_epsilon_zero ||
@@ -69,7 +70,10 @@ inline Configuration parse(const json::value& value) {
   if(c.integrals.size()>5000)throw std::invalid_argument("integral request count exceeds 5000");
   if(auto p=o.if_contains("epsilon_order"))c.epsilon_order=integer(*p,0,100,"epsilon order");
   if(auto p=o.if_contains("preparation")) {
-    const auto& a=p->as_object();known_keys(a,{"anchors","merges","total_seconds","level_seconds","fire_seconds","max_sources_per_level"},"preparation");
+    const auto& a=p->as_object();known_keys(a,{"anchors","merges","total_seconds","level_seconds","fire_seconds","max_sources_per_level","ibp_provider","ibp_dots","ibp_numerators"},"preparation");
+    if(auto v=a.if_contains("ibp_provider")){c.ibp_provider=std::string(v->as_string());if(c.ibp_provider!="auto"&&c.ibp_provider!="ibp-solver"&&c.ibp_provider!="fire"&&c.ibp_provider!="fire-modular")throw std::invalid_argument("unknown IBP provider");}
+    if(auto v=a.if_contains("ibp_dots"))c.ibp_dots=integer(*v,0,8,"IBP dots");
+    if(auto v=a.if_contains("ibp_numerators"))c.ibp_numerators=integer(*v,0,8,"IBP numerators");
     if(auto v=a.if_contains("anchors"))c.preparation.anchors=rationals(*v);
     if(auto v=a.if_contains("merges"))for(const auto& pair:v->as_array()) {
       if(pair.as_array().size()!=2)throw std::invalid_argument("each merge has two zero-based positions");

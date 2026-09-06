@@ -58,6 +58,8 @@ if(BUILD_TESTING)
       factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational cached_affine_columns affine_endpoint_domain)
     # Explicit acceptance runner: large FT examples are opt-in, with a caller
     # supplied durable cache and finite preparation budget.
+    add_executable(diffexp_check_ft_laptop tools/check_ft_laptop.cpp)
+    target_link_libraries(diffexp_check_ft_laptop PRIVATE DiffExp::core)
     add_executable(diffexp_ft_examples tests/test_ft_examples.cpp)
     target_link_libraries(diffexp_ft_examples PRIVATE DiffExp::core)
     add_executable(diffexp_henn_ft tools/check_henn_ft.cpp)

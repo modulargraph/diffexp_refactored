@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
       diffexp::AdjointConditioningStats conditioning;
       numerical.adjoint.conditioning_stats=&conditioning;
       unsigned epsilon_order=configuration.epsilon_order;
+      bool numerical_cache=true;
       bool epsilon_order_given=std::string(argv[2])=="-" || std::filesystem::exists(argv[2]);
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis;
@@ -61,6 +62,7 @@ int main(int argc, char** argv) {
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
+        if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;continue;}
         if(i+1>=argc)throw std::invalid_argument("missing "+command+" option value");
         const char* option_value=argv[++i];
         if(option=="--fire")options.reduction.provider.executable=option_value;
@@ -105,7 +107,7 @@ int main(int argc, char** argv) {
       }
       options.reduction.batch_cache_directory=cache/"fire-batches";
       options.reduction.pending_cache_directory=cache/"fire-pending";
-      numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";
+      if(numerical_cache){numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
       auto requested=configuration.integrals;
       std::optional<diffexp::henn::CanonicalBasis> canonical_basis;
       if(!henn_basis.empty()) {
@@ -170,6 +172,7 @@ int main(int argc, char** argv) {
           report["ball_encoding"]="Arb decimal interval strings for real and imaginary parts";
           report["omitted_tails_certified"]=result.taylor_tail_certified;
           report["working_bits"]=numerical.working_bits;
+          report["persistent_numerical_cache"]=numerical_cache;
         } else {
           if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii exclude omitted endpoint and transport tails):\n";
           for(unsigned row=0;row<result.values.size();++row)for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
@@ -288,7 +291,7 @@ int main(int argc, char** argv) {
       std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
-      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto|values (default adjoint).\n";
+      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto|values (default adjoint); --no-numerical-cache disables numerical checkpoint files while retaining exact reductions.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";
       std::cout << "Original equal banana: --route real|contour (default real; local +i0 singular matching); --to ENDPOINT (default 20; real route supports endpoints >=20, including historical 32).\n";
       std::cout << "Original unequal banana: --route momentum-first|mass-first (default momentum-first).\n";

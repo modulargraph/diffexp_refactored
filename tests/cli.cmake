@@ -53,3 +53,20 @@ string(JSON timing GET "${output}" timings total_seconds)
 if(NOT status EQUAL 0 OR NOT completed STREQUAL "completed" OR timing LESS 0)
   message(FATAL_ERROR "Configured FT dispatch or timing failed: ${errors} ${output}")
 endif()
+
+# This mode must preserve the answer without creating numerical checkpoints.
+string(JSON cached_coefficients GET "${output}" coefficients)
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef transient_id)
+set(transient_cache "${CMAKE_CURRENT_BINARY_DIR}/cli-transient-${transient_id}")
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
+  --epsilon-order 0 --cache "${transient_cache}" --no-numerical-cache --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON transient_coefficients GET "${output}" coefficients)
+string(JSON persistent GET "${output}" persistent_numerical_cache)
+if(NOT status EQUAL 0 OR persistent OR NOT cached_coefficients STREQUAL transient_coefficients)
+  message(FATAL_ERROR "Transient FT mode changed the result: ${errors} ${output}")
+endif()
+if(EXISTS "${transient_cache}/affine-series" OR EXISTS "${transient_cache}/ordinary-transport")
+  message(FATAL_ERROR "Transient FT mode created numerical checkpoint directories")
+endif()
+file(REMOVE_RECURSE "${transient_cache}")

@@ -60,6 +60,13 @@ recursion without reporting an integral value. Cold IBP preparation requires
 FIRE when the internal scalar/reduction cases do not suffice. Previously
 verified preparation can be reused from the selected cache.
 
+For runs that do not need numerical restart files, add `--no-numerical-cache`.
+This avoids writing endpoint-series and ordinary-transport checkpoints while
+retaining the exact reductions under `--cache`. In-memory sharing remains active.
+The response reports `persistent_numerical_cache: false`; numerical stages are
+recomputed on a later invocation. This is useful when disk space is limited.
+See [the laptop examples](ft-laptop-examples.md) for cold runs with this option.
+
 Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 `level_seconds`, `fire_seconds`, and `max_sources_per_level`. A merge is a pair
 of zero-based positions in the current physical propagator list, after earlier

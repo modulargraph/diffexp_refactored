@@ -73,3 +73,12 @@ and massless-box FT evaluations at a common independently checked 20-digit
 threshold. It reports cold and reused-preparation timings, the isolated LiteRed
 compatibility adaptation needed for sunrise, and an optimization experiment
 that was not adopted after it slowed the cached sunrise matrix.
+
+## Further cold FT laptop examples
+
+The [four-example run](ft-laptop-examples.md) measured 7.85 s for a massive
+pentagon through epsilon squared, 18.88 s for the box-triangle, 23.86 s for an
+unequal three-loop banana, and 7m 45s for the planar double-box. All passed
+independent reference checks. These runs use fresh exact caches and disable
+persistent numerical checkpoints; the report records controls, tolerances and
+separate preparation/reference times.

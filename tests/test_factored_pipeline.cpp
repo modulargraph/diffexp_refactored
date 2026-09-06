@@ -51,6 +51,8 @@ int main(){try{
   settings.linear_method=recursion::LinearMethod::factored;
   const auto cache=std::filesystem::temp_directory_path()/("de3-factored-continuation-"+std::to_string(::getpid()));
   struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code ec;std::filesystem::remove_all(path,ec);}} cleanup{cache};
+  // Explicitly exercise local-chart interruption and exact resumption.
+  settings.ordinary_method=recursion::OrdinaryMethod::taylor;
   settings.endpoint_cache_directory=cache/"endpoints";settings.ordinary_cache_directory=cache/"ordinary";
   settings.progress=[](std::size_t,const std::string& phase,int) {
     if(phase=="middle factored transport")throw std::runtime_error("intentional factored interruption");

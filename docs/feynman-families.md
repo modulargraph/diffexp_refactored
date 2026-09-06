@@ -114,3 +114,9 @@ result["timings"]
 
 A JSON filename can be passed in place of the Association. Editing a label
 alone does not change the integral; editing the geometry does.
+
+Ordinary transport inside adjoint/factored FT recursion defaults to automatic
+spectral selection. Set `numerical.transport` to `"auto"`, `"spectral"` or
+`"taylor"`, and optionally `numerical.transport_digits` for the local spectral
+convergence target. These fields pass through `DiffExpFeynmanTrick` unchanged.
+See [FT spectral transport](ft-spectral.md) for selection, fallback and timings.

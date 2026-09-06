@@ -16,7 +16,10 @@ int main(int argc,char** argv) {
   o["name"]="a-family-never-registered";o["external_gram"]=boost::json::array{boost::json::array{"-3"}};
   for(auto& line:o.at("propagators").as_array())line.as_object()["mass_squared"]="2";
   o["epsilon_order"]=0;o["integrals"]=boost::json::array{boost::json::array{1,1}};
+  o.at("numerical").as_object()["transport"]="spectral";
+  o.at("numerical").as_object()["transport_digits"]=32;
   auto config=family_config::parse(document);
+  if(config.numerical.ordinary_method!=recursion::OrdinaryMethod::spectral || config.numerical.spectral.accuracy_goal!=32)throw std::runtime_error("FT solver configuration forwarding");
   auto graph=recursion::prepare(config.family,config.integrals,config.preparation);
   auto result=recursion::Evaluator(graph,config.numerical).evaluate(0);
   using B=kernel::ComplexBall;B::set_precision(384);B root,argument,atanh;

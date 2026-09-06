@@ -82,6 +82,11 @@ int main(int argc, char** argv) {
           else if(option=="--fire-simplifier-threads")options.reduction.provider.simplifier_threads=number;
           else options.reduction.provider.memory_bytes=static_cast<std::size_t>(number)*1024*1024;
         }
+        else if(command=="ft" && option=="--ft-transport") {
+          const std::string method=option_value;
+          if(method!="auto" && method!="spectral" && method!="taylor")throw std::invalid_argument("FT transport must be auto, spectral or taylor");
+          numerical.ordinary_method=method=="auto"?diffexp::recursion::OrdinaryMethod::automatic:method=="spectral"?diffexp::recursion::OrdinaryMethod::spectral:diffexp::recursion::OrdinaryMethod::taylor;
+        }
         else if(command=="ft" && option=="--method") {
           const std::string method=option_value;
           if(method!="adjoint" && method!="values" && method!="factored" && method!="auto")
@@ -102,6 +107,7 @@ int main(int argc, char** argv) {
           else if(option=="--ordinary-order")numerical.ordinary_order=number;
           else if(option=="--precision-bits")numerical.working_bits=number;
           else if(option=="--leaf-digits")numerical.leaf_digits=number;
+          else if(option=="--ft-transport-digits"){if(!number || number>100000)throw std::invalid_argument("FT transport digits must be in 1..100000");numerical.spectral.accuracy_goal=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
         } else throw std::invalid_argument("unknown prepare option: "+option);
       }
@@ -180,6 +186,10 @@ int main(int argc, char** argv) {
           }
         }
         const auto& stats=evaluator.statistics();
+        boost::json::array rejected;for(const auto& reason:stats.spectral_rejections)rejected.emplace_back(reason);
+        report["ft_transport"]=boost::json::object{{"spectral_attempts",stats.spectral_attempts},{"spectral_accepted",stats.spectral_accepted},{"spectral_legs",stats.spectral_legs},{"spectral_reused",stats.spectral_reused},{"rejections",rejected}};
+        report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
+        report["timings"].as_object()["spectral_seconds"]=stats.spectral_seconds;
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; verified series reused "<<stats.endpoint_series_reused<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
           <<"Ordinary continuation: "<<stats.ordinary_checkpoints.loaded<<" saved arms resumed, "<<stats.ordinary_checkpoints.completed_reused
@@ -291,7 +301,7 @@ int main(int argc, char** argv) {
       std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
-      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto|values (default adjoint); --no-numerical-cache disables numerical checkpoint files while retaining exact reductions.\n";
+      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint); --no-numerical-cache disables numerical checkpoint files while retaining exact reductions.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";
       std::cout << "Original equal banana: --route real|contour (default real; local +i0 singular matching); --to ENDPOINT (default 20; real route supports endpoints >=20, including historical 32).\n";
       std::cout << "Original unequal banana: --route momentum-first|mass-first (default momentum-first).\n";

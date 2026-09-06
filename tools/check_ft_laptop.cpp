@@ -27,7 +27,7 @@ int main(int argc,char**argv){try {
  } else if(name=="double_box_planar") {
   auto ref=oracle::double_box_planar_reference(256);for(int k=-4;k<=0;++k)refs.emplace(k,ref.at(k));first=-4;
   kind="Independent analytic Smirnov planar double-box Laurent coefficients";reference_certified=true;
- } else if(name=="banana_unequal") {
+ } else if((name=="banana_unequal" || name=="sunrise")) {
   std::vector<Rational> masses;for(auto& line:cfg.family.momenta.lines)masses.push_back(line.mass_squared);
   oracle::BananaOptions opt;opt.target_bits=100;opt.working_bits=256;auto ref=oracle::banana_bessel(masses,opt);refs.emplace(0,ref.value);
   kind="Independent certified coordinate-space Bessel integral at epsilon zero";reference_certified=true;

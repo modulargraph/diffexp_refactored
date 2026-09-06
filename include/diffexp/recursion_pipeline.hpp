@@ -10,8 +10,10 @@
 #include "diffexp/cached_affine.hpp"
 #include "diffexp/factored_transport.hpp"
 #include "diffexp/adjoint_checkpoint.hpp"
+#include "diffexp/ft_spectral_checkpoint.hpp"
 
 namespace diffexp::recursion {
+enum class OrdinaryMethod { automatic, spectral, taylor };
 enum class LinearMethod { adjoint, factored, automatic };
 struct NumericalOptions {
   slong working_bits=384;
@@ -25,6 +27,9 @@ struct NumericalOptions {
   bool observable_adjoint=true;
   LinearMethod linear_method=LinearMethod::adjoint;
   AdjointOptions adjoint;
+  OrdinaryMethod ordinary_method=OrdinaryMethod::automatic;
+  // Zero derives the local spectral goal from leaf_digits + 12.
+  ft_spectral::Options spectral=[] {ft_spectral::Options value;value.accuracy_goal=0;return value;}();
   std::optional<causal::Prescription> causal_prescription;
   std::function<void(std::size_t,const std::string&,int)> progress;
   // Optional read-only diagnostics on completed coefficient maps. This lets
@@ -54,6 +59,9 @@ struct NumericalStatistics {
   std::size_t conditioning_method_fallbacks=0;
   std::size_t endpoint_constraint_rows=0,endpoint_constraint_coefficients=0;
   double maximum_endpoint_constraint_residual=0;
+  double ordinary_seconds=0,spectral_seconds=0;
+  std::size_t spectral_attempts=0,spectral_accepted=0,spectral_legs=0,spectral_reused=0;
+  std::vector<std::string> spectral_rejections;
 };
 // A boundary-independent local problem. Endpoint rows act on the
 // epsilon-gauged master vector. Each arm satisfies g'=forcing-g*connection
@@ -326,8 +334,26 @@ class Evaluator {
   std::vector<std::optional<linear_boundary::Expression>> expressions_;
   LaurentRows ordinary_transport(const Matrix& matrix,LaurentRows initial,const Matrix& forcing,
       const std::vector<Exact>& vertices,const AdjointOptions& settings) {
-    return adjoint_checkpoint::transport(matrix,std::move(initial),forcing,vertices,settings,
+    const auto start=std::chrono::steady_clock::now();
+    const auto finish=[&]{statistics_.ordinary_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();};
+    if(options_.ordinary_method!=OrdinaryMethod::taylor && !settings.continuation && !settings.continuation_observer && !settings.chart_observer) {
+      // Existing checkpoints remain authoritative and are verified by their original adapter.
+      bool saved=false;
+      if(!options_.ordinary_cache_directory.empty())saved=std::filesystem::exists(options_.ordinary_cache_directory/(adjoint_checkpoint::identity(matrix,initial,forcing,vertices,settings)+".json"));
+      if(!saved){++statistics_.spectral_attempts;ft_spectral::Diagnostics diagnostics;
+        auto spectral=options_.spectral;
+        if(!spectral.accuracy_goal)spectral.accuracy_goal=options_.leaf_digits+12;
+        if(options_.ordinary_method==OrdinaryMethod::automatic){spectral.conservative=true;spectral.max_block_size=1;spectral.max_nodes=spectral.accuracy_goal>50?128:64;spectral.endpoint_clustering=false;spectral.seconds_budget=std::min(spectral.seconds_budget,2.0);}
+        auto result=ft_spectral_checkpoint::try_transport(matrix,initial,forcing,vertices,spectral,diagnostics,settings,
+          {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.spectral_reused});
+        statistics_.spectral_seconds+=diagnostics.preparation_seconds+diagnostics.numerical_seconds;
+        if(result){++statistics_.spectral_accepted;statistics_.spectral_legs+=diagnostics.legs;finish();return std::move(*result);}
+        statistics_.spectral_rejections.push_back(diagnostics.reason);
+      }
+    }
+    auto result=adjoint_checkpoint::transport(matrix,std::move(initial),forcing,vertices,settings,
       {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.ordinary_checkpoints});
+    finish();return result;
   }
   causal::Prescription example_prescription()const {
     // A familiar name cannot authorize a prescription for altered kinematics.

@@ -1,0 +1,258 @@
+{
+  "batches": [
+    {
+      "file": "regression.xml",
+      "tests": [
+        {
+          "name": "family_config",
+          "seconds": 0.362413,
+          "pass": true
+        },
+        {
+          "name": "recursion_pipeline",
+          "seconds": 16.3275,
+          "pass": true
+        },
+        {
+          "name": "factored_pipeline",
+          "seconds": 22.6481,
+          "pass": true
+        },
+        {
+          "name": "pipeline_preflight",
+          "seconds": 5.13601,
+          "pass": true
+        },
+        {
+          "name": "prepared_stage",
+          "seconds": 0.278154,
+          "pass": true
+        },
+        {
+          "name": "adjoint_checkpoint",
+          "seconds": 0.965833,
+          "pass": true
+        },
+        {
+          "name": "diagonal_log_gauge",
+          "seconds": 0.264673,
+          "pass": true
+        },
+        {
+          "name": "ft_spectral",
+          "seconds": 0.442458,
+          "pass": true
+        },
+        {
+          "name": "ft_spectral_checkpoint",
+          "seconds": 0.279713,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "file": "final-tests.xml",
+      "tests": [
+        {
+          "name": "transport",
+          "seconds": 0.941709,
+          "pass": true
+        },
+        {
+          "name": "spectral_transport",
+          "seconds": 0.213392,
+          "pass": true
+        },
+        {
+          "name": "finite_lag_transport",
+          "seconds": 0.0530673,
+          "pass": true
+        },
+        {
+          "name": "frontend",
+          "seconds": 0.0143786,
+          "pass": true
+        },
+        {
+          "name": "laurent_transport",
+          "seconds": 0.0171108,
+          "pass": true
+        },
+        {
+          "name": "affine_matching",
+          "seconds": 0.0364323,
+          "pass": true
+        },
+        {
+          "name": "adjoint_transport",
+          "seconds": 0.0177792,
+          "pass": true
+        },
+        {
+          "name": "conditioned_adjoint",
+          "seconds": 0.0161938,
+          "pass": true
+        },
+        {
+          "name": "centered_adjoint",
+          "seconds": 0.57859,
+          "pass": true
+        },
+        {
+          "name": "ft_spectral",
+          "seconds": 0.582758,
+          "pass": true
+        },
+        {
+          "name": "ft_spectral_checkpoint",
+          "seconds": 0.283202,
+          "pass": true
+        },
+        {
+          "name": "cli.interface",
+          "seconds": 0.32172,
+          "pass": true
+        },
+        {
+          "name": "mathematica.interface",
+          "seconds": 3.33661,
+          "pass": true
+        },
+        {
+          "name": "mathematica.compatibility",
+          "seconds": 21.8553,
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "unique_tests": 21,
+  "mathematica": {
+    "timings": {
+      "process_seconds": 6.208913,
+      "preparation_seconds": 0.026389667,
+      "numerical_seconds": 5.962890833,
+      "ordinary_seconds": 1.8129740439999997,
+      "spectral_seconds": 1.812018917,
+      "total_seconds": 5.993891917
+    },
+    "result": {
+      "schema": "DiffExp.FeynmanTrick/v1",
+      "family": "laptop_pentagon_massive",
+      "status": "completed",
+      "levels": 4,
+      "systems_built": 0,
+      "systems_reused": 3,
+      "timings": {
+        "preparation_seconds": 0.026389667,
+        "numerical_seconds": 5.962890833,
+        "ordinary_seconds": 1.8129740439999997,
+        "spectral_seconds": 1.812018917,
+        "total_seconds": 5.993891917
+      },
+      "epsilon_low": -1,
+      "epsilon_high": 2,
+      "coefficient_order": "component,epsilon",
+      "coefficients": [
+        [
+          {
+            "real": "[+/- 1.04e-46]",
+            "imaginary": "[+/- 1.04e-46]"
+          },
+          {
+            "real": "[0.01813378668630195764229602054832609932149128 +/- 6.06e-45]",
+            "imaginary": "[+/- 3.81e-45]"
+          },
+          {
+            "real": "[0.0076131154161440535648564784592130217117538 +/- 3.86e-44]",
+            "imaginary": "[+/- 2.04e-44]"
+          },
+          {
+            "real": "[0.0052144755784776811411112368938047226922782 +/- 6.10e-44]",
+            "imaginary": "[+/- 5.52e-44]"
+          }
+        ]
+      ],
+      "component_basis": "requested_scalar",
+      "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+      "omitted_tails_certified": false,
+      "working_bits": 384,
+      "persistent_numerical_cache": false,
+      "ft_transport": {
+        "spectral_attempts": 6,
+        "spectral_accepted": 6,
+        "spectral_legs": 18,
+        "spectral_reused": 0,
+        "rejections": []
+      }
+    },
+    "reference": {
+      "status": "pass",
+      "reference_kind": "Independent Feynman-parameter integration pins; comparison limited to 18 absolute digits",
+      "reference_certified": false,
+      "absolute_threshold": "1e-18",
+      "comparisons": [
+        {
+          "epsilon_order": 0,
+          "actual": {
+            "real": "[0.01813378668630195764229602054832609932149128 +/- 6.07e-45]",
+            "imaginary": "[+/- 3.82e-45]"
+          },
+          "reference": {
+            "real": "[0.018133786686301957640000000000000000000000000000000000000000000000000000000000000 +/- 3e-86]",
+            "imaginary": "0"
+          },
+          "difference": {
+            "real": "[2.29602054832609932149128e-21 +/- 6.07e-45]",
+            "imaginary": "[+/- 3.82e-45]"
+          },
+          "pass": true
+        },
+        {
+          "epsilon_order": 1,
+          "actual": {
+            "real": "[0.0076131154161440535648564784592130217117538 +/- 3.87e-44]",
+            "imaginary": "[+/- 2.05e-44]"
+          },
+          "reference": {
+            "real": "[0.0076131154161440535650000000000000000000000000000000000000000000000000000000000000 +/- 3e-87]",
+            "imaginary": "0"
+          },
+          "difference": {
+            "real": "[-1.435215407869782882462e-22 +/- 3.87e-44]",
+            "imaginary": "[+/- 2.05e-44]"
+          },
+          "pass": true
+        },
+        {
+          "epsilon_order": 2,
+          "actual": {
+            "real": "[0.0052144755784776811411112368938047226922782 +/- 6.11e-44]",
+            "imaginary": "[+/- 5.53e-44]"
+          },
+          "reference": {
+            "real": "[0.0052144755784776811420000000000000000000000000000000000000000000000000000000000000 +/- 3e-87]",
+            "imaginary": "0"
+          },
+          "difference": {
+            "real": "[-8.887631061952773077218e-22 +/- 6.11e-44]",
+            "imaginary": "[+/- 5.53e-44]"
+          },
+          "pass": true
+        }
+      ],
+      "forbidden_poles": [
+        {
+          "epsilon_order": -1,
+          "coefficient": {
+            "real": "[+/- 1.05e-46]",
+            "imaginary": "[+/- 1.05e-46]"
+          },
+          "pass": true
+        }
+      ],
+      "omitted_tails_certified": false,
+      "reference_seconds": 0.000972083
+    }
+  }
+}

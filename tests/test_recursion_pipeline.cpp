@@ -73,6 +73,8 @@ int main(){try {
   require(upper(result.values[0][-result.low]-reference)<1e-20,"generic sunrise FT recursion disagrees with independent Bessel oracle");
   for(int k=result.low;k<0;++k)require(upper(result.values[0][k-result.low])<1e-20,"physical sunrise spurious Laurent poles must cancel");
   recursion::NumericalOptions adjoint;adjoint.observable_adjoint=true;
+  // This section tests bitwise continuation of the local recurrence.
+  adjoint.ordinary_method=recursion::OrdinaryMethod::taylor;
   adjoint.endpoint_cache_directory=observed.endpoint_cache_directory;
   recursion::Evaluator adjoint_solver(graph,adjoint);auto adjoint_result=adjoint_solver.evaluate(0);
   require(solver.statistics().endpoint_series_built>0 && adjoint_solver.statistics().endpoint_series_built==0 &&

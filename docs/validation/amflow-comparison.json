@@ -1,0 +1,1018 @@
+{
+  "schema": "DiffExp.AMFlowComparison/v1",
+  "target_digits": 20,
+  "acceptance": "max |computed-reference|/max(1,|reference|) <= 1e-20; imaginary native midpoints checked too; general FT tails are not certified",
+  "cases": [
+    {
+      "case": "bubble",
+      "epsilon_orders": [
+        0,
+        1,
+        2
+      ],
+      "configuration": {
+        "schema": "DiffExp.FeynmanFamily/v1",
+        "name": "benchmark_bubble",
+        "loops": 1,
+        "external_gram": [
+          [
+            "-1"
+          ]
+        ],
+        "propagators": [
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "1"
+          },
+          {
+            "loop_coefficients": [
+              "-1"
+            ],
+            "external_coefficients": [
+              "1"
+            ],
+            "mass_squared": "1"
+          }
+        ],
+        "physical_count": 2,
+        "dimension_at_epsilon_zero": 2,
+        "epsilon_order": 2,
+        "numerical": {
+          "endpoint_order": 32,
+          "ordinary_order": 80,
+          "working_bits": 384,
+          "leaf_digits": 28,
+          "method": "adjoint"
+        }
+      },
+      "observations": [
+        {
+          "engine": "diffexp",
+          "label": "cold",
+          "max_scaled_error": "1.12720228727827154214874738929E-48",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "bubble",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 0.038050041,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/bubble/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/bubble/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/bubble"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_bubble",
+            "status": "completed",
+            "levels": 1,
+            "systems_built": 0,
+            "systems_reused": 0,
+            "timings": {
+              "preparation_seconds": 0.001770458,
+              "numerical_seconds": 0.0174145,
+              "total_seconds": 0.019492458
+            },
+            "epsilon_low": 0,
+            "epsilon_high": 2,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "[0.86081788192800807777886646590121085084914136508 +/- 5.62e-48]",
+                  "imaginary": "[+/- 5.04e-48]"
+                },
+                {
+                  "real": "[-0.62399274400920634539990890187395927929209341826 +/- 6.09e-48]",
+                  "imaginary": "[+/- 5.81e-48]"
+                },
+                {
+                  "real": "[0.93607995093492819996654415824654074010578971272 +/- 8.68e-48]",
+                  "imaginary": "[+/- 7.55e-48]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": true,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "diffexp",
+          "label": "warm",
+          "max_scaled_error": "1.12720228727827154214874738929E-48",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "bubble",
+            "label": "warm",
+            "exit": 0,
+            "wall_seconds": 0.015729833,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/bubble/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/bubble/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/bubble"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_bubble",
+            "status": "completed",
+            "levels": 1,
+            "systems_built": 0,
+            "systems_reused": 0,
+            "timings": {
+              "preparation_seconds": 0.000198292,
+              "numerical_seconds": 0.011663291,
+              "total_seconds": 0.011949209
+            },
+            "epsilon_low": 0,
+            "epsilon_high": 2,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "[0.86081788192800807777886646590121085084914136508 +/- 5.62e-48]",
+                  "imaginary": "[+/- 5.04e-48]"
+                },
+                {
+                  "real": "[-0.62399274400920634539990890187395927929209341826 +/- 6.09e-48]",
+                  "imaginary": "[+/- 5.81e-48]"
+                },
+                {
+                  "real": "[0.93607995093492819996654415824654074010578971272 +/- 8.68e-48]",
+                  "imaginary": "[+/- 7.55e-48]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": true,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "amflow",
+          "label": "cold",
+          "max_scaled_error": "8.1641578971271887279771272172845785125261071E-34",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "bubble",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 61.859185292,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/final/amflow-ft/bubble/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/final/amflow-ft/bubble"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_bubble",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 59.464206,
+            "kernel_session_seconds": 59.640427,
+            "epsilon_low": -2,
+            "epsilon_high": 2,
+            "normalized_coefficients": [
+              "0",
+              "0",
+              "0.86081788192800807777886646590121085085`20.",
+              "-0.62399274400920634539990890187395927928`20.",
+              "0.93607995093492819996654415824653992369`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 12,
+              "working_decimal_digits": 126,
+              "taylor_order": 252,
+              "extra_order": 50
+            },
+            "configured_threads": 1
+          },
+          "numerical_phase_seconds_rounded_up": 8
+        },
+        {
+          "engine": "amflow",
+          "label": "warm",
+          "max_scaled_error": "8.1641578971271887279771272172845785125261071E-34",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "bubble",
+            "label": "warm",
+            "exit": 0,
+            "wall_seconds": 24.337649542,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/final/amflow-ft/bubble/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/final/amflow-ft/bubble"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_bubble",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 21.980723,
+            "kernel_session_seconds": 22.176432,
+            "epsilon_low": -2,
+            "epsilon_high": 2,
+            "normalized_coefficients": [
+              "0",
+              "0",
+              "0.86081788192800807777886646590121085085`20.",
+              "-0.62399274400920634539990890187395927928`20.",
+              "0.93607995093492819996654415824653992369`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 12,
+              "working_decimal_digits": 126,
+              "taylor_order": 252,
+              "extra_order": 50
+            },
+            "configured_threads": 1,
+            "litered_setup_override": ""
+          },
+          "numerical_phase_seconds_rounded_up": 8
+        }
+      ]
+    },
+    {
+      "case": "sunrise",
+      "epsilon_orders": [
+        0
+      ],
+      "configuration": {
+        "schema": "DiffExp.FeynmanFamily/v1",
+        "name": "benchmark_sunrise",
+        "loops": 2,
+        "external_gram": [
+          [
+            "-1"
+          ]
+        ],
+        "propagators": [
+          {
+            "loop_coefficients": [
+              "1",
+              "0"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "1"
+          },
+          {
+            "loop_coefficients": [
+              "0",
+              "1"
+            ],
+            "external_coefficients": [
+              "0"
+            ],
+            "mass_squared": "1"
+          },
+          {
+            "loop_coefficients": [
+              "-1",
+              "-1"
+            ],
+            "external_coefficients": [
+              "1"
+            ],
+            "mass_squared": "1"
+          }
+        ],
+        "physical_count": 3,
+        "dimension_at_epsilon_zero": 2,
+        "epsilon_order": 0,
+        "numerical": {
+          "endpoint_order": 32,
+          "ordinary_order": 80,
+          "working_bits": 384,
+          "leaf_digits": 28,
+          "method": "adjoint"
+        }
+      },
+      "observations": [
+        {
+          "engine": "diffexp",
+          "label": "cold",
+          "max_scaled_error": "1.73965892725588715443784939564142587325636416815600024036415076460117706247E-47",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "sunrise",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 1.2453048329999998,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/sunrise/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/sunrise/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/sunrise"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_sunrise",
+            "status": "completed",
+            "levels": 2,
+            "systems_built": 1,
+            "systems_reused": 0,
+            "timings": {
+              "preparation_seconds": 0.220636875,
+              "numerical_seconds": 1.020010041,
+              "total_seconds": 1.241009208
+            },
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "0",
+                  "imaginary": "0"
+                },
+                {
+                  "real": "[3.77817053399009759326939965053027599609641110481257e-62 +/- 6.97e-113]",
+                  "imaginary": "[7.0389313180404166746276937429941557194461393465e-66 +/- 5.98e-113]"
+                },
+                {
+                  "real": "[2.2367927002126465105292636268841307993871175068 +/- 8.77e-47]",
+                  "imaginary": "[+/- 5.37e-47]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": false,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "diffexp",
+          "label": "warm",
+          "max_scaled_error": "1.73965892725588715443784939564142587325636416815600024036415076460117706247E-47",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "sunrise",
+            "label": "warm",
+            "exit": 0,
+            "wall_seconds": 0.7905325,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/sunrise/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/sunrise/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/sunrise"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_sunrise",
+            "status": "completed",
+            "levels": 2,
+            "systems_built": 0,
+            "systems_reused": 1,
+            "timings": {
+              "preparation_seconds": 0.002368542,
+              "numerical_seconds": 0.783806167,
+              "total_seconds": 0.7865095
+            },
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "0",
+                  "imaginary": "0"
+                },
+                {
+                  "real": "[3.77817053399009759326939965053027599609641110481257e-62 +/- 6.97e-113]",
+                  "imaginary": "[7.0389313180404166746276937429941557194461393465e-66 +/- 5.98e-113]"
+                },
+                {
+                  "real": "[2.2367927002126465105292636268841307993871175068 +/- 8.77e-47]",
+                  "imaginary": "[+/- 5.37e-47]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": false,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "amflow",
+          "label": "cold",
+          "max_scaled_error": "1.28867246428933910764122520232388407177280352394746787453436926866877778859E-39",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "sunrise",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 176.106526334,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_sunrise",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 173.726751,
+            "kernel_session_seconds": 173.907638,
+            "epsilon_low": -4,
+            "epsilon_high": 0,
+            "normalized_coefficients": [
+              "0",
+              "0",
+              "0",
+              "0",
+              "2.23679270021264651052926362688413079939`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 14,
+              "working_decimal_digits": 180,
+              "taylor_order": 360,
+              "extra_order": 50
+            },
+            "configured_threads": 1,
+            "litered_setup_override": "<benchmark-root>/litered-ft-setup"
+          },
+          "numerical_phase_seconds_rounded_up": 33
+        },
+        {
+          "engine": "amflow",
+          "label": "warm",
+          "max_scaled_error": "1.28867246428933910764122520232388407177280352394746787453436926866877778859E-39",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "sunrise",
+            "label": "warm_retry1",
+            "exit": 0,
+            "wall_seconds": 48.410368625,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_sunrise",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 46.031928,
+            "kernel_session_seconds": 46.210595,
+            "epsilon_low": -4,
+            "epsilon_high": 0,
+            "normalized_coefficients": [
+              "0",
+              "0",
+              "0",
+              "0",
+              "2.23679270021264651052926362688413079939`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 14,
+              "working_decimal_digits": 180,
+              "taylor_order": 360,
+              "extra_order": 50
+            },
+            "configured_threads": 1,
+            "litered_setup_override": "<benchmark-root>/litered-ft-setup"
+          },
+          "numerical_phase_seconds_rounded_up": 33
+        }
+      ]
+    },
+    {
+      "case": "box",
+      "epsilon_orders": [
+        -2,
+        -1,
+        0
+      ],
+      "configuration": {
+        "schema": "DiffExp.FeynmanFamily/v1",
+        "name": "benchmark_box",
+        "loops": 1,
+        "external_gram": [
+          [
+            "0",
+            "-1/2",
+            "2/3"
+          ],
+          [
+            "-1/2",
+            "0",
+            "-1/6"
+          ],
+          [
+            "2/3",
+            "-1/6",
+            "0"
+          ]
+        ],
+        "propagators": [
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "0",
+              "0",
+              "0"
+            ],
+            "mass_squared": "0"
+          },
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "1",
+              "0",
+              "0"
+            ],
+            "mass_squared": "0"
+          },
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "1",
+              "1",
+              "0"
+            ],
+            "mass_squared": "0"
+          },
+          {
+            "loop_coefficients": [
+              "1"
+            ],
+            "external_coefficients": [
+              "1",
+              "1",
+              "1"
+            ],
+            "mass_squared": "0"
+          }
+        ],
+        "physical_count": 4,
+        "dimension_at_epsilon_zero": 4,
+        "epsilon_order": 0,
+        "numerical": {
+          "endpoint_order": 32,
+          "ordinary_order": 80,
+          "working_bits": 384,
+          "leaf_digits": 28,
+          "method": "adjoint"
+        }
+      },
+      "observations": [
+        {
+          "engine": "diffexp",
+          "label": "cold",
+          "max_scaled_error": "3.4258647526104081679344696202035E-46",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "box",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 0.753897334,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/box/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/box/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/box"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_box",
+            "status": "completed",
+            "levels": 3,
+            "systems_built": 2,
+            "systems_reused": 0,
+            "timings": {
+              "preparation_seconds": 0.410457333,
+              "numerical_seconds": 0.339241708,
+              "total_seconds": 0.749895583
+            },
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "[12.0000000000000000000000000000000000000000000000 +/- 1.07e-47]",
+                  "imaginary": "[+/- 1.07e-47]"
+                },
+                {
+                  "real": "[-0.334914246809736178906673659453674944620968684 +/- 5.07e-46]",
+                  "imaginary": "[+/- 1.64e-46]"
+                },
+                {
+                  "real": "[-41.28416739754646857209152551421705519317273062 +/- 2.46e-45]",
+                  "imaginary": "[+/- 1.14e-45]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": false,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "diffexp",
+          "label": "warm",
+          "max_scaled_error": "3.4258647526104081679344696202035E-46",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "diffexp",
+            "mode": "FT",
+            "case": "box",
+            "label": "warm",
+            "exit": 0,
+            "wall_seconds": 0.238370333,
+            "time_limit_seconds": 600,
+            "command": [
+              "<diffexp>/build/diffexp",
+              "ft",
+              "<benchmark-root>/runs/final/diffexp-ft/box/family.json",
+              "--fire",
+              "<fire>/bin/FIRE7",
+              "--cache",
+              "<benchmark-root>/runs/final/diffexp-ft/box/cache",
+              "--json",
+              "--total-seconds",
+              "550",
+              "--level-seconds",
+              "300",
+              "--fire-seconds",
+              "120"
+            ],
+            "root": "<benchmark-root>/runs/final/diffexp-ft/box"
+          },
+          "result": {
+            "schema": "DiffExp.FeynmanTrick/v1",
+            "family": "benchmark_box",
+            "status": "completed",
+            "levels": 3,
+            "systems_built": 0,
+            "systems_reused": 2,
+            "timings": {
+              "preparation_seconds": 0.002412875,
+              "numerical_seconds": 0.231747,
+              "total_seconds": 0.234323541
+            },
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "coefficient_order": "component,epsilon",
+            "coefficients": [
+              [
+                {
+                  "real": "[12.0000000000000000000000000000000000000000000000 +/- 1.07e-47]",
+                  "imaginary": "[+/- 1.07e-47]"
+                },
+                {
+                  "real": "[-0.334914246809736178906673659453674944620968684 +/- 5.07e-46]",
+                  "imaginary": "[+/- 1.64e-46]"
+                },
+                {
+                  "real": "[-41.28416739754646857209152551421705519317273062 +/- 2.46e-45]",
+                  "imaginary": "[+/- 1.14e-45]"
+                }
+              ]
+            ],
+            "component_basis": "requested_scalar",
+            "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+            "omitted_tails_certified": false,
+            "working_bits": 384
+          }
+        },
+        {
+          "engine": "amflow",
+          "label": "cold",
+          "max_scaled_error": "2.62210271225235258360395830261215129008096534727184426358635739082505808143E-34",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "box",
+            "label": "cold",
+            "exit": 0,
+            "wall_seconds": 228.30638375,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/final/amflow-ft/box/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/final/amflow-ft/box"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_box",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 225.916174,
+            "kernel_session_seconds": 226.112259,
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "normalized_coefficients": [
+              "12.`20.",
+              "-0.33491424680973617890667365945367494462`20.",
+              "-41.28416739754646857209152551421704436804`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 7,
+              "working_decimal_digits": 130,
+              "taylor_order": 260,
+              "extra_order": 50
+            },
+            "configured_threads": 1
+          },
+          "numerical_phase_seconds_rounded_up": 15
+        },
+        {
+          "engine": "amflow",
+          "label": "warm",
+          "max_scaled_error": "2.62210271225235258360395830261215129008096534727184426358635739082505808143E-34",
+          "accuracy_passed": true,
+          "process": {
+            "engine": "amflow",
+            "mode": "FT",
+            "case": "box",
+            "label": "warm",
+            "exit": 0,
+            "wall_seconds": 30.947652541,
+            "time_limit_seconds": 600,
+            "command": [
+              "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+              "-noprompt",
+              "-script",
+              "<benchmark-root>/runs/final/amflow-ft/box/run.wl"
+            ],
+            "root": "<benchmark-root>/runs/final/amflow-ft/box"
+          },
+          "result": {
+            "engine": "AMFlow 2.0",
+            "recursion_mode": "FT",
+            "case": "benchmark_box",
+            "status": "completed",
+            "goal_digits": 20,
+            "solve_seconds": 28.621639,
+            "kernel_session_seconds": 28.808243,
+            "epsilon_low": -2,
+            "epsilon_high": 0,
+            "normalized_coefficients": [
+              "12.`20.",
+              "-0.33491424680973617890667365945367494462`20.",
+              "-41.28416739754646857209152551421704436804`20."
+            ],
+            "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+            "numerical_configuration": {
+              "epsilon_samples": 7,
+              "working_decimal_digits": 130,
+              "taylor_order": 260,
+              "extra_order": 50
+            },
+            "configured_threads": 1,
+            "litered_setup_override": ""
+          },
+          "numerical_phase_seconds_rounded_up": 15
+        }
+      ]
+    }
+  ],
+  "independent_references": {
+    "bubble": [
+      "0.86081788192800807777886646590121085084914136508057930951401220798512243093954`65.",
+      "-0.62399274400920634539990890187395927929209341825971971411823672460616424500115`65.",
+      "0.93607995093492819996654415824654074010578971271887279771272172845785125261071`65."
+    ],
+    "sunrise": [
+      "2.23679270021264651052926362688413079938711750683891256389345731819462400605596`64.99994535691604"
+    ],
+    "box": [
+      "12.`55.",
+      "-0.33491424680973617890667365945367494462096868434258647526104081679344696202035`55.",
+      "-41.28416739754646857209152551421705519317273061867436936131114359194336118183408`55."
+    ],
+    "seconds": 1.645641,
+    "method": "Independent Feynman-parameter quadrature for bubble, coordinate-space Bessel quadrature for sunrise, analytic massless-box Laurent coefficients; same positive scalar normalization, no EulerGamma exponential."
+  },
+  "stock_sunrise_failure": {
+    "status": "failed_accuracy_validation",
+    "explanation": "Bundled LiteRed 1.83 marks fewer-propagator-than-loop sectors zero before its actual scaleless test. A merged FT quadratic is a counterexample. Corrected measurements use an isolated two-line dependency change.",
+    "process": {
+      "engine": "amflow",
+      "mode": "FT",
+      "case": "sunrise",
+      "label": "cold",
+      "exit": 0,
+      "wall_seconds": 144.019374208,
+      "time_limit_seconds": 600,
+      "command": [
+        "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+        "-noprompt",
+        "-script",
+        "<benchmark-root>/runs/final/amflow-ft/sunrise/run.wl"
+      ],
+      "root": "<benchmark-root>/runs/final/amflow-ft/sunrise"
+    },
+    "result": {
+      "engine": "AMFlow 2.0",
+      "recursion_mode": "FT",
+      "case": "benchmark_sunrise",
+      "status": "completed",
+      "goal_digits": 20,
+      "solve_seconds": 141.696782,
+      "kernel_session_seconds": 141.885997,
+      "epsilon_low": -4,
+      "epsilon_high": 0,
+      "normalized_coefficients": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ],
+      "normalization": "Multiply AMFlow by (-1)^(sum of propagator powers); no EulerGamma prefactor on either side.",
+      "numerical_configuration": {
+        "epsilon_samples": 14,
+        "working_decimal_digits": 180,
+        "taylor_order": 360,
+        "extra_order": 50
+      },
+      "configured_threads": 1
+    },
+    "diagnostic": {
+      "merged_nonzero_sectors": 1,
+      "merged_zero_sectors": 1,
+      "ordinary_one_propagator_two_loop_nonzero_sectors": 0,
+      "passed": true
+    }
+  },
+  "excluded_failed_warm_startups": [
+    {
+      "engine": "amflow",
+      "mode": "FT",
+      "case": "sunrise",
+      "label": "warm",
+      "exit": 1,
+      "wall_seconds": 15.064716042,
+      "time_limit_seconds": 600,
+      "command": [
+        "/Applications/Wolfram.app/Contents/MacOS/WolframKernel",
+        "-noprompt",
+        "-script",
+        "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise/run.wl"
+      ],
+      "root": "<benchmark-root>/runs/corrected_v2/amflow-ft/sunrise"
+    }
+  ],
+  "litered_patch": {
+    "source_sha256": "3479edd62328a78a4ea12d466ffca5937bb22b10f711b1870fad952799a3b6ef",
+    "patched_sha256": "3de51722542a95287eae6029a3a2362342a2efa09ddbf90f4c89a4dc5069ff49",
+    "removed": "st=(Plus@@#<nloops)&/@sectors;",
+    "replacement": "st=(Plus@@#==0)&/@sectors;",
+    "purpose": "Only the empty sector is unconditionally zero. Mixed FT quadratics must reach the unchanged actual scaleless test.",
+    "optional_symmetries_removed": "nm/:jSymmetries[Sequence@@ujs]=({m2rule[ujs,#]}&/@us)",
+    "optional_symmetries_replacement": "nm/:jSymmetries[Sequence@@ujs]=If[Total[Rest[ujs]]<Length[LMs[nm]],{},({m2rule[ujs,#]}&/@us)]"
+  },
+  "all_accepted_observations_passed": true,
+  "provenance": {
+    "date": "2026-09-06",
+    "machine": "Apple M4, macOS26.2 arm64",
+    "diffexp_commit": "8ea296a",
+    "amflow_commit": "326bbb420615220602ea697afa3355065f483f91",
+    "fire_commit": "b038d5de256ff881c32f6e7345de39a2edcab836",
+    "mpsolve_commit": "282b77c25667257b20a0d4d680e82da61ffb49a1",
+    "wolfram_version": "15.0.0",
+    "flint_version": "3.4.0",
+    "workers": 1,
+    "measurements_sequential": true,
+    "mode": "FT",
+    "amflow_desolver": "CPP"
+  }
+}

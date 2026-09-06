@@ -1,0 +1,40 @@
+{
+  "status": "not_adopted",
+  "reason": "Manufactured chart improved, but the cached sunrise matrix slowed by about3.35x. No production change.",
+  "manufactured": {
+    "precision_bits": 256,
+    "taylor_order": 128,
+    "epsilon_high": 3,
+    "dimension": 10,
+    "edges": 55,
+    "compile_seconds": 0.00132396,
+    "first_full_order_baseline_seconds": 0.0136595,
+    "first_full_order_candidate_seconds": 0.00875746,
+    "warm_repetitions": 5,
+    "baseline_chart_seconds": 0.00964375,
+    "candidate_chart_seconds": 0.00704887,
+    "product_multiply_adds": 51000,
+    "dense_multiply_adds": 1651200,
+    "baseline_fallback_rows": 0,
+    "validation": "passed",
+    "omitted_tails_certified": false
+  },
+  "cached_sunrise": {
+    "case": "cached sunrise matrix microbenchmark",
+    "original_chart_replay": false,
+    "dimension": 3,
+    "epsilon_high": 2,
+    "working_bits": 384,
+    "taylor_order": 80,
+    "center": "1/2",
+    "step": "1/64",
+    "preparation_seconds": 0.000304416,
+    "warm_repetitions": 5,
+    "baseline_seconds": 0.0005557916,
+    "candidate_seconds": 0.0018640416,
+    "product_operations": 17694,
+    "dense_operations": 93960,
+    "validation": "passed",
+    "omitted_tails_certified": false
+  }
+}

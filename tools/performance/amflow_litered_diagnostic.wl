@@ -1,0 +1,13 @@
+SetDirectory[Environment["AMFLOW_BENCH_ROOT"]];
+AppendTo[$Path,Environment["AMFLOW_LITERED_SETUP"]];
+Get["LiteRed.m"];Get[FileNameJoin[{DirectoryName[DirectoryName[Environment["FIRE7_BINARY"]]],"FIRE7.m"}]];
+Get["runs/final/amflow-ft/sunrise/cache/bench_FT/2/master/topology.wl"];
+CreateNewBasis[merged,Directory->"diagnostic-merged"];
+GenerateIBP[merged];AnalyzeSectors[merged,topsec,CutDs->cut];
+mergedNonzero=Length[NonZeroSectors[merged]];mergedZero=Length[ZeroSectors[merged]];
+Get["runs/final/amflow-ft/sunrise/cache/bench_FT/0/topology.wl"];
+CreateNewBasis[ordinary,Directory->"diagnostic-ordinary"];
+GenerateIBP[ordinary];AnalyzeSectors[ordinary,{_,0,0,0,0},CutDs->cut];
+ordinaryNonzero=Length[NonZeroSectors[ordinary]];
+report=<|"merged_nonzero_sectors"->mergedNonzero,"merged_zero_sectors"->mergedZero,"ordinary_one_propagator_two_loop_nonzero_sectors"->ordinaryNonzero,"passed"->TrueQ[{mergedNonzero,mergedZero,ordinaryNonzero}==={1,1,0}]|>;
+Export["litered-diagnostic.json",report,"RawJSON"];Print[report];Quit[If[report["passed"],0,1]];

@@ -65,3 +65,11 @@ See [validation](validation.md) for accuracy, compatibility and omitted-tail
 limitations, [interface results](validation/interface-2.1.1.json) for detailed
 workflow timings and errors, and [generic-family results](validation/generic-families.json)
 for the new-family configurations and separate cold/reused-cache times.
+
+## Comparison with AMFlow 2.0
+
+The [small-integral comparison](amflow-comparison.md) measures bubble, sunrise
+and massless-box FT evaluations at a common independently checked 20-digit
+threshold. It reports cold and reused-preparation timings, the isolated LiteRed
+compatibility adaptation needed for sunrise, and an optimization experiment
+that was not adopted after it slowed the cached sunrise matrix.

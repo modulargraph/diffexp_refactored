@@ -12,7 +12,8 @@ names directly.
 
 [Mathematica quick start](#mathematica-diffexp1-style-workflow) ·
 [Build and install](#build) · [Feynman-trick recursion](#feynman-trick-recursion) ·
-[Examples and timings](#examples-and-validation)
+[Examples and timings](#examples-and-validation) ·
+[AMFlow 2.0 comparison](docs/amflow-comparison.md)
 
 ## Mathematica: DiffExp1-style workflow
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Schedule factored Feynman-trick transport by per-component epsilon demand and
+  compose exact adjacent maps before truncation.
+- Rank physical bases by coefficient demand before expression size, reuse
+  endpoint maps during screening, and persist verified choices across restarts.
+- Add exact whole-functional counterterm and rectangular-realization certificates.
+- Compile compact rational recurrences with shared chart preparation, bounded
+  auxiliary histories, and batched FLINT dot products.
+- Store homogeneous uncertainty maps sparsely, omit exact-input columns, and
+  shorten map windows using the support of inherited uncertainty.
+- Add algebraic Lean contracts and tests for recurrence dependencies, finite
+  coefficient windows, and enclosure selection.
+
+See [the transport backend design](docs/backend-review-implementation.md) and
+[epsilon scheduling](docs/epsilon-demand-design.md) for the algorithms and scope.
+
 ## 2.1.1
 
 - Add generic JSON-defined Feynman families, including editable configurations

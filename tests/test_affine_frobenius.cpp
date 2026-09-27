@@ -30,9 +30,9 @@ int main(int argc, char **argv) {
   try {
     B::set_precision(256);
     ExactField field({"x", "eps"});
-    {
+    for(unsigned mode:{0,1,2,3}) {
       auto coefficient=[&](const char* text){return Exact(field,text);};
-      AffineFrobeniusSeries::Options limited;limited.max_terms=40;
+      AffineFrobeniusSeries::Options limited;limited.max_terms=40;limited.univariate_epsilon_projection=mode==1;limited.cleared_epsilon_projection=mode==2;limited.finite_lag_projection=mode==3;
       AffineFrobeniusSeries::Matrix diagonal{{coefficient("1/(1-x)"),coefficient("0")},
         {coefficient("0"),coefficient("1/(1-x)")}};
       auto f=AffineFrobeniusSeries::prepare(diagonal,0,1,8,limited);
@@ -53,11 +53,45 @@ int main(int argc, char **argv) {
       check(constants[0][0]==coefficient("1") && constants[0][1]==coefficient("1"),"endpoint-only projection changed exact limits");
     }
     auto e = [&](const char *s) { return Exact(field, s); };
+    {
+      // Compare direct FLINT coefficient ingestion with the independent text
+      // evaluator, including numerator zeros, epsilon poles and large powers.
+      for(const auto& value:std::vector<Exact>{e("7/3"),e("eps^4*(2+eps)/(3-eps)"),e("(1+eps)^60/(eps^3*(1-2*eps)^50)")}){
+        affine_frobenius_detail::EpsilonRational native(value,1);
+        auto valuation=fuchsify::detail::valuation(value,1);
+        check(native.valuation()==valuation,"native epsilon valuation changed");
+        Jet ep(0,10,B::precision());ep.set(1,B(1));
+        auto regular=value/fuchsify::detail::power(e("eps"),valuation);
+        auto parsed=diffexp::evaluate(data::Reader(regular.str()).read(),ep,{{"eps",ep}});
+        auto direct=native.regular_jet(10);
+        for(unsigned k=0;k<10;++k)near(direct.at(k),parsed.at(k));
+      }
+      bool rejected=false;try{affine_frobenius_detail::EpsilonRational nonunivariate(e("x+eps"),1);}
+      catch(const std::domain_error&){rejected=true;}check(rejected,"unsubstituted coefficient parameter accepted by native epsilon evaluator");
+    }
+    {
+      auto compare=[](const auto& a,const auto& b){
+        check(a.rows==b.rows&&a.columns==b.columns&&a.terms.size()==b.terms.size()&&a.wronskian_prefactor==b.wronskian_prefactor&&a.coherent_x_frontier==b.coherent_x_frontier,"projection metadata mismatch");
+        for(std::size_t i=0;i<a.terms.size();++i){const auto& x=a.terms[i];const auto& y=b.terms[i];check(x.row==y.row&&x.column==y.column&&x.log_degree==y.log_degree&&x.power==y.power&&x.slope==y.slope&&x.coefficient==y.coefficient,"univariate projection exact coefficient mismatch");}
+      };
+      for(unsigned mode:{1,2,3})for(const auto& a:std::vector<AffineFrobeniusSeries::Matrix>{
+          {{e("eps/x"),e("1/x")},{e("0"),e("eps/x+(x+eps)/(1-x)")}},
+          {{e("0"),e("0")},{e("1/(1-x)"),e("1/x")}}}) {
+        AffineFrobeniusSeries::Options options;auto generic=AffineFrobeniusSeries::prepare(a,0,1,8,options);
+        options.univariate_epsilon_projection=mode==1;options.cleared_epsilon_projection=mode==2;options.finite_lag_projection=mode==3;auto fast=AffineFrobeniusSeries::prepare(a,0,1,8,options);
+        AffineFrobeniusSeries::Matrix rows{{e("(1+eps)/(x^2*(1+x))"),e("(x+eps)/(3*x*(1-x))")},{e("1/(2-eps)"),e("0")}};
+        compare(generic.project(rows),fast.project(rows));
+        auto g=generic.project_endpoint_domain(rows),f=fast.project_endpoint_domain(rows);compare(g.admissible,f.admissible);
+        check(g.zero_constraints.size()==f.zero_constraints.size(),"univariate projection domain size mismatch");
+        for(std::size_t i=0;i<g.zero_constraints.size();++i){const auto& x=g.zero_constraints[i];const auto& y=f.zero_constraints[i];check(x.row==y.row&&x.power==y.power&&x.log_degree==y.log_degree&&x.coefficients==y.coefficients,"univariate projection domain mismatch");}
+      }
+    }
     Exact x = e("x");
     auto half = B::from_strings("0.5");
     B logx;
     acb_log(logx.raw(), half.raw(), B::precision());
     auto scalar = AffineFrobeniusSeries::prepare({{e("eps/x")}}, 0, 1, 3);
+    {ExactField foreign({"x","eps"});auto corrupted=scalar.terms();corrupted.terms.front().coefficient=Exact(foreign,"eps");bool caught=false;try{scalar.dr_domain(corrupted,false);}catch(const std::invalid_argument&){caught=true;}check(caught,"normalization accepted a coefficient from another exact field");}
     check(scalar.dr_endpoint_constant(scalar.terms())[0][0].is_zero(),
           "x^eps must not be confused with a constant endpoint sector");
     auto integral = scalar.dr_integral_from_zero(

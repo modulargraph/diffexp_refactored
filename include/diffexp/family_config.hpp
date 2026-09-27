@@ -85,7 +85,8 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("max_sources_per_level"))c.preparation.max_sources_per_level=integer(*v,1,100000,"source budget");
   }
   if(auto p=o.if_contains("numerical")) {
-    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap"},"numerical");
+    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap","direct_endpoint_functionals"},"numerical");
+    if(auto v=a.if_contains("direct_endpoint_functionals"))c.numerical.direct_endpoint_functionals=v->as_bool();
     if(auto v=a.if_contains("endpoint_order"))c.numerical.endpoint_order=integer(*v,1,1000,"endpoint order");
     if(auto v=a.if_contains("ordinary_order"))c.numerical.ordinary_order=integer(*v,8,1000,"ordinary order");
     if(auto v=a.if_contains("working_bits"))c.numerical.working_bits=integer(*v,64,1000000,"working bits");
@@ -93,8 +94,9 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("contour_height"))c.numerical.contour_height=rational(*v);
     if(auto v=a.if_contains("overlap"))c.numerical.overlap=rational(*v);
     if(auto v=a.if_contains("transport")) {
-      const auto method=v->as_string();if(method!="auto" && method!="spectral" && method!="taylor")throw std::invalid_argument("unknown FT ordinary transport");
-      c.numerical.ordinary_method=method=="auto"?recursion::OrdinaryMethod::automatic:method=="spectral"?recursion::OrdinaryMethod::spectral:recursion::OrdinaryMethod::taylor;
+      const auto method=v->as_string();if(method!="auto" && method!="spectral" && method!="taylor" && method!="ultraspherical")throw std::invalid_argument("unknown FT ordinary transport");
+      c.numerical.ordinary_method=method=="ultraspherical"?recursion::OrdinaryMethod::ultraspherical:
+        method=="auto"?recursion::OrdinaryMethod::automatic:method=="spectral"?recursion::OrdinaryMethod::spectral:recursion::OrdinaryMethod::taylor;
     }
     if(auto v=a.if_contains("transport_digits"))c.numerical.spectral.accuracy_goal=integer(*v,1,100000,"FT transport digits");
     if(auto v=a.if_contains("method")) {

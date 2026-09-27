@@ -1,5 +1,6 @@
 #include "diffexp/factored_transport.hpp"
 #include <iostream>
+#include <array>
 using namespace diffexp;
 namespace ft=factored_transport;
 namespace lb=linear_boundary;
@@ -19,9 +20,33 @@ int main(){try{
   check(result.physical.leaf_source==source && result.integrated.leaf_source==source,"factored transport replaced shared source");
   for(const auto& value:result.integrated.transform.coefficients[0][0])near(value,B::from_strings("1/4"));
   initial.high=1;initial.coefficients[0][0].resize(2);bool demanded=false;
-  try{(void)ft::evolve({{e("0")}},lb::Expression{initial,source},{{e("1/eps")}}, {e("0"),e("1/4")},1,options);}
+  try{(void)ft::evolve({{e("0")}},lb::Expression{initial,source},{{e("1/eps")}}, {e("0"),e("1/4")},1,{});}
   catch(const ft::MapDemand& demand){demanded=demand.required_high==2;}
   check(demanded,"factored missing upper map coefficients invented as zero");
+  // Physical endpoint composition and observable integration are independent
+  // demands. A pole in the observable must not raise the physical high twice.
+  for(const auto& demand:std::vector<std::array<int,3>>{{4,0,-2},{0,3,-2},{3,0,0},{0,3,0},{-1,-3,-2}}) {
+    const int physical_high=demand[0],integrated_high=demand[1],q=demand[2];
+    const int required=std::max(physical_high,integrated_high-q);
+    auto input=rows(1,1,-2,required);
+    for(int k=input.low;k<=input.high;++k)input.coefficients[0][0][k-input.low]=B(k+4);
+    auto independent=ft::evolve({{e("0")}},lb::Expression{input,source},{{e("1")/e("eps").pow(-q)}},
+        {e("0"),e("1/4")},physical_high,integrated_high,options);
+    check(independent.required_initial_high==required && independent.physical.transform.low==-2 &&
+        independent.physical.transform.high==physical_high && independent.integrated.transform.low==-2+q &&
+        independent.integrated.transform.high==integrated_high,"independent factored map windows changed");
+    check(independent.physical.leaf_source==source && independent.integrated.leaf_source==source,
+        "separate factored windows lost the shared leaf source");
+    for(int k=-2;k<=physical_high;++k)
+      near(independent.physical.transform.coefficients[0][0][k+2],B(k+4));
+    for(int k=-2+q;k<=integrated_high;++k)
+      near(independent.integrated.transform.coefficients[0][0][k+2-q],B(k-q+4)/B(4));
+    --input.high;input.coefficients[0][0].pop_back();bool missing=false;
+    try {(void)ft::evolve({{e("0")}},lb::Expression{input,source},{{e("1")/e("eps").pow(-q)}},
+        {e("0"),e("1/4")},physical_high,integrated_high,options);}
+    catch(const ft::MapDemand& request){missing=request.required_high==required;}
+    check(missing,"separate factored windows silently invented missing coefficients");
+  }
   // Dense rank-one nilpotent connection: A^2=0, so the forward map and
   // integrated observables have exact linear/quadratic analytic formulas.
   std::vector<int> u{1,2,3},v{1,1,-1};

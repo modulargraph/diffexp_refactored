@@ -2,6 +2,7 @@
 #include "diffexp/affine_frobenius.hpp"
 #include "diffexp/deepest_beta.hpp"
 #include <bit>
+#include <chrono>
 #include <flint/acb_mat.h>
 
 namespace diffexp::affine_matching {
@@ -31,6 +32,14 @@ struct Options {
               max_series_cells = 8000000;
   // Operator-only alternative; exact normalization and K0 remain mandatory.
   bool numeric_operator_convolution = false;
+  // Preserve exact epsilon cancellations while removing x from symbolic
+  // normalization when the supplied positive real matchpoint is exact.
+  bool specialize_exact_point = false;
+  // Exact negative-power certificates concern the retained x expansion only.
+  bool certify_operator_principal_part = false;
+  unsigned principal_part_max_depth = 16, principal_part_max_milliseconds = 2000;
+  std::size_t principal_part_max_operations = 200000;
+
 };
 struct Result {
   Status status = Status::Unsupported;
@@ -76,6 +85,19 @@ using Matrix = std::vector<std::vector<Series>>;
 struct Budget {
   Options options;
   std::size_t work = 0;
+  std::optional<Q> exact_x;
+  std::optional<std::chrono::steady_clock::time_point> deadline;
+  void specialize(const B& point) {
+    if(!options.specialize_exact_point||!point.is_finite()||
+       !arb_is_zero(acb_imagref(point.raw()))||!arb_is_exact(acb_realref(point.raw()))||
+       !arb_is_positive(acb_realref(point.raw())))return;
+    fmpq_t q;fmpq_init(q);arf_get_fmpq(q,arb_midref(acb_realref(point.raw())));
+    // Large dyadic points could otherwise create huge exact integer powers.
+    if(fmpz_bits(fmpq_numref(q))<=4096&&fmpz_bits(fmpq_denref(q))<=4096){
+      char* text=fmpq_get_str(nullptr,10,q);exact_x.emplace(text);flint_free(text);
+    }
+    fmpq_clear(q);
+  }
   void series_cells(std::size_t rows, std::size_t columns,
                     std::size_t depth) const {
     auto limit = options.max_series_cells;
@@ -84,6 +106,8 @@ struct Budget {
       throw std::length_error("affine matching series-cell budget exhausted");
   }
   void spend(std::size_t n = 1) {
+    if (deadline && std::chrono::steady_clock::now() >= *deadline)
+      throw std::length_error("affine principal-part time budget exhausted");
     if (n > options.max_exact_operations - work)
       throw std::length_error(
           "affine matching exact-operation budget exhausted");
@@ -202,8 +226,8 @@ inline Matrix coefficients(const AffineFrobeniusSeries::Expansion &expansion,
                            const std::vector<long> &shifts, unsigned top,
                            Budget &budget) {
   unsigned d = expansion.rows;
-  budget.series_cells(d, d, static_cast<std::size_t>(top) + 1);
-  Matrix out(d, std::vector<Series>(d, Series(top + 1)));
+  budget.series_cells(d, expansion.columns, static_cast<std::size_t>(top) + 1);
+  Matrix out(d, std::vector<Series>(expansion.columns, Series(top + 1)));
   for (auto &t : expansion.terms) {
     auto [val, c] = rational_coefficients(t.coefficient, top);
     long start = val - shifts[t.column];
@@ -411,7 +435,7 @@ inline B evaluate_exact(const Exact &value, const B &point) {
 }
 inline Exact as_exact(const Polynomial &p, const Q &column_power,
                       const Exact &zero, Budget &budget) {
-  auto out = zero, x = zero.variable(0), ell = zero.variable(1);
+  auto out = zero, x = budget.exact_x?zero.constant(*budget.exact_x):zero.variable(0), ell = zero.variable(1);
   for (auto &[key, q] : p) {
     budget.spend();
     auto exponent = key.first - column_power;
@@ -435,10 +459,10 @@ exact_coefficients(const AffineFrobeniusSeries &series,
                    const Exact &zero, Budget &budget) {
   auto symbolic = coefficients(physical, shifts, top, budget);
   unsigned d = physical.rows;
-  ExactSeries out(top + 1, fuchsify::detail::zeros(d, d, zero));
+  ExactSeries out(top + 1, fuchsify::detail::zeros(d, physical.columns, zero));
   for (unsigned n = 0; n <= top; ++n)
     for (unsigned i = 0; i < d; ++i)
-      for (unsigned j = 0; j < d; ++j)
+      for (unsigned j = 0; j < physical.columns; ++j)
         out[n][i][j] = as_exact(symbolic[i][j][n], series.exponents()[j].power,
                                 zero, budget);
   return out;
@@ -774,7 +798,7 @@ inline Result match(const AffineFrobeniusSeries &series,
       }
       return r;
     };
-    Budget budget{options};
+    Budget budget{options};budget.specialize(point);
     auto valuations = series.valuation_metadata(physical);
     auto shifts = valuations.minimum_by_column;
     for (auto v : shifts)

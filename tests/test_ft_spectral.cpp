@@ -1,4 +1,5 @@
 #include "diffexp/ft_spectral.hpp"
+#include "diffexp/ft_spectral_checkpoint.hpp"
 #include <iostream>
 using namespace diffexp;
 using B=Jet::Ball;
@@ -83,5 +84,57 @@ int main(){try {
  auto coarse=options;coarse.max_nodes=16;
  require(!ft_spectral::try_transport({{zero}},{0,0,{{{B(0)}}}},{{aliased}},{zero,one},coarse,stats),"aliased polynomial source accepted below degree");
  require(!ft_spectral::try_transport({{one/eps}},{0,0,{{{B(1)}}}},{{zero}},{zero,one},options,stats),"negative epsilon connection accepted");
+ // At a fixed node cap, subdivision must recover the same exponential.
+ auto split=options;split.max_nodes=16;split.accuracy_goal=20;split.max_subdivisions=64;split.seconds_budget=20;
+ LaurentRows exp_initial{0,0,{{{B(1)}}}};
+ auto unsplit=split;unsplit.max_subdivisions=0;
+ require(!ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},unsplit,stats),"coarse unsplit exponential unexpectedly resolved");
+ auto divided=ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},split,stats);
+ require(bool(divided),"subdivision exponential: "+stats.reason);
+ near(divided->coefficients[0][0][0],expone,"subdivided exponential oracle");
+ require(stats.subdivisions>0&&stats.accepted_subsegments==stats.subdivisions+1&&stats.legs==1,"subdivision diagnostics");
+ auto key=ft_spectral_checkpoint::identity({{-one}},exp_initial,{{zero}},{zero,one},split);
+ require(key!=ft_spectral_checkpoint::identity({{-one}},exp_initial,{{zero}},{zero,one},unsplit),"subdivision checkpoint identity collision");
+ auto payload=ft_spectral_checkpoint::detail::encode(*divided,key,stats);
+ boost::json::object envelope{{"payload",payload},{"sha256",artifacts::detail::sha256(artifacts::detail::canonical(payload))}};
+ ft_spectral::Diagnostics restored;
+ auto restored_rows=ft_spectral_checkpoint::detail::decode(boost::json::parse(boost::json::serialize(envelope)),key,exp_initial,0,1,split,restored);
+ require(restored.subdivisions==stats.subdivisions&&restored.accepted_subsegments==stats.accepted_subsegments,"subdivision checkpoint diagnostics");
+ near(restored_rows.coefficients[0][0][0],expone,"subdivision checkpoint result");
+ // A near-interior complex pole is not cured by endpoint clustering.
+ auto near_pole=one/one.constant(2)+imag/one.constant(64);
+ auto nearby=split;nearby.max_nodes=32;nearby.endpoint_clustering=true;
+ auto nearby_unsplit=nearby;nearby_unsplit.max_subdivisions=0;
+ LaurentRows zero_initial{0,0,{{{B(0)}}}};
+ require(!ft_spectral::try_transport({{zero}},zero_initial,{{one/(x-near_pole)}},{zero,one},nearby_unsplit,stats),"near-interior pole unexpectedly resolved without splitting");
+ auto near_result=ft_spectral::try_transport({{zero}},zero_initial,{{one/(x-near_pole)}},{zero,one},nearby,stats);
+ require(bool(near_result),"near-interior subdivision: "+stats.reason);
+ B pball=B::from_strings("1/2","1/64"),logleft,logright;
+ acb_log(logleft.raw(),(-pball).raw(),256);acb_log(logright.raw(),(B(1)-pball).raw(),256);
+ near(near_result->coefficients[0][0][0],logright-logleft,"near-interior logarithmic integral");
+ require(stats.subdivisions>0,"near-interior subdivision missing");
+ auto bounded=split;bounded.max_subdivisions=1;bounded.accuracy_goal=40;
+ require(!ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},bounded,stats)&&stats.subdivisions<=1,"subdivision count bound ignored");
+ // Existing uncertainty between local and whole-arm budgets must survive.
+ auto inherited_options=options;inherited_options.accuracy_goal=40;inherited_options.max_subdivisions=64;
+ LaurentRows inherited{0,0,{{{B(1)}}}};
+ arb_add_error_2exp_si(acb_realref(inherited.coefficients[0][0][0].raw()),-146);
+ const auto inherited_before=inherited.coefficients[0][0][0];
+ auto inherited_result=ft_spectral::try_transport({{zero}},inherited,{{zero}},{zero,one},inherited_options,stats);
+ require(bool(inherited_result),"inherited sub-global uncertainty rejected: "+stats.reason);
+ require(arb_contains(acb_realref(inherited_result->coefficients[0][0][0].raw()),acb_realref(inherited_before.raw())),"inherited uncertainty stripped");
+ require(acb_equal(inherited_before.raw(),inherited.coefficients[0][0][0].raw()),"input radii modified");
+ arb_add_error_2exp_si(acb_realref(inherited.coefficients[0][0][0].raw()),-130);
+ inherited_options.max_subdivisions=1;
+ require(!ft_spectral::try_transport({{zero}},inherited,{{zero}},{zero,one},inherited_options,stats),"above-global inherited uncertainty accepted");
+ auto zero_goal=split;zero_goal.accuracy_goal=0;
+ require(!ft_spectral::try_transport({{zero}},exp_initial,{{zero}},{zero,one},zero_goal,stats),"subdivision accepted zero accuracy goal");
+ auto contour_split=ft_spectral::try_transport({{-one/(x.constant(2)*x)}},exp_initial,{{zero}},{one,imag,-one,-imag,one},split,stats);
+ require(bool(contour_split),stats.reason);near(contour_split->coefficients[0][0][0],B(-1),"adaptive original-leg branch continuation");
+ require(stats.legs==4&&stats.accepted_subsegments==4+stats.subdivisions,"adaptive original-leg count");
+ auto timed=split;timed.seconds_budget=1e-12;
+ require(!ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},timed,stats),"total subdivision time bound ignored");
+ require(!ft_spectral::try_transport({{-one/(x-one/one.constant(3))}},exp_initial,{{zero}},{zero,one},split,stats)&&stats.subdivisions==0,"subdivision hid a true path pole");
+ require(!ft_spectral::try_transport({{one/eps}},exp_initial,{{zero}},{zero,one},split,stats)&&stats.subdivisions==0,"subdivision retried structural unsupported input");
  std::cout<<"FT spectral gauges, SCC ordering, Laurent windows, branches and fallback passed\n";
  }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

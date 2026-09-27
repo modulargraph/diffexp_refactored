@@ -37,8 +37,8 @@ int main(){try{
   auto md=series.dr_domain(mixed,false);require(md.zero_constraints.size()==1 && md.zero_constraints[0].coefficients==std::vector<Exact>{one,-one},"domain split lost cancellation between fundamental columns");
   require(series.dr_endpoint_constant(series.contract(mixed,{one,one}))[0][0]==one,"exact physical contraction lost finite limit");
   for(auto operation:{feynman::Operation::LowerLimit,feynman::Operation::UpperLimit,feynman::Operation::BetaIntegral})
-    for(int method=0;method<3;++method) {
-      auto graph=model(operation);recursion::NumericalOptions options;options.endpoint_order=12;options.ordinary_order=32;
+    for(int method=0;method<3;++method)for(int projection=0;projection<3;++projection) {
+      auto graph=model(operation);recursion::NumericalOptions options;options.endpoint_order=12;options.ordinary_order=32;options.endpoint.cleared_epsilon_projection=projection==1;options.endpoint.finite_lag_projection=projection==2;
       options.observable_adjoint=method!=0;options.linear_method=method==2?recursion::LinearMethod::factored:recursion::LinearMethod::adjoint;
       recursion::Evaluator evaluator(graph,options);auto actual=evaluator.evaluate(0);auto leaf=evaluator.evaluate(1,0);
       require(actual.values.size()==1 && !actual.taylor_tail_certified,"domain auxiliaries leaked into physical outputs or certification");

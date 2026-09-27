@@ -36,6 +36,17 @@ class Rational {
 
   [[nodiscard]] bool is_zero() const { return fmpq_is_zero(value_); }
   [[nodiscard]] int sign() const { return fmpq_sgn(value_); }
+  // Borrowed read-only FLINT value; its lifetime is that of this owner.
+  const fmpq* raw() const { return value_; }
+  static Rational from_fmpq(const fmpq* value) {
+    if (fmpz_is_zero(fmpq_denref(value)))
+      throw std::domain_error("rational denominator is zero");
+    Rational out; fmpq_set(out.value_, value); fmpq_canonicalise(out.value_);
+    return out;
+  }
+  static Rational from_integer(const fmpz* value) {
+    Rational out; fmpq_set_fmpz(out.value_, value); return out;
+  }
   [[nodiscard]] std::string str() const {
     char* raw = fmpq_get_str(nullptr, 10, value_);
     if (raw == nullptr) throw std::bad_alloc();

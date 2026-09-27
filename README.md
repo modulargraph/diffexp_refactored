@@ -14,7 +14,9 @@ names directly.
 [Build and install](#build) · [Feynman-trick recursion](#feynman-trick-recursion) ·
 [Examples and timings](#examples-and-validation) ·
 [AMFlow 2.0 comparison](docs/amflow-comparison.md) ·
-[Built-in IBP Solver](docs/ibp-solver.md)
+[Built-in IBP Solver](docs/ibp-solver.md) ·
+[Transport backend design](docs/backend-review-implementation.md) ·
+[Epsilon scheduling and basis search](docs/epsilon-demand-design.md)
 
 ## Mathematica: DiffExp1-style workflow
 

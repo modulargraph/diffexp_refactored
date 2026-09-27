@@ -9,14 +9,16 @@ struct Options {
   fs::path executable,cache_directory;
   using SampleProvider=std::function<fire::Result(const std::vector<ibp::Integral>&,const std::vector<modular::Word>&,modular::Word,const fire::Options&)>;
   SampleProvider sample_provider,validation_provider;
-  bool sparse_lifting=false;
+  bool sparse_lifting=false,degree_slices=false;
   std::function<modular::Word(unsigned)> modulus=modular::prime;
   std::string provider_identity="FIRE7p",prime_table="FIRE7-primes-1-through-16";
   unsigned max_degree=16,max_primes=8,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
+  std::size_t sample_checkpoint_interval=1;
   std::function<void(const std::string&)> progress;
 };
 namespace detail {
+struct SliceFailure:std::runtime_error {using std::runtime_error::runtime_error;};
 inline void publish(const fs::path& target,const std::string& bytes) {
   fs::create_directories(target.parent_path());auto name=target.string()+".new.XXXXXX";
   std::vector<char> tmp(name.begin(),name.end());tmp.push_back(0);int fd=mkstemp(tmp.data());
@@ -67,8 +69,9 @@ class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>32||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
+    if(!options_.sample_checkpoint_interval||options_.sample_checkpoint_interval>4096)throw std::invalid_argument("modular checkpoint interval must be 1..4096");
     if(!exact_batches.empty())exact_batches_=std::make_unique<fire_batch::Cache>(std::move(exact_batches));
   }
   fire::Result operator()(const std::vector<ibp::Integral>& requested,const fire::Options& limits) {
@@ -84,6 +87,7 @@ class Session {
       // Preserve existing FIRE sample/checkpoint identities. Native providers
       // additionally bind their implementation and seed policy.
       if(options_.sample_provider||options_.provider_identity!="FIRE7p")identity_input["provider"]=options_.provider_identity;
+      if(options_.degree_slices)identity_input["degree_discovery"]="coordinate-slices-v1";
       const auto identity=artifacts::detail::sha256(artifacts::detail::canonical(identity_input));
       result.directory=fs::absolute(options_.cache_directory)/identity;fs::create_directories(result.directory);
       detail::publish(result.directory/"family.start",source);
@@ -124,11 +128,20 @@ class Session {
       std::size_t fresh=0,hits=0;
       auto probe=[&](unsigned prime_index,std::size_t ordinal)->detail::Probe {
         remaining();auto point=modular::point(field_.variables().size(),prime_index,ordinal);
+        // Reserve a disjoint range for one-coordinate discovery slices. Every
+        // cached sample still records and verifies its complete actual point.
+        if(options_.degree_slices&&ordinal>=50000&&ordinal<54000){
+          const auto axis=(ordinal-50000)/1000;
+          if(axis>=active.size())throw std::invalid_argument("degree slice axis");
+          auto anchor=modular::point(field_.variables().size(),prime_index,50000+1000*axis);
+          anchor[active[axis]]=point[active[axis]];point=std::move(anchor);
+        }
         // An unused symbol is absent from the complete native IBP input, not
         // merely absent at one specialization. Keep its coordinate explicit.
         for(std::size_t i=0;i<point.size();++i)if(std::find(active.begin(),active.end(),i)==active.end())point[i]=3;
         fire::ModularPoint input;input.prime_index=prime_index;for(auto value:point)input.values.push_back(value);
         const auto path=result.directory/("sample-"+std::to_string(prime_index)+"-"+std::to_string(ordinal)+".json");
+        const bool retain=ordinal>=100000||ordinal%options_.sample_checkpoint_interval==0;
         json::array coordinates;for(auto value:point)coordinates.emplace_back(std::to_string(value));
         json::object payload;std::optional<std::map<ibp::Integral,ibp::Relation>> fresh_rows;
         if(fs::exists(path)) {payload=detail::read(path);++hits;}
@@ -138,11 +151,14 @@ class Session {
           opts.timeout_seconds=std::min(options_.probe_timeout_seconds,remaining());
           const auto& provider=ordinal>=100000&&options_.validation_provider?options_.validation_provider:options_.sample_provider;
           auto reduced=provider?provider(requested,point,options_.modulus(prime_index),opts):fire::reduce(basis_,dimension_,field_,requested,opts,nullptr,nullptr,false,&input);
-          if(!reduced.success)throw std::runtime_error("finite-field probe failed: "+reduced.reason);
+          if(!reduced.success){
+            if(options_.degree_slices&&ordinal>=50000&&ordinal<54000)throw detail::SliceFailure("coordinate probe failed: "+reduced.reason);
+            throw std::runtime_error("finite-field probe failed: "+reduced.reason);
+          }
           fire_batch::validate(reduced,basis_,dimension_,requested);
-          auto tables=provider?detail::table(reduced.reductions,symbols):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
+          auto tables=provider?(retain?detail::table(reduced.reductions,symbols):std::string{}):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
           payload={{"schema","DiffExp3.ModularSample/v1"},{"identity",identity},{"prime_index",prime_index},{"modulus",std::to_string(options_.modulus(prime_index))},{"point",coordinates},{"tables",tables},{"directory",reduced.directory.string()}};
-          detail::save(path,payload);if(provider)fresh_rows=std::move(reduced.reductions);++fresh;
+          if(retain)detail::save(path,payload);if(provider)fresh_rows=std::move(reduced.reductions);++fresh;
         }
         if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(prime_index))||payload.at("prime_index").to_number<unsigned>()!=prime_index)
           throw std::runtime_error("modular sample identity, point or prime mismatch");
@@ -160,15 +176,48 @@ class Session {
         }return out;
       };
       std::size_t count=8;
+      bool sliced=false;
+      std::map<detail::Key,modular::Ansatz> boxes;
+      std::map<detail::Key,modular::Image> discovered;
       for(;;) {
         while(probes.size()<count)probes.push_back(probe(1,probes.size()));
         terminal=detail::masters(probes.front());std::set<detail::Key> all_keys;
         for(const auto& p:probes)for(const auto& [a,row]:p.rows)for(const auto& [b,c]:row)all_keys.emplace(a,b);
         keys.assign(all_keys.begin(),all_keys.end());auto samples=flatten(probes,1);images.clear();
-        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::discover(samples,i,active.size(),options_.max_degree,options_.modulus(1));if(!image)break;images.push_back(std::move(*image));}
+        bool complete=true;
+        for(std::size_t i=0;i<keys.size();++i){remaining();std::optional<modular::Image> image;
+          if(auto old=discovered.find(keys[i]);old!=discovered.end()){
+            bool valid=true;for(const auto& sample:samples)if(modular::evaluate(old->second,sample.point,options_.modulus(1))!=std::optional<modular::Word>(sample.coefficients[i])){valid=false;break;}
+            if(valid)image=old->second;else discovered.erase(old);
+          }
+          if(!image)if(auto box=boxes.find(keys[i]);box!=boxes.end())image=modular::fit_with_holdouts(samples,i,box->second,options_.modulus(1));
+          if(!image)image=modular::discover(samples,i,active.size(),options_.max_degree,options_.modulus(1));
+          if(image){discovered.insert_or_assign(keys[i],modular::compact_support(*image));images.push_back(std::move(*image));}else complete=false;
+        }
         detail::save(result.directory/"progress.json",{{"schema","DiffExp3.ModularProgress/v1"},{"identity",identity},{"stage","degree-discovery"},{"samples_per_prime",probes.size()},{"coefficients",keys.size()},{"discovered",images.size()},{"fresh_samples",fresh},{"reused_samples",hits}});
         status("modular samples "+std::to_string(probes.size())+", reconstructed shapes "+std::to_string(images.size())+"/"+std::to_string(keys.size()));
-        if(images.size()==keys.size())break;
+        if(complete)break;
+        if(options_.degree_slices&&!sliced&&active.size()>1&&active.size()<=4){
+          sliced=true;std::vector<std::vector<std::optional<modular::Image>>> axes;bool valid=true;
+          for(std::size_t axis=0;axis<active.size()&&valid;++axis){
+            std::vector<detail::Probe> line;std::size_t wanted=8;std::vector<std::optional<modular::Image>> shapes(keys.size());
+            const auto maximum=std::min<std::size_t>(2*options_.max_degree+4,options_.max_samples_per_prime);
+            for(;;){
+              try{while(line.size()<wanted){auto sample=probe(1,50000+1000*axis+line.size());if(detail::masters(sample)!=terminal){valid=false;break;}line.push_back(std::move(sample));}}
+              catch(const detail::SliceFailure& e){status(std::string(e.what())+"; using multivariate discovery");valid=false;}
+              if(!valid)break;auto slice=flatten(line,1);for(auto& s:slice)s.point={s.point[axis]};std::size_t found=0;
+              for(std::size_t i=0;i<keys.size();++i){remaining();
+                if(shapes[i])for(const auto& sample:slice)if(modular::evaluate(*shapes[i],sample.point,options_.modulus(1))!=std::optional<modular::Word>(sample.coefficients[i])){shapes[i].reset();break;}
+                if(!shapes[i])shapes[i]=modular::discover(slice,i,1,options_.max_degree,options_.modulus(1));
+                found+=shapes[i].has_value();
+              }
+              if(found==keys.size()||wanted==maximum){status("coordinate "+std::to_string(axis)+" degrees "+std::to_string(found)+"/"+std::to_string(keys.size()));break;}wanted=std::min(2*wanted,maximum);
+            }
+            if(valid)axes.push_back(std::move(shapes));
+          }
+          if(valid)for(std::size_t i=0;i<keys.size();++i){std::vector<modular::Image> slice;for(const auto& axis:axes){if(!axis[i])break;slice.push_back(*axis[i]);}if(slice.size()==active.size())if(auto box=modular::degree_box(slice,options_.max_degree))boxes.emplace(keys[i],std::move(*box));}
+          status("coordinate degree hypotheses "+std::to_string(boxes.size())+"/"+std::to_string(keys.size()));
+        }
         if(count==options_.max_samples_per_prime)throw std::runtime_error("modular sample/degree budget exhausted; progress retained");
         count=std::min(count*2,options_.max_samples_per_prime);
       }

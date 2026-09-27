@@ -19,6 +19,8 @@ int main(){try{
   auto fresh=ca::prepare_legacy(a,0,1,8,options,store);
   require(!fresh.cache_hit && !fresh.series.terms().omitted_tail_certified,"first preparation or tail claim");
   auto hit=ca::prepare_legacy(a,0,1,8,options,store);require(hit.cache_hit && hit.content_id==fresh.content_id,"verified cache not reused");same(fresh.series,hit.series);
+  ca::VerificationLimits dense;dense.dense_epsilon_polynomials=true;
+  same(fresh.series,ca::prepare_legacy(a,0,1,8,options,store,dense).series);
   auto key=ca::identity(a,0,1,8,options);auto record=store.read(key,fresh.content_id);
   require(record.certificate.type=="exact" && record.certificate.scope==ca::detail::scope,"incorrect retained-only certificate");
   ExactField second({"x","eps"});auto make2=[&](const char* s){return Exact(second,s);};
@@ -44,6 +46,7 @@ int main(){try{
     ar::Store corrupt(path/("bad-"+std::to_string(++id)));auto payload=record.payload;change(payload.as_object());
     corrupt.put(key,record.guarantee,payload,record.certificate);
     rejects([&]{ca::prepare_legacy(a,0,1,8,options,corrupt);},why);
+    rejects([&]{ca::prepare_legacy(a,0,1,8,options,corrupt,dense);},why);
   };
   tamper([](auto& p){p.at("terms").as_array().back().as_object()["coefficient"]="123";},"valid hashes hid incorrect retained coefficient");
   tamper([](auto& p){p.at("terms").as_array().erase(p.at("terms").as_array().begin());},"missing seeded solution accepted");
@@ -61,6 +64,11 @@ int main(){try{
   scalar_payload.as_object().at("terms").as_array()[0].as_object()["coefficient"]="2";
   ar::Store wrong_constant(path/"constant");wrong_constant.put(scalar_key,scalar_record.guarantee,scalar_payload,scalar_record.certificate);
   rejects_with([&]{ca::prepare_legacy(scalar,0,1,4,options,wrong_constant);},"resonant integration constant","ODE-compatible wrong integration constant was not rejected by normalization");
+  rejects_with([&]{ca::prepare_legacy(scalar,0,1,4,options,wrong_constant,dense);},"resonant integration constant","dense verifier accepted wrong constant");
+  auto dense_work=dense;dense_work.max_term_products=1;
+  rejects([&]{ca::prepare_legacy(a,0,1,8,options,store,dense_work);},"dense work cap bypassed");
+  dense_work=dense;dense_work.max_total_column_terms=1;
+  rejects([&]{ca::prepare_legacy(a,0,1,8,options,store,dense_work);},"dense storage cap bypassed");
   // Explicitly unverified checkpoint recovery still performs the full check.
   ar::Store checkpoint(path/"checkpoint");checkpoint.put(key,record.guarantee,record.payload);
   auto recovered=ca::prepare_legacy(a,0,1,8,options,checkpoint);require(recovered.cache_hit,"durable unverified checkpoint not recovered");same(fresh.series,recovered.series);
@@ -81,8 +89,24 @@ int main(){try{
       {"row",1},{"column",0},{"log_degree",0},{"power","1"},{"slope","0"},{"coefficient","1"}});
   ar::Store wrong_resonance(path/"positive-resonance");wrong_resonance.put(resonance_key,resonance_record.guarantee,resonance_payload,resonance_record.certificate);
   rejects_with([&]{ca::prepare_legacy(resonance,0,1,8,options,wrong_resonance);},"resonant integration constant","ODE-compatible positive-order resonance was not rejected by normalization");
+  same(resonant.series,ca::prepare_legacy(resonance,0,1,8,options,store,dense).series);
+  rejects_with([&]{ca::prepare_legacy(resonance,0,1,8,options,wrong_resonance,dense);},"resonant integration constant","dense verifier accepted wrong resonant constant");
   AffineFrobeniusSeries::Matrix moving{{e("eps/x+1/(x+eps)")}};
   auto moving_first=ca::prepare_legacy(moving,0,1,4,options,store);require(!moving_first.series.terms().wronskian_prefactor,"moving-pole Wronskian falsely certified");
   require(ca::prepare_legacy(moving,0,1,4,options,store).cache_hit,"moving epsilon pole cache reuse failed");
+  same(moving_first.series,ca::prepare_legacy(moving,0,1,4,options,store,dense).series);
+  // Rational scalar denominators, mixed x/epsilon polynomials and reversed
+  // variable order exercise conversion independently of the recurrence.
+  AffineFrobeniusSeries::Matrix mixed{{e("eps/(3*x)+(eps^2+2*x)/(7*(1+x+x^2))"),e("(eps+1)/(2*(1-x))")},{e("0"),e("(eps+1)/x+(x+eps)/(3*(2-x))")}};
+  auto mixed_first=ca::prepare_legacy(mixed,0,1,7,options,store);
+  same(mixed_first.series,ca::prepare_legacy(mixed,0,1,7,options,store,dense).series);
+  auto reverse_first=ca::prepare_legacy(reverse,1,0,8,options,store);
+  same(reverse_first.series,ca::prepare_legacy(reverse,1,0,8,options,store,dense).series);
+  auto mixed_key=ca::identity(mixed,0,1,7,options);auto mixed_record=store.read(mixed_key,mixed_first.content_id);
+  auto mixed_payload=mixed_record.payload;
+  auto& last=mixed_payload.as_object().at("terms").as_array().back().as_object();
+  last["coefficient"]="("+std::string(last.at("coefficient").as_string())+")+eps^9/13";
+  ar::Store mixed_bad(path/"mixed-bad");mixed_bad.put(mixed_key,mixed_record.guarantee,mixed_payload,mixed_record.certificate);
+  rejects_with([&]{ca::prepare_legacy(mixed,0,1,7,options,mixed_bad,dense);},"polynomial residual","dense verifier accepted highest-order epsilon corruption");
   std::cout<<"Cached affine preparation: durable reuse, fresh fields, receiving caps, exact polynomial residuals, resonance normalization, metadata and valid-hash tampering rejection passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace diffexp::data {
 // Data-only reader for published ancillary expressions. No evaluator, kernel,
@@ -62,12 +63,19 @@ class Reader {
   }
   bool take(const std::string& token) {if(token_!=token)return false;next();return true;}
   void need(const std::string& token) {if(!take(token))fail("unexpected token");}
+  template<class... Children>
+  static Expr node(std::string head,Children&&... children) {
+    // initializer_list elements are const: vector would recursively copy each
+    // subtree even when its initializer uses std::move. Move directly instead.
+    Expr out{std::move(head),{}};out.args.reserve(sizeof...(Children));
+    (out.args.push_back(std::forward<Children>(children)),...);return out;
+  }
   Expr rule() {
-    auto e=add(); if(take("->")) return {"Rule",{std::move(e),rule()}}; return e;
+    auto e=add(); if(take("->")) return node("Rule",std::move(e),rule()); return e;
   }
   Expr add() {
     auto e=product();
-    while(token_=="+" || token_=="-") {auto op=token_;next();e={op,{std::move(e),product()}};}
+    while(token_=="+" || token_=="-") {auto op=token_;next();e=node(op,std::move(e),product());}
     return e;
   }
   bool primary_start() const {
@@ -79,15 +87,15 @@ class Reader {
     while(token_=="*" || token_=="/" || primary_start()) {
       auto op=token_=="/"?"/":"*";
       if(token_=="/" || token_=="*") next();
-      e={op,{std::move(e),unary()}};
+      e=node(op,std::move(e),unary());
     }
     return e;
   }
   Expr unary() {
     if(take("+"))return unary();
-    if(take("-"))return {"neg",{unary()}};
+    if(take("-"))return node("neg",unary());
     auto e=primary();
-    if(take("^"))return {"^",{std::move(e),unary()}};
+    if(take("^"))return node("^",std::move(e),unary());
     return e;
   }
   Expr primary() {

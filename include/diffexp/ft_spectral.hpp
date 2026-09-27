@@ -12,13 +12,15 @@ struct Options {
            max_block_nodes = 256;
   std::size_t max_cells = 2000000;
   double seconds_budget = 15;
+  unsigned max_subdivisions = 0;
 };
 struct Diagnostics {
   std::vector<unsigned> block_sizes, nodes;
   unsigned normalized_diagonals = 0, clustered_legs = 0;
   unsigned legs = 0, factorizations = 0, absolute_stability_components = 0;
   double preparation_seconds = 0, numerical_seconds = 0;
-  std::string reason;
+  std::string reason, last_failure;
+  unsigned subdivisions = 0, accepted_subsegments = 0;
 };
 namespace detail {
 struct Edge {
@@ -117,10 +119,10 @@ inline B scale(const B &value) { return B(1) + transport::magnitude(value); }
 // once per resolution; epsilon-positive terms and preceding blocks form known
 // right-hand sides. The same operators act on every observable row.
 inline std::optional<LaurentRows>
-try_transport(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
+try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
               const ExactEpsilonMatrix &forcing,
               const std::vector<Exact> &vertices, const Options &options,
-              Diagnostics &diagnostics) {
+              Diagnostics &diagnostics, unsigned arithmetic_accuracy_goal = 0) {
   using namespace detail;
   diagnostics = {};
   auto started = std::chrono::steady_clock::now();
@@ -185,6 +187,12 @@ try_transport(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
         }
     auto tolerance =
         B::from_strings("1e-" + std::to_string(options.accuracy_goal + 2));
+    // A subdivided arm spends a stricter local discretization budget, but
+    // inherited enclosures are tested against the unchanged whole-arm goal.
+    // Never discard input radii or classify them as new discretization error.
+    const auto arithmetic_tolerance=arithmetic_accuracy_goal
+        ? B::from_strings("1e-"+std::to_string(arithmetic_accuracy_goal+2))
+        : tolerance;
     B floor(1);
     acb_mul_2exp_si(floor.raw(), floor.raw(), 16 - bits);
     std::vector<DiagonalLogGaugeResult> gauges(d);
@@ -624,9 +632,9 @@ try_transport(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
               tails[i] = sp::upper(
                   B(16) * (previous_difference[i] + difference[i]) + roundoff);
             }
-            if (!sp::le(transport::arithmetic_error(values[i]) +
-                            B(2) * tails[i],
-                        tolerance * scale(values[i])))
+            if (!sp::le(B(2)*tails[i],tolerance*scale(values[i])) ||
+                !sp::le(transport::arithmetic_error(values[i])+B(2)*tails[i],
+                        arithmetic_tolerance*scale(values[i])))
               converged = false;
           }
           if (converged) {
@@ -665,5 +673,70 @@ try_transport(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
     diagnostics.numerical_seconds = elapsed() - preparing;
     return std::nullopt;
   }
+}
+// Subdivision changes only the parametrization of each original straight leg.
+// Failed attempts never update the accepted state. No pole/structural rejection
+// is retried; every child goes through the complete original geometry checks.
+inline std::optional<LaurentRows>
+try_transport(const ExactEpsilonMatrix& matrix,const LaurentRows& initial,
+              const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,
+              const Options& options,Diagnostics& diagnostics) {
+  if(!options.max_subdivisions)
+    return try_transport_single(matrix,initial,forcing,vertices,options,diagnostics);
+  diagnostics={};
+  if(options.max_subdivisions>4096 || vertices.empty() ||
+     !std::isfinite(options.seconds_budget) || options.seconds_budget<=0 ||
+     !options.accuracy_goal || options.accuracy_goal>100000) {
+    diagnostics.reason="FT spectral subdivision/options budget";return std::nullopt;
+  }
+  if(std::adjacent_find(vertices.begin(),vertices.end(),[](const Exact& a,const Exact& b){return a!=b;})==vertices.end())
+    return try_transport_single(matrix,initial,forcing,vertices,options,diagnostics);
+  const auto started=std::chrono::steady_clock::now();
+  auto elapsed=[&]{return std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();};
+  auto fail=[&](const std::string& reason)->std::optional<LaurentRows>{diagnostics.reason=reason;return std::nullopt;};
+  Options local=options;local.max_subdivisions=0;
+  // A decimal reserve distributes a conservative local accuracy target over
+  // the maximum number of accepted segments; propagated balls remain intact.
+  std::size_t segments=vertices.size()-1+options.max_subdivisions;
+  unsigned reserve=1;for(auto n=segments;n>1;n=(n+9)/10)++reserve;
+  local.accuracy_goal+=reserve;
+  LaurentRows state=initial;
+  try {
+    for(std::size_t leg=0;leg+1<vertices.size();++leg) {
+      if(vertices[leg]==vertices[leg+1])continue;
+      std::vector<std::pair<Exact,Exact>> pending{{vertices[leg],vertices[leg+1]}};
+      while(!pending.empty()) {
+        local.seconds_budget=options.seconds_budget-elapsed();
+        if(local.seconds_budget<=0)return fail("FT spectral total subdivision time budget exhausted");
+        auto segment=std::move(pending.back());pending.pop_back();Diagnostics attempt;
+        auto value=try_transport_single(matrix,state,forcing,{segment.first,segment.second},local,attempt,options.accuracy_goal);
+        diagnostics.preparation_seconds+=attempt.preparation_seconds;
+        diagnostics.numerical_seconds+=attempt.numerical_seconds;
+        diagnostics.factorizations+=attempt.factorizations;
+        if(elapsed()>options.seconds_budget)return fail("FT spectral total subdivision time budget exhausted");
+        if(value) {
+          state=std::move(*value);++diagnostics.accepted_subsegments;
+          diagnostics.nodes.insert(diagnostics.nodes.end(),attempt.nodes.begin(),attempt.nodes.end());
+          diagnostics.block_sizes.insert(diagnostics.block_sizes.end(),attempt.block_sizes.begin(),attempt.block_sizes.end());
+          diagnostics.normalized_diagonals=std::max(diagnostics.normalized_diagonals,attempt.normalized_diagonals);
+          diagnostics.clustered_legs+=attempt.clustered_legs;
+          diagnostics.absolute_stability_components+=attempt.absolute_stability_components;
+          continue;
+        }
+        diagnostics.last_failure=attempt.reason;
+        const bool retry=attempt.reason=="FT spectral resolution or arithmetic accuracy exhausted" ||
+                         attempt.reason=="FT spectral interval too close to singularities";
+        if(!retry)return fail(attempt.reason);
+        if(diagnostics.subdivisions>=options.max_subdivisions)
+          return fail("FT spectral subdivision count exhausted: "+attempt.reason);
+        const auto midpoint=(segment.first+segment.second)/segment.first.constant(2);
+        ++diagnostics.subdivisions;
+        pending.emplace_back(midpoint,segment.second);
+        pending.emplace_back(segment.first,midpoint);
+      }
+      ++diagnostics.legs;
+    }
+    return state;
+  }catch(const std::exception& error){return fail(error.what());}
 }
 } // namespace diffexp::ft_spectral

@@ -52,6 +52,25 @@ The epsilon-zero dependency graph is decomposed into strongly connected blocks. 
 
 At each Chebyshev resolution, a block operator is factored once and reused for every epsilon coefficient and observable row. Scalar blocks whose diagonal was removed share one integration inverse, including across path legs. Rational coefficients are compiled into polynomial arrays once and sampled numerically, avoiding repeated expression interpretation.
 
+Endpoint matching also checks the determinant valuation independently of the
+retained series. A rational basis change can introduce moving poles at
+`x + c*epsilon = 0`. For a receiving frame `G F`, the implementation verifies
+the exact trace identity `tr(A_physical) = tr(A_source) + (det G)'/det G`.
+Where needed, it factors the remaining regular trace denominator and removes
+simple linear moving poles only when their exact residues are constant
+integers. Their normalized rational integrating factors are included in the
+Wronskian prefactor; the remaining trace must be jointly analytic at the
+origin. The finite retained frame must still have the predicted determinant
+valuation. Epsilon-dependent or fractional residues and higher-order moving
+poles remain unsupported by this extension. In particular, the code does not
+treat `epsilon*log(epsilon)` or an essential singularity as a Laurent series.
+
+Large endpoint coefficients are read directly from FLINT polynomials when
+forming numerical epsilon series. Their numerator and denominator valuations
+are removed separately before truncated series division. This avoids printing
+and reparsing large nested expressions and preserves the existing Laurent
+windows and ball arithmetic.
+
 For `m` nodes, block sizes `b`, `K` epsilon coefficients, `r` observable rows, and `E` coupling entries, dense block factorization costs roughly `sum((m b)^3)` per resolution. Reusing these factors costs roughly `K r sum((m b)^2)`. General epsilon convolutions add `O(E r m K²)` work, less when only a few epsilon powers occur. The common scalar integration inverse avoids refactoring the same operator for every component. These are arithmetic-operation estimates; FLINT precision and coefficient complexity also affect runtime. This does not replace the existing finite-lag Taylor recurrence with a claim of universally linear complexity.
 
 ## Selection and limitations
@@ -59,6 +78,31 @@ For `m` nodes, block sizes `b`, `K` epsilon coefficients, `r` observable rows, a
 Automatic selection currently limits epsilon-zero blocks to scalar components, uses bounded node counts and nearby-pole forecasts, and falls back to the original complete-arm recurrence when necessary. No partially accepted spectral arm is fed into that fallback. This avoids increased interval wrapping observed in the mixed-segment experiment. Larger blocks remain available through explicit spectral selection.
 
 A contour-preserving exponential reparameterization was tested to cluster nodes near endpoints. Its mathematical tests pass, but it did not improve these FT benchmarks, so it is disabled by default and remains a C++ experimental option.
+
+Explicit spectral selection also supports bounded subdivision with
+`ft_spectral::Options::max_subdivisions` (default zero). Failed resolution or
+nearby-pole forecasts split a straight leg at its exact midpoint. Every child
+retains the original singularity checks and propagated ball uncertainty;
+accepted children provide the initial state for the next spectral child.
+Structural failures and poles on the contour are not retried. One time budget
+and one split limit cover the complete arm. If it cannot finish, Taylor
+fallback restarts the original complete arm. Cache identity includes the
+subdivision settings and only completed arms are stored. Tests cover exponential
+solutions, near-interior poles, contour monodromy and bounded failures.
+
+The new local discretization estimate must fit the stricter subinterval
+allowance; accumulated ball uncertainty is checked against the original
+whole-arm target. Applying the stricter local allowance again to inherited
+uncertainty caused subdivision to stall even when successive approximations
+agreed. Separating these tests preserves input radii and fixes that failure.
+It does not remove the need for tighter upstream accuracy when the true
+whole-arm allowance is exhausted.
+
+Taylor conditioning likewise allows existing uncertainty to move between
+coupled components, including initially zero integral accumulators. Its
+independent recurrence comparisons, centered propagation and bounded growth
+check remain active. The original-path checkpoint identity was revised for
+the resulting chart-selection change.
 
 Acceptance compares at least three resolutions, includes arithmetic uncertainty, checks polynomial degree and original singularities, and adds a guarded estimate of the omitted spectral tail. This is an estimate, not a certified infinite-tail bound. General FT results still report `omitted_tails_certified: false`.
 

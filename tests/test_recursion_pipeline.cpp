@@ -54,8 +54,11 @@ int main(){try {
   auto path=near.dimension.variable(0),epsilon=near.dimension.variable(1);
   near.nodes[0].closure.matrix[0][0]=(path.constant(1)-path.constant(100)*path+epsilon)/(path.constant(1)-path.constant(100)*path);
   recursion::NumericalOptions geometry_only;geometry_only.endpoint_order=8;
+  geometry_only.automatic_basis_scan=false;
   geometry_only.endpoint_cache_directory=endpoint_cache/"geometry";
-  geometry_only.progress=[](std::size_t,const std::string& phase,int){if(phase.starts_with("endpoint overlap="))throw std::runtime_error("geometry ready");};
+  // Abort after the immutable plan commits, not from a construction callback
+  // before endpoint_geometry() is available.
+  geometry_only.progress=[](std::size_t,const std::string& phase,int){if(phase=="child boundary")throw std::runtime_error("geometry ready");};
   recursion::Evaluator near_solver(near,geometry_only);
   fails([&]{near_solver.evaluate(0);},"geometry ready");
   require(near_solver.statistics().endpoint_series_built>0,"interrupted endpoint preparation must save exact work");
@@ -65,6 +68,32 @@ int main(){try {
       "new evaluator must verify and reuse both exact endpoints after later interruption");
   const auto& clearance=near_solver.endpoint_geometry(0);
   require(clearance.overlap<=Rational("1/1600") && clearance.nearest_pole_lower.approximate_upper()>0.009999 && clearance.nearest_pole_lower.approximate_upper()<0.010001,"endpoint overlap must resolve poles hidden at epsilon zero");
+  // Compare the new endpoint route in original transport coordinates, including
+  // the epsilon gauge, coupled modes, and automatic fallback on the other end.
+  auto functional_graph=near;
+  for(auto& row:functional_graph.nodes[0].closure.matrix)for(auto& entry:row)entry=path.constant(0);
+  for(unsigned i=0;i<3;++i)functional_graph.nodes[0].closure.matrix[i][i]=path.constant(i+1)*epsilon/path;
+  functional_graph.nodes[0].closure.matrix[0][1]=path.constant(1)/path+path/(path.constant(1)-path);
+  functional_graph.nodes[0].closure.matrix[1][2]=epsilon/(path.constant(1)-path);
+  recursion::NumericalOptions full_endpoint;full_endpoint.endpoint_order=24;
+  recursion::Evaluator full_endpoint_solver(functional_graph,full_endpoint);
+  auto full_stage=full_endpoint_solver.prepare_adjoint_stage(0,4);
+  auto direct_endpoint=full_endpoint;direct_endpoint.direct_endpoint_functionals=true;
+  recursion::Evaluator direct_endpoint_solver(functional_graph,direct_endpoint);
+  auto direct_stage=direct_endpoint_solver.prepare_adjoint_stage(0,4);
+  require(direct_endpoint_solver.statistics().direct_endpoints==1 &&
+      direct_endpoint_solver.statistics().endpoint_series_built==1,
+      "direct endpoint should skip the lower basis and retain the fixed-sector upper basis");
+  require(full_stage.lower_path==direct_stage.lower_path && full_stage.upper_path==direct_stage.upper_path,
+      "direct endpoint route changed contour geometry");
+  for(const auto pair:{std::pair{&full_stage.lower_endpoint,&direct_stage.lower_endpoint},
+      std::pair{&full_stage.upper_endpoint,&direct_stage.upper_endpoint}})
+    for(unsigned i=0;i<pair.first->coefficients.size();++i)for(unsigned j=0;j<pair.first->columns();++j)
+      for(int k=std::min(pair.first->low,pair.second->low);k<=4;++k){
+        const auto a=k<pair.first->low?B(0):pair.first->coefficients[i][j][k-pair.first->low];
+        const auto b=k<pair.second->low?B(0):pair.second->coefficients[i][j][k-pair.second->low];
+        require(upper(a-b)<1e-24,"direct and full endpoint maps disagree in original coordinates");
+      }
   recursion::Evaluator solver(graph,observed);auto result=solver.evaluate(0);
   const auto& geometry=solver.endpoint_geometry(0);
   require(geometry.overlap<=observed.overlap && NativeTailMagnitude::upper_abs(B::from_strings(geometry.overlap.str()))*NativeTailMagnitude::from_ui(16)<=geometry.nearest_pole_lower,"geometric endpoint margin must be proven from all nonzero pole enclosures");
@@ -75,6 +104,8 @@ int main(){try {
   recursion::NumericalOptions adjoint;adjoint.observable_adjoint=true;
   // This section tests bitwise continuation of the local recurrence.
   adjoint.ordinary_method=recursion::OrdinaryMethod::taylor;
+  adjoint.adjoint.centered_map_working_bits=128;
+  adjoint.adjoint.centered_before_rational=true;
   adjoint.endpoint_cache_directory=observed.endpoint_cache_directory;
   recursion::Evaluator adjoint_solver(graph,adjoint);auto adjoint_result=adjoint_solver.evaluate(0);
   require(solver.statistics().endpoint_series_built>0 && adjoint_solver.statistics().endpoint_series_built==0 &&
@@ -83,6 +114,20 @@ int main(){try {
   for(unsigned i=0;i<result.values.size();++i)for(int k=std::max(result.low,adjoint_result.low);k<=0;++k)
     require(upper(result.values[i][k-result.low]-adjoint_result.values[i][k-adjoint_result.low])<1e-20,"adjoint and value recursion must agree for scalar/dotted/endpoint sunrise requests");
   require(upper(adjoint_result.values[0][-adjoint_result.low]-reference)<1e-20,"adjoint sunrise must agree with independent Bessel oracle");
+  auto coefficient_options=adjoint;
+  coefficient_options.ordinary_method=recursion::OrdinaryMethod::ultraspherical;
+  coefficient_options.spectral.max_subdivisions=32;
+  coefficient_options.spectral.seconds_budget=20;
+  unsigned progress_events=0;
+  coefficient_options.ordinary_fraction_progress=[&](double fraction) {
+    require(fraction>=0 && fraction<=1,"ordinary progress fraction outside original path");++progress_events;
+  };
+  recursion::Evaluator coefficient_solver(graph,coefficient_options);
+  const auto coefficient_result=coefficient_solver.evaluate(0);
+  require(progress_events>2 && coefficient_solver.statistics().spectral_accepted>0,
+      "progress reporting disabled the ultraspherical backend");
+  require(upper(coefficient_result.values[0][-coefficient_result.low]-reference)<1e-20,
+      "ultraspherical sunrise disagrees with independent Bessel oracle");
   auto interrupted_options=adjoint;
   interrupted_options.ordinary_cache_directory=endpoint_cache/"ordinary";
   bool upper_arm=false;

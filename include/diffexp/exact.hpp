@@ -10,6 +10,7 @@
 #include <set>
 #include <span>
 #include <utility>
+#include <limits>
 
 namespace diffexp {
 using Rational = kernel::Rational;
@@ -93,9 +94,7 @@ class Exact {
   }
   Exact constant(const Rational& n) const {
     Exact out(ctx_);
-    fmpq_t q; fmpq_init(q);
-    fmpq_set_str(q,n.str().c_str(),10); fmpq_canonicalise(q);
-    fmpz_mpoly_q_set_fmpq(out.value_,q,ctx_->raw); fmpq_clear(q);
+    fmpz_mpoly_q_set_fmpq(out.value_,n.raw(),ctx_->raw);
     return out;
   }
   // Parse another value in this value's existing field context.
@@ -122,9 +121,11 @@ class Exact {
   }
   Exact derivative(std::size_t i) const {
     if (i >= ctx_->names.size()) throw std::out_of_range("derivative variable index");
-    Exact n = numerator(), d = denominator(), dn(ctx_), dd(ctx_);
+    Exact dn(ctx_), dd(ctx_);
     fmpz_mpoly_derivative(fmpz_mpoly_q_numref(dn.value_), fmpz_mpoly_q_numref(value_), i, ctx_->raw);
     fmpz_mpoly_derivative(fmpz_mpoly_q_numref(dd.value_), fmpz_mpoly_q_denref(value_), i, ctx_->raw);
+    if(dd.is_zero())return dn.is_zero()?dn:dn/denominator();
+    const auto n=numerator(),d=denominator();
     return (dn*d-n*dd)/(d*d);
   }
   Exact numerator() const {
@@ -139,6 +140,23 @@ class Exact {
   }
   std::vector<Term> numerator_terms() const { return terms(fmpz_mpoly_q_numref(value_)); }
   std::vector<Term> denominator_terms() const { return terms(fmpz_mpoly_q_denref(value_)); }
+  // Read exponents directly: valuation queries do not materialize every big
+  // integer coefficient or allocate a full term list.
+  unsigned long minimum_exponent(std::size_t variable,bool denominator=false) const {
+    if(variable>=variable_count())throw std::out_of_range("valuation variable index");
+    const auto* p=denominator?fmpz_mpoly_q_denref(value_):fmpz_mpoly_q_numref(value_);
+    if(!fmpz_mpoly_degrees_fit_si(p,ctx_->raw))throw std::overflow_error("polynomial exponent range");
+    unsigned long result=std::numeric_limits<unsigned long>::max();
+    for(slong i=0;i<fmpz_mpoly_length(p,ctx_->raw);++i)
+      result=std::min(result,fmpz_mpoly_get_term_var_exp_ui(p,i,variable,ctx_->raw));
+    return result;
+  }
+  void require_same_field(const Exact& value)const {same_field(value);}
+  bool is_univariate(std::size_t variable)const {
+    if(variable>=variable_count())throw std::out_of_range("univariate coefficient variable");
+    return fmpz_mpoly_is_fmpz_poly(fmpz_mpoly_q_numref(value_),variable,ctx_->raw)&&
+      fmpz_mpoly_is_fmpz_poly(fmpz_mpoly_q_denref(value_),variable,ctx_->raw);
+  }
   void univariate_polynomials(fmpz_poly_t numerator,fmpz_poly_t denominator,std::size_t variable)const {
     if(variable>=variable_count())throw std::out_of_range("univariate coefficient variable");
     if(!fmpz_mpoly_is_fmpz_poly(fmpz_mpoly_q_numref(value_),variable,ctx_->raw)||
@@ -170,11 +188,7 @@ class Exact {
     const auto evaluate = [&](const std::vector<Term>& ts) {
       Exact sum = constant(0);
       for (const auto& term : ts) {
-        Exact t(ctx_);
-        // Polynomial coefficients are integers, not machine-sized integers.
-        fmpz_t c; fmpz_init(c);
-        fmpz_set_str(c, term.coefficient.str().c_str(), 10);
-        fmpz_mpoly_q_set_fmpz(t.value_, c, ctx_->raw); fmpz_clear(c);
+        Exact t=constant(term.coefficient);
         for (std::size_t i=0; i<replacements.size(); ++i)
           if (term.powers[i]) t = t*replacements[i].pow(term.powers[i]);
         sum = sum+t;
@@ -247,10 +261,8 @@ class Exact {
       throw std::overflow_error("polynomial exponents exceed machine range");
     for (slong i=0; i<fmpz_mpoly_length(p,ctx_->raw); ++i) {
       fmpz_t c; fmpz_init(c); fmpz_mpoly_get_term_coeff_fmpz(c,p,i,ctx_->raw);
-      char* s=fmpz_get_str(nullptr,10,c); fmpz_clear(c);
-      if (!s) throw std::bad_alloc();
-      std::string coefficient(s); flint_free(s);
-      Term t{Rational(coefficient), std::vector<unsigned long>(ctx_->names.size())};
+      auto coefficient=Rational::from_integer(c); fmpz_clear(c);
+      Term t{std::move(coefficient), std::vector<unsigned long>(ctx_->names.size())};
       fmpz_mpoly_get_term_exp_ui(t.powers.data(),p,i,ctx_->raw);
       out.push_back(std::move(t));
     }

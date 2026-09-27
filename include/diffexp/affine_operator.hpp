@@ -1,5 +1,7 @@
 #pragma once
 #include "diffexp/affine_matching.hpp"
+#include <memory>
+#include <mutex>
 
 namespace diffexp::affine_operator {
 using B = kernel::ComplexBall;
@@ -10,12 +12,27 @@ using Boundary = affine_matching::Boundary;
 using LaurentMatrix = AffineFrobeniusSeries::LaurentMatrix;
 // Lower bounds are structural, not estimates from small ball coefficients.
 // They can be conservative when projection cancels epsilon poles.
+struct PrincipalPartCache {
+  std::mutex mutex;
+  affine_matching::detail::ExactSeries normalized;
+};
+struct PrincipalPartData {
+  affine_matching::detail::ExactSeries original, row_gauge;
+  std::vector<long> shifts;
+  B point;
+  std::optional<Rational> exact_x;
+  std::shared_ptr<PrincipalPartCache> cache = std::make_shared<PrincipalPartCache>();
+};
 struct Operator {
   Status status = Status::Unsupported;
   std::string reason;
   LaurentMatrix matrix;
   std::vector<int> row_lower_bounds;
   int required_inverse_high = 0;
+  bool principal_part_attempted = false, principal_part_certified = false;
+  unsigned principal_part_zero_coefficients = 0;
+  std::size_t principal_part_exact_operations = 0;
+  std::string principal_part_reason;
   bool omitted_tail_certified = false;
   bool success() const { return status == Status::Success; }
 };
@@ -29,7 +46,9 @@ struct Prepared {
   bool wronskian_verified = false;
   bool used_numeric_convolution = false;
   unsigned numeric_convolution_fallbacks = 0;
+  bool specialized_exact_point = false;
   bool omitted_tail_certified = false;
+  std::shared_ptr<const PrincipalPartData> principal_part_data;
   bool success() const { return status == Status::Success; }
 };
 namespace detail {
@@ -98,6 +117,125 @@ inline void product_add(BallMatrix &out, const BallMatrix &a,
             out[i][j] = subtract ? out[i][j] - term : out[i][j] + term;
           }
 }
+// O=P F^-1 = eps^v J K^-1 R, where J=P diag(x^-a eps^(-shift-v)).
+// Only a finite principal part is needed. K0 is the exact identity produced by
+// row normalization; require that identity rather than guessing a numeric rank.
+// Any failed/over-budget certificate leaves both balls and bounds untouched.
+inline void certify_principal_part(Operator &out, const Prepared &prepared,
+    const AffineFrobeniusSeries &series,
+    const AffineFrobeniusSeries::Expansion &functional, const B &point,
+    const std::vector<std::vector<long>> &valuations, const Options &options) {
+  namespace am = affine_matching::detail;
+  if (!options.certify_operator_principal_part || out.matrix.low >= 0) return;
+  out.principal_part_attempted = true;
+  am::Budget budget{options};
+  budget.options.max_exact_operations = std::min(options.max_exact_operations,
+                                                options.principal_part_max_operations);
+  budget.options.max_exact_monomials = std::min<std::size_t>(options.max_exact_monomials, 2048);
+  budget.deadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(options.principal_part_max_milliseconds);
+  try {
+    budget.spend(0);
+    if (!prepared.principal_part_data)
+      throw std::domain_error("inverse was prepared without exact principal-part data");
+    const auto &data = *prepared.principal_part_data;
+    if (!acb_equal(point.raw(), data.point.raw()))
+      throw std::domain_error("principal-part preparation point mismatch");
+    budget.exact_x = data.exact_x;
+    unsigned d = data.shifts.size(), rows = functional.rows;
+    unsigned loss = data.row_gauge.size() - 1;
+    long v = AffineFrobeniusSeries::Valuations::zero_valuation;
+    for (unsigned i = 0; i < rows; ++i)
+      for (unsigned j = 0; j < d; ++j)
+        if (valuations[i][j] != AffineFrobeniusSeries::Valuations::zero_valuation)
+          v = std::min(v, valuations[i][j] - data.shifts[j]);
+    long top = static_cast<long>(loss) - v - 1;
+    if (top < 0 || top >= options.principal_part_max_depth ||
+        static_cast<unsigned long>(top) + loss >= data.original.size())
+      throw std::length_error("principal-part depth exceeds available exact coefficients or budget");
+    budget.series_cells(2 * rows + d, d, top + 1);
+    auto shifts = data.shifts;
+    for (auto &shift : shifts) shift += v;
+    const auto zero = data.original[0][0][0].constant(0);
+    auto j = am::exact_coefficients(series, functional, shifts, top, zero, budget);
+    auto guard = [&](const Exact &value) {
+      budget.spend(0);
+      if (value.numerator_terms().size() + value.denominator_terms().size() >
+          budget.options.max_exact_monomials)
+        throw std::length_error("principal-part exact coefficient size budget exhausted");
+    };
+    auto product_add = [&](am::ExactMatrix &out, const am::ExactMatrix &a,
+                           const am::ExactMatrix &b, bool subtract = false) {
+      for (unsigned i = 0; i < a.size(); ++i)
+        for (unsigned k = 0; k < b.size(); ++k)
+          if (!a[i][k].is_zero())
+            for (unsigned l = 0; l < b[k].size(); ++l)
+              if (!b[k][l].is_zero()) {
+                budget.spend(); guard(a[i][k]); guard(b[k][l]);
+                auto term = a[i][k] * b[k][l];
+                out[i][l] = subtract ? out[i][l] - term : out[i][l] + term;
+                guard(out[i][l]);
+              }
+    };
+    // Reuse exact K across functional rows. Publish each coefficient only
+    // after it is complete; a failed extension never exposes a partial sum.
+    // Keep the lock while using references, so concurrent cache growth cannot
+    // invalidate them. Endpoint certification itself remains bounded/serial.
+    std::unique_lock cache_lock(data.cache->mutex);
+    auto &k = data.cache->normalized;
+    budget.spend(0);
+    while (k.size() <= static_cast<unsigned>(top)) {
+      unsigned n = k.size();
+      auto coefficient = fuchsify::detail::zeros(d, d, zero);
+      for (unsigned p = 0; p <= loss; ++p)
+        product_add(coefficient, data.row_gauge[p], data.original[n + p]);
+      k.push_back(std::move(coefficient));
+    }
+    for (unsigned i = 0; i < d; ++i)
+      for (unsigned l = 0; l < d; ++l)
+        if (!(k[0][i][l] - zero.constant(i == l ? 1 : 0)).is_zero())
+          throw std::domain_error("principal-part unit-leading normalization is not exact identity");
+    // Sparse right solves Y K=J. Only the functional rows are propagated.
+    auto y = std::move(j);
+    for (unsigned n = 0; n < y.size(); ++n)
+      for (unsigned lag = 1; lag <= n; ++lag)
+        product_add(y[n], y[n-lag], k[lag], true);
+    am::ExactSeries principal(top + 1, fuchsify::detail::zeros(rows, d, zero));
+    for (unsigned n = 0; n < y.size(); ++n)
+      for (unsigned p = n + loss > static_cast<unsigned>(top) ? n + loss - top : 0;
+           p <= loss; ++p)
+        product_add(principal[n + loss - p], y[n], data.row_gauge[p]);
+    budget.spend(0);
+    // Commit only after the entire exact proof succeeds. No omitted x term is
+    // asserted to vanish, and no unknown positive epsilon coefficient is added.
+    for (unsigned i = 0; i < rows; ++i) {
+      int bound = out.row_lower_bounds[i];
+      for (int e = std::max(out.matrix.low, bound); e < 0 && e <= out.matrix.high; ++e) {
+        long n = static_cast<long>(e) - v + loss;
+        bool row_zero = true;
+        for (unsigned l = 0; l < d; ++l) {
+          bool is_zero = n < 0 || (n < static_cast<long>(principal.size()) && principal[n][i][l].is_zero());
+          if (is_zero) {
+            out.matrix.coefficients[i][l][e-out.matrix.low] = B(0);
+            ++out.principal_part_zero_coefficients;
+          } else row_zero = false;
+        }
+        if (e == bound && row_zero) ++bound;
+      }
+      out.row_lower_bounds[i] = bound;
+    }
+    int certified_low = std::min(out.matrix.high,
+        *std::min_element(out.row_lower_bounds.begin(), out.row_lower_bounds.end()));
+    if (certified_low > out.matrix.low) {
+      for (auto &row : out.matrix.coefficients)
+        for (auto &entry : row)
+          entry.erase(entry.begin(), entry.begin() + (certified_low - out.matrix.low));
+      out.matrix.low = certified_low;
+    }
+    out.principal_part_certified = true;
+  } catch (const std::exception &e) { out.principal_part_reason = e.what(); }
+  out.principal_part_exact_operations = budget.work;
+}
 } // namespace detail
 // F = H diag(x^a eps^shift), K = R H. The same exact row normalization
 // and K recurrence solve every inverse column together; uncertain boundary
@@ -123,7 +261,8 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     if (!guard->second.is_finite() || guard->second.contains_zero())
       throw am::PrecisionNeeded(
           "prepared affine Wronskian prefactor contains zero");
-    am::Budget budget{options};
+    am::Budget budget{options};budget.specialize(point);
+    out.specialized_exact_point=budget.exact_x.has_value();
     am::ExactPointEvaluator evaluate_at(point);
     auto shifts = series.valuation_metadata(physical).minimum_by_column;
     for (auto shift : shifts)
@@ -246,6 +385,11 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
           out.inverse.coefficients[i][j][e - low] = factor * w.at(n)[i][j];
       }
     }
+    if (options.certify_operator_principal_part)
+      out.principal_part_data = std::make_shared<PrincipalPartData>(
+          PrincipalPartData{std::move(original),
+                            std::move(gauge.inverse_epsilon_powers),
+                            std::move(shifts), point, budget.exact_x});
     out.status = Status::Success;
   } catch (const affine_matching::detail::PrecisionNeeded &e) {
     out.status = Status::NeedMorePrecision;
@@ -347,6 +491,8 @@ inline Operator compose(const Prepared &prepared,
                             prepared.inverse
                                 .coefficients[k][j][b - prepared.inverse.low];
     }
+    detail::certify_principal_part(out, prepared, series, functional, point,
+                                   valuations, options);
     out.status = Status::Success;
   } catch (const std::exception &e) {
     out.status = Status::Unsupported;

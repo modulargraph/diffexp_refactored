@@ -14,6 +14,10 @@ void exact_tests() {
   ExactField field({"x","eps"}), other({"s","d"});
   Exact x(field,"x"),e(field,"eps"),s(other,"s");
   check(((x*x-x.constant(1))/(x-x.constant(1)))==x+x.constant(1),"rational normalization");
+  check(Exact(field,"(eps+1)/(eps^8+eps+2)").derivative(0).is_zero(),"absent-variable rational derivative");
+  check(Exact(field,"x/(eps^8+eps+2)").derivative(0)==Exact(field,"1/(eps^8+eps+2)"),"variable-independent denominator derivative");
+  check(Exact(field,"1/(x+eps)").derivative(0)==Exact(field,"-1/(x+eps)^2"),"constant-numerator rational derivative");
+  check(Exact(field,"(eps+1)/(eps^8+eps+2)").is_univariate(1)&&!Exact(field,"(eps+1)/(eps^8+x+2)").is_univariate(1),"univariate support includes numerator and denominator");
   check(Exact(field,"(x+eps)/(1-x)").derivative(0)==Exact(field,"(1+eps)/(1-x)^2"),"exact derivative");
   check(Exact(field,"x+eps").substitute(std::vector<Exact>{e,x})==x+e,"simultaneous substitution");
   check(Exact(field,"x^2-1").polynomial_lcm(Exact(field,"x-1"))==Exact(field,"x^2-1"),"denominator lcm");

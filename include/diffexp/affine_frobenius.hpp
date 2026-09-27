@@ -2,6 +2,7 @@
 #include "diffexp/fuchsify.hpp"
 #include "diffexp/jet.hpp"
 #include "diffexp/univariate_rational.hpp"
+#include "diffexp/dense_polynomial_residual.hpp"
 #include <flint/fmpz_mpoly_factor.h>
 #include <map>
 #include <tuple>
@@ -91,11 +92,8 @@ inline Exact characteristic(const Matrix &r, std::size_t xi) {
   }
   return p;
 }
-// Factor the exact characteristic polynomial; every spectral factor must be
-// linear and its root exactly affine in epsilon. No sampled eigenvalues.
-inline std::vector<Exponent> spectrum(const Matrix &r, std::size_t xi,
-                                      std::size_t ei) {
-  const auto p = characteristic(r, xi), z = p.constant(0);
+inline std::vector<std::pair<Exact,long>> polynomial_factors(const Exact& p) {
+  const auto z=p.constant(0);
   auto names = p.variables();
   std::vector<const char *> symbols;
   for (auto &n : names)
@@ -136,7 +134,15 @@ inline std::vector<Exponent> spectrum(const Matrix &r, std::size_t xi,
   fmpz_mpoly_clear(raw, ctx);
   fmpz_mpoly_ctx_clear(ctx);
   if (!ok)
-    throw std::runtime_error("exact affine residue factorization failed");
+    throw std::runtime_error("exact affine polynomial factorization failed");
+  return polynomials;
+}
+// Factor the exact characteristic polynomial; every spectral factor must be
+// linear and its root exactly affine in epsilon. No sampled eigenvalues.
+inline std::vector<Exponent> spectrum(const Matrix &r, std::size_t xi,
+                                      std::size_t ei) {
+  const auto p=characteristic(r,xi),z=p.constant(0);
+  auto polynomials=polynomial_factors(p);
   std::vector<Exponent> out;
   Exact product = z.constant(1);
   unsigned count = 0;
@@ -271,6 +277,39 @@ inline kernel::ComplexBall ball(const Rational &q) {
   fmpq_clear(v);
   return b;
 }
+// Read the already exact univariate coefficient directly from FLINT. Building
+// a nested expression tree from its printed polynomial makes long endpoint
+// coefficients quadratic to parse and copies large subtrees repeatedly.
+class EpsilonRational {
+  struct Polynomial {
+    fmpz_poly_t value;
+    Polynomial(){fmpz_poly_init(value);}
+    ~Polynomial(){fmpz_poly_clear(value);}
+    Polynomial(const Polynomial&)=delete;
+    Polynomial& operator=(const Polynomial&)=delete;
+  } numerator_,denominator_;
+  slong numerator_low_=0,denominator_low_=0;
+  static slong lowest(const fmpz_poly_t p){
+    slong k=0;while(k<fmpz_poly_length(p)&&fmpz_is_zero(fmpz_poly_get_coeff_ptr(p,k)))++k;return k;
+  }
+ public:
+  EpsilonRational(const Exact& value,std::size_t variable){
+    if(value.is_zero())throw std::invalid_argument("zero epsilon coefficient has no valuation");
+    value.univariate_polynomials(numerator_.value,denominator_.value,variable);
+    numerator_low_=lowest(numerator_.value);denominator_low_=lowest(denominator_.value);
+  }
+  long valuation()const{return numerator_low_-denominator_low_;}
+  Jet regular_jet(unsigned length)const{
+    using B=kernel::ComplexBall;
+    auto polynomial=[&](const fmpz_poly_t p,slong low){
+      Jet out(0,length,B::precision());
+      for(slong k=low;k<fmpz_poly_length(p)&&k-low<length;++k){
+        B coefficient;acb_set_fmpz(coefficient.raw(),fmpz_poly_get_coeff_ptr(p,k));out.set(k-low,coefficient);
+      }return out;
+    };
+    return polynomial(numerator_.value,numerator_low_)/polynomial(denominator_.value,denominator_low_);
+  }
+};
 } // namespace affine_frobenius_detail
 
 class AffineFrobeniusSeries {
@@ -288,6 +327,10 @@ public:
     // Disable only to compare the bounded cleared recurrence at small orders.
     bool finite_lag_cost_fallback = true;
     bool univariate_epsilon_recurrence = false;
+    bool univariate_epsilon_projection = false;
+    bool cleared_epsilon_projection = false;
+    bool finite_lag_projection = false;
+    std::size_t max_projection_polynomial_terms=1000000;
     std::size_t max_projection_products=100000000;
     std::function<void(unsigned,unsigned)> column_progress;
   };
@@ -580,6 +623,70 @@ private:
   }
 public:
   const Expansion &terms() const { return expansion_; }
+  // A rational change of basis can introduce apparent moving poles even when
+  // the physical trace has an epsilon-regular Wronskian. Certify the determinant
+  // of G*F from the exact gauge identity, independently of retained x terms.
+  std::optional<Exact> gauged_wronskian_prefactor(const Matrix& gauge,
+      const Matrix& source_connection,const Matrix& physical_connection)const {
+    using namespace affine_frobenius_detail;
+    for(const auto* matrix:{&gauge,&source_connection,&physical_connection}){
+      if(matrix->size()!=d_)throw std::invalid_argument("Wronskian gauge matrix height");
+      for(const auto& row:*matrix)if(row.size()!=d_)throw std::invalid_argument("Wronskian gauge matrix width");
+    }
+    auto det=determinant(gauge);
+    if(det.is_zero())throw std::domain_error("singular Wronskian gauge");
+    auto source_trace=zero_,physical_trace=zero_,residue_trace=zero_;
+    for(unsigned i=0;i<d_;++i){
+      source_trace=source_trace+source_connection[i][i];physical_trace=physical_trace+physical_connection[i][i];
+      residue_trace=residue_trace+zero_.constant(eigen_[i].power)+zero_.constant(eigen_[i].slope)*zero_.variable(ei_);
+    }
+    if(source_trace+det.derivative(xi_)/det!=physical_trace)
+      throw std::domain_error("exact Wronskian gauge trace identity failed");
+    const auto k=fuchsify::detail::valuation(det,xi_);
+    const auto x=zero_.variable(xi_);
+    auto unit_trace=physical_trace-(residue_trace+zero_.constant(k))/x;
+    std::vector<Exact> origin,at_zero;
+    for(unsigned i=0;i<zero_.variable_count();++i){
+      origin.push_back(i==xi_||i==ei_?zero_:zero_.variable(i));
+      at_zero.push_back(i==xi_?zero_:zero_.variable(i));
+    }
+    auto rational_unit=zero_.constant(1);
+    if(unit_trace.denominator().substitute(origin).is_zero()){
+      // Remove simple linear moving poles only when their EXACT residues are
+      // constant integers. Epsilon-dependent residues produce log(eps), and
+      // higher-order poles can produce essential singularities; reject both.
+      if(unit_trace.denominator_terms().size()>4096)return std::nullopt;
+      auto factors=polynomial_factors(unit_trace.denominator());
+      if(factors.size()>128)return std::nullopt;
+      for(const auto& [factor,multiplicity]:factors){
+        if(!factor.substitute(origin).is_zero())continue;
+        auto derivative=factor.derivative(xi_);
+        if(multiplicity!=1||derivative.is_zero()||!derivative.derivative(xi_).is_zero()||factor.substitute(at_zero).is_zero())return std::nullopt;
+        auto root=-(factor-derivative*x)/derivative;
+        auto at_root=at_zero;at_root[xi_]=root;
+        auto residue=(unit_trace*factor/derivative).substitute(at_root);
+        if(!residue.is_rational())return std::nullopt;
+        auto text=residue.str();if(text.find('/')!=std::string::npos)return std::nullopt;
+        long power;try{power=std::stol(text);}catch(const std::exception&){return std::nullopt;}
+        if(power< -128||power>128)return std::nullopt;
+        rational_unit=rational_unit*fuchsify::detail::power(factor,power);
+        if(rational_unit.numerator_terms().size()>options_.max_terms||rational_unit.denominator_terms().size()>options_.max_terms)return std::nullopt;
+      }
+      unit_trace=unit_trace-rational_unit.derivative(xi_)/rational_unit;
+      if(unit_trace.denominator().substitute(origin).is_zero())return std::nullopt;
+      auto initial=rational_unit.substitute(at_zero);
+      if(initial.is_zero())return std::nullopt;
+      rational_unit=rational_unit/initial;
+    }
+    // det(G)=x^k*g, g(0,eps)!=0. Liouville's identity gives
+    // det(GF)=det(frame)*x^(tr(residue)+k)*g(0,eps)*exp(int U).
+    // U is jointly analytic, so its exponential is an epsilon unit. Keep x^k
+    // in the prefactor because project() retains the source base exponents.
+    auto regular=det/fuchsify::detail::power(x,k);
+    auto leading=regular.substitute(at_zero);
+    if(leading.is_zero())throw std::logic_error("Wronskian gauge has zero leading coefficient");
+    return determinant(frame_)*fuchsify::detail::power(x,k)*leading*rational_unit;
+  }
   const std::vector<Rational> &absolute_x_frontiers() const {
     return frontiers_;
   }
@@ -616,12 +723,135 @@ public:
   }
 private:
   Expansion project_impl(const Matrix &rows,bool endpoint_only) const {
+    if(options_.finite_lag_projection)return project_finite_lag(rows,endpoint_only);
+    if(options_.cleared_epsilon_projection)return project_cleared(rows,endpoint_only);
+    if(options_.univariate_epsilon_projection)return project_coefficients<UnivariateRational>(rows,endpoint_only);
+    return project_coefficients<Exact>(rows,endpoint_only);
+  }
+  Expansion project_finite_lag(const Matrix& rows,bool endpoint_only) const {
+    using C=UnivariateRational;using namespace affine_frobenius_detail;
+    if(!options_.max_projection_products||rows.size()>options_.max_terms)throw std::length_error("affine projection receiving budget exhausted");
+    Expansion out{static_cast<unsigned>(rows.size()),d_,{}};out.coherent_x_frontier=!endpoint_only;
+    if(!endpoint_only&&rows.size()==d_&&expansion_.wronskian_prefactor)out.wronskian_prefactor=*expansion_.wronskian_prefactor*determinant(rows);
+    const auto x=zero_.variable(xi_);std::size_t products=0;
+    auto multiply=[&](const C& a,const C& b){if(products++>=options_.max_projection_products)throw std::length_error("affine projection product budget exhausted");return a*b;};
+    auto coefficients=[&](const Exact& p,unsigned top){std::vector<C> result;for(const auto& c:taylor(p,xi_,top))result.emplace_back(c,ei_);trim(result);return result;};
+    std::vector<std::vector<const Term*>> columns(d_);for(const auto& term:expansion_.terms)columns[term.column].push_back(&term);
+    for(unsigned i=0;i<rows.size();++i){
+      if(rows[i].size()!=d_)throw std::invalid_argument("affine observable row dimension");
+      long valuation=std::numeric_limits<long>::max()/4;for(const auto& value:rows[i])if(!value.is_zero())valuation=std::min(valuation,fuchsify::detail::valuation(value,xi_));
+      if(valuation==std::numeric_limits<long>::max()/4)continue;
+      if(std::abs(valuation)>options_.max_x_order)throw std::length_error("observable Laurent order exceeds affine budget");
+      std::vector<Exact> analytic;auto q=zero_.constant(1);
+      for(const auto& value:rows[i]){analytic.push_back(value/fuchsify::detail::power(x,valuation));q=q.polynomial_lcm(analytic.back().denominator());}
+      unsigned degree=0;for(const auto& t:q.numerator_terms())degree=std::max<unsigned>(degree,t.powers[xi_]);
+      if(degree>options_.max_clearing_degree)return project_coefficients<C>(rows,endpoint_only);
+      auto denominator=coefficients(q,std::min(n_,degree));if(denominator.empty()||denominator.front().is_zero())throw std::domain_error("affine projection clearing denominator is singular at origin");
+      std::vector<std::vector<C>> numerator;for(const auto& value:analytic)numerator.push_back(coefficients(q*value,n_));
+      for(unsigned c=0;c<d_;++c){
+        if(endpoint_only&&!eigen_[c].slope.is_zero())continue;
+        const auto remaining=frontiers_[c]-eigen_[c].power;unsigned cutoff=std::stoul(remaining.str());
+        if(endpoint_only){while(cutoff&&eigen_[c].power+Rational(valuation)+Rational(cutoff)>Rational(0))--cutoff;if(eigen_[c].power+Rational(valuation)>Rational(0))continue;}
+        unsigned log_high=0;for(const auto* t:columns[c])log_high=std::max(log_high,t->log_degree);
+        std::vector<std::vector<C>> rhs(log_high+1,std::vector<C>(cutoff+1));
+        for(const auto* t:columns[c]){
+          const auto offset=t->power-eigen_[c].power;const auto k=std::stoul(offset.str());if(k>cutoff||numerator[t->row].empty())continue;
+          C value(t->coefficient,ei_);
+          for(unsigned lag=0;lag<numerator[t->row].size()&&k+lag<=cutoff;++lag)if(!numerator[t->row][lag].is_zero())rhs[t->log_degree][k+lag]=rhs[t->log_degree][k+lag]+multiply(value,numerator[t->row][lag]);
+        }
+        for(unsigned l=0;l<=log_high;++l)for(unsigned k=0;k<=cutoff;++k){
+          auto value=rhs[l][k];for(unsigned lag=1;lag<denominator.size()&&lag<=k;++lag)if(!denominator[lag].is_zero()&&!rhs[l][k-lag].is_zero())value=value-multiply(denominator[lag],rhs[l][k-lag]);
+          rhs[l][k]=value/denominator[0];
+          if(!rhs[l][k].is_zero()){
+            if(out.terms.size()>=options_.max_terms)throw std::length_error("affine projection accumulated coordinate budget exhausted");
+            out.terms.push_back({i,c,l,eigen_[c].power+Rational(valuation)+Rational(k),eigen_[c].slope,rhs[l][k].exact(zero_,ei_)});
+          }
+        }
+      }
+    }
+    return normalize(std::move(out));
+  }
+  Expansion project_cleared(const Matrix& rows,bool endpoint_only) const {
+    using P=dense_polynomial_residual::Polynomial;
+    using Key=std::tuple<Rational,Rational,unsigned>; // power,slope,log
+    using namespace affine_frobenius_detail;
+    if(!options_.max_projection_products||rows.size()>options_.max_terms)
+      throw std::length_error("affine projection receiving budget exhausted");
+    Expansion out{static_cast<unsigned>(rows.size()),d_,{}};out.coherent_x_frontier=!endpoint_only;
+    if(!endpoint_only&&rows.size()==d_&&expansion_.wronskian_prefactor)
+      out.wronskian_prefactor=*expansion_.wronskian_prefactor*determinant(rows);
+    std::size_t products=0,coordinates=0;
+    std::vector<std::vector<const Term*>> columns(d_);
+    for(const auto& term:expansion_.terms)if(!endpoint_only||term.slope.is_zero())columns[term.column].push_back(&term);
+    auto quotient_table=[&](std::map<std::string,Exact>& denominators){
+      auto common=zero_.constant(1);for(const auto& [name,value]:denominators)common=common.polynomial_lcm(value);
+      for(auto& [name,value]:denominators)value=common/value;return common;
+    };
+    auto check_polynomial=[&](const P& value){if(value.terms()>options_.max_projection_polynomial_terms)throw std::length_error("affine projection polynomial storage budget exhausted");};
+    for(unsigned i=0;i<rows.size();++i){
+      if(rows[i].size()!=d_)throw std::invalid_argument("affine observable row dimension");
+      long row_valuation=std::numeric_limits<long>::max()/4;
+      std::vector<long> valuations(d_);std::vector<std::vector<Exact>> coefficients(d_);
+      std::map<std::string,Exact> row_denominators;
+      for(unsigned j=0;j<d_;++j)if(!rows[i][j].is_zero()){
+        const auto val=fuchsify::detail::valuation(rows[i][j],xi_);valuations[j]=val;row_valuation=std::min(row_valuation,val);
+        if(std::abs(val)>options_.max_x_order)throw std::length_error("observable Laurent order exceeds affine budget");
+        unsigned needed=n_;
+        if(endpoint_only){needed=0;for(const auto& term:expansion_.terms)if(term.row==j&&term.slope.is_zero())
+          for(unsigned k=0;k<=n_&&term.power+Rational(val)+Rational(k)<=Rational(0);++k)needed=std::max(needed,k);}
+        coefficients[j]=taylor(rows[i][j]/fuchsify::detail::power(zero_.variable(xi_),val),xi_,needed);
+        for(const auto& coefficient:coefficients[j])if(!coefficient.is_zero()){
+          auto den=coefficient.denominator();row_denominators.try_emplace(den.str(),den);
+        }
+      }
+      const auto row_denominator=quotient_table(row_denominators);
+      std::vector<std::vector<P>> row_numerators(d_);
+      for(unsigned j=0;j<d_;++j)for(const auto& coefficient:coefficients[j]){
+        if(coefficient.is_zero()){row_numerators[j].emplace_back();continue;}
+        P value(coefficient.numerator(),ei_);value=value*P(row_denominators.at(coefficient.denominator().str()),ei_);check_polynomial(value);row_numerators[j].push_back(std::move(value));
+      }
+      for(unsigned c=0;c<d_;++c){
+        std::map<std::string,Exact> source_denominators;
+        std::vector<std::pair<const Term*,std::string>> sources;
+        for(const auto* term:columns[c])if(!coefficients[term->row].empty()){
+          // Skip source terms which cannot contribute even at Taylor order zero.
+          const auto power=term->power+Rational(valuations[term->row]);
+          if(power>frontiers_[c]+Rational(row_valuation)||(endpoint_only&&power>Rational(0)))continue;
+          auto den=term->coefficient.denominator();auto name=den.str();source_denominators.try_emplace(name,den);sources.emplace_back(term,std::move(name));
+        }
+        const auto source_denominator=quotient_table(source_denominators);
+        std::map<std::string,P> source_quotients;for(const auto& [name,value]:source_denominators)source_quotients.emplace(name,P(value,ei_));
+        std::map<Key,P> accumulated;
+        for(const auto& [term,name]:sources){
+          const auto j=term->row;P source(term->coefficient.numerator(),ei_);source=source*source_quotients.at(name);check_polynomial(source);
+          for(unsigned k=0;k<row_numerators[j].size();++k){
+            const auto power=term->power+Rational(valuations[j])+Rational(k);
+            if(power>frontiers_[c]+Rational(row_valuation)||(endpoint_only&&power>Rational(0)))break;
+            if(row_numerators[j][k].zero())continue;
+            if(products++>=options_.max_projection_products)throw std::length_error("affine projection product budget exhausted");
+            auto [at,inserted]=accumulated.try_emplace(Key{power,term->slope,term->log_degree});
+            if(inserted&&++coordinates>options_.max_terms)throw std::length_error("affine projection accumulated coordinate budget exhausted");
+            at->second+=source*row_numerators[j][k];check_polynomial(at->second);
+          }
+        }
+        const auto denominator=source_denominator*row_denominator;
+        for(const auto& [key,value]:accumulated)if(!value.zero()){
+          const auto& [power,slope,log]=key;out.terms.push_back({i,c,log,power,slope,value.exact(zero_,ei_)/denominator});
+        }
+      }
+    }
+    return normalize(std::move(out));
+  }
+  template<class C> Expansion project_coefficients(const Matrix &rows,bool endpoint_only) const {
+    auto convert=[&](const Exact& value)->C{if constexpr(std::is_same_v<C,Exact>)return value;else return C(value,ei_);};
+    auto restore=[&](const C& value)->Exact{if constexpr(std::is_same_v<C,Exact>)return value;else return value.exact(zero_,ei_);};
+    const auto zero=convert(zero_);
     using namespace affine_frobenius_detail;
     if(!options_.max_projection_products || rows.size()>options_.max_terms)
       throw std::length_error("affine projection receiving budget exhausted");
     Expansion out{static_cast<unsigned>(rows.size()), d_, {}};
     using Coordinate=std::tuple<unsigned,unsigned,Rational,Rational,unsigned>;
-    std::map<Coordinate,Exact> accumulated;
+    std::map<Coordinate,C> accumulated;
     std::size_t products=0;
     out.coherent_x_frontier = !endpoint_only;
     if (!endpoint_only && rows.size() == d_ && expansion_.wronskian_prefactor)
@@ -652,9 +882,11 @@ private:
           for(const auto& term:expansion_.terms)if(term.row==j && term.slope.is_zero())
             for(unsigned k=0;k<=n_ && term.power+Rational(val)+Rational(k)<=Rational(0);++k)needed=std::max(needed,k);
         }
-        auto coefficients = taylor(regular, xi_, needed);
+        auto exact_coefficients = taylor(regular, xi_, needed);
+        std::vector<C> coefficients;for(const auto& c:exact_coefficients)coefficients.push_back(convert(c));
         for (auto &t : expansion_.terms)
-          if (t.row == j && (!endpoint_only || t.slope.is_zero()))
+          if (t.row == j && (!endpoint_only || t.slope.is_zero())) {
+            const auto source=convert(t.coefficient);
             for (unsigned n = 0; n <= needed; ++n) {
               if(endpoint_only && t.power+Rational(val)+Rational(n)>Rational(0))break;
               if (t.power + Rational(val) + Rational(n) >
@@ -664,17 +896,18 @@ private:
                 if(products++>=options_.max_projection_products)
                   throw std::length_error("affine projection product budget exhausted");
                 auto [at,inserted]=accumulated.try_emplace(
-                  Coordinate{i,t.column,t.power+Rational(val)+Rational(n),t.slope,t.log_degree},zero_);
-                at->second=at->second+t.coefficient*coefficients[n];
+                  Coordinate{i,t.column,t.power+Rational(val)+Rational(n),t.slope,t.log_degree},zero);
+                at->second=at->second+source*coefficients[n];
                 if(accumulated.size()>options_.max_terms)
                   throw std::length_error("affine projection accumulated coordinate budget exhausted");
               }
             }
+          }
       }
     }
     for(auto& [coordinate,coefficient]:accumulated)if(!coefficient.is_zero()) {
       const auto& [row,column,power,slope,log]=coordinate;
-      out.terms.push_back({row,column,log,power,slope,std::move(coefficient)});
+      out.terms.push_back({row,column,log,power,slope,restore(coefficient)});
     }
     return normalize(std::move(out));
   }
@@ -843,20 +1076,18 @@ public:
             input.rows,
             std::vector(input.columns, std::vector<B>(high - low + 1, B(0))))};
     for (auto &t : normalize(input).terms) {
-      long valuation = fuchsify::detail::valuation(t.coefficient, ei_);
+      EpsilonRational coefficient(t.coefficient,ei_);
+      long valuation = coefficient.valuation();
       if (valuation > high)
         continue;
       long length = static_cast<long>(high) - valuation + 1;
       if (length > options_.max_epsilon_depth)
         throw std::length_error(
             "affine coefficient poles require additional epsilon-depth budget");
-      auto regular = t.coefficient /
-                     fuchsify::detail::power(zero_.variable(ei_), valuation);
       Jet ep(0, length, B::precision());
       if (length > 1)
         ep.set(1, B(1));
-      auto value = diffexp::evaluate(data::Reader(regular.str()).read(), ep,
-                                      {{zero_.variables()[ei_], ep}});
+      auto value = coefficient.regular_jet(length);
       auto slope = ep.constant(0);
       slope.set(0, ball(t.slope) * logx);
       value = value * (ep * slope).exp();
@@ -904,20 +1135,19 @@ private:
               (static_cast<std::size_t>(options_.max_x_order) + 1))
         throw std::length_error(
             "affine logarithmic degree exceeds finite budget");
-      for (std::size_t v = 0; v < t.coefficient.variable_count(); ++v)
-        if (v != ei_ && !t.coefficient.derivative(v).is_zero())
-          throw std::invalid_argument(
-              "affine term coefficient must depend only on epsilon");
+      zero_.require_same_field(t.coefficient);
+      if(!t.coefficient.is_univariate(ei_))
+        throw std::invalid_argument("affine term coefficient must depend only on epsilon");
       auto key =
           std::make_tuple(t.row, t.column, t.power, t.slope, t.log_degree);
-      auto [p, inserted] = combined.try_emplace(key, zero_);
-      p->second = p->second + t.coefficient;
+      auto [p, inserted] = combined.try_emplace(key, std::move(t.coefficient));
+      if(!inserted)p->second = p->second + t.coefficient;
     }
     out.terms.clear();
     for (auto &[key, c] : combined)
       if (!c.is_zero()) {
         auto [i, j, a, b, l] = key;
-        out.terms.push_back({i, j, l, a, b, c});
+        out.terms.push_back({i, j, l, a, b, std::move(c)});
       }
     if (out.terms.size() > options_.max_terms)
       throw std::length_error("affine expansion term budget exhausted");

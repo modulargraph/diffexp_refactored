@@ -1,4 +1,5 @@
 #pragma once
+#include "diffexp/dense_polynomial_residual.hpp"
 #include "diffexp/affine_frobenius.hpp"
 #include "diffexp/artifact_store.hpp"
 #include "diffexp/geometry.hpp"
@@ -11,6 +12,7 @@ using Matrix=Series::Matrix;
 struct VerificationLimits {
   std::size_t max_polynomial_terms=1000000, max_shared_terms=4000000, max_total_column_terms=4000000,
               max_term_products=2000000000;
+  bool dense_epsilon_polynomials=false;
   // Cumulative conservative monomial-product estimate, not elapsed CPU work.
   std::function<void(unsigned,unsigned,std::size_t)> column_progress;
 };
@@ -163,6 +165,11 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
     count_shared(q[i]);
     for(unsigned j=0;j<d;++j){p[i][j]=q[i]*connection[i][j];count_shared(p[i][j]);}
   }
+  std::vector<dense_polynomial_residual::Bivariate> dense_q;
+  std::vector<std::vector<dense_polynomial_residual::Bivariate>> dense_p;
+  if(limits.dense_epsilon_polynomials){
+    for(unsigned i=0;i<d;++i){dense_q.push_back(dense_polynomial_residual::split(q[i],xi,ei,n));dense_p.emplace_back();for(unsigned j=0;j<d;++j)dense_p.back().push_back(dense_polynomial_residual::split(p[i][j],xi,ei,n));}
+  }
   const auto inverse=fuchsify::detail::inverse(canonical.transform);
   std::vector<Exact> powers(n+1,z.constant(1));for(unsigned k=1;k<=n;++k)powers[k]=powers[k-1]*x;
   for(unsigned c=0;c<d;++c) {
@@ -179,6 +186,37 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
     for(const auto& [name,denominator]:denominators){common=common.polynomial_lcm(denominator);budget.check(common);}
     for(auto& [name,denominator]:denominators)denominator=common/denominator;
     require(d<=limits.max_total_column_terms/(static_cast<std::size_t>(log_high)+1),"cached affine column polynomial slot budget exhausted");
+    if(limits.dense_epsilon_polynomials) {
+      namespace dp=dense_polynomial_residual;
+      auto spend=[&](std::size_t na,std::size_t nb){
+        require(na<=limits.max_polynomial_terms && nb<=limits.max_polynomial_terms,"cached affine polynomial term budget exhausted");
+        require(!nb || na<=(limits.max_term_products-budget.products)/nb,"cached affine residual work budget exhausted");budget.products+=na*nb;
+      };
+      auto check=[&](const dp::Bivariate& value){std::size_t count=0;for(const auto& p:value){auto terms=p.terms();require(terms<=limits.max_polynomial_terms-count,"cached affine polynomial term budget exhausted");count+=terms;}return count;};
+      const auto cutoff=cutoffs[c];
+      std::map<std::string,dp::Polynomial> quotients;
+      for(const auto& [name,denominator]:denominators)quotients.emplace(name,dp::Polynomial(denominator,ei));
+      std::vector<std::vector<dp::Bivariate>> numerator(d,std::vector<dp::Bivariate>(log_high+1));
+      for(const auto& [t,name]:indexed) {
+        const auto k=integer_offset(t->power-canonical.exponents[c].power,cutoff);
+        dp::Polynomial coefficient(t->coefficient.numerator(),ei);const auto& quotient=quotients.at(name);spend(coefficient.terms(),quotient.terms());
+        auto& dest=numerator[t->row][t->log_degree];if(dest.size()<=static_cast<std::size_t>(k))dest.resize(k+1);
+        dest[k]+=coefficient*quotient;check(dest);
+      }
+      std::size_t total=0;for(const auto& row:numerator)for(const auto& value:row){auto terms=check(value);require(terms<=limits.max_total_column_terms-total,"cached affine total column polynomial budget exhausted");total+=terms;}
+      dp::Polynomial lambda;lambda.set(0,canonical.exponents[c].power);lambda.set(1,canonical.exponents[c].slope);
+      for(unsigned i=0;i<d;++i)for(unsigned l=0;l<=log_high;++l) {
+        auto derivative=numerator[i][l];
+        for(std::size_t k=0;k<derivative.size();++k){spend(lambda.terms(),numerator[i][l][k].terms());derivative[k]=numerator[i][l][k].scaled(k);derivative[k]+=lambda*numerator[i][l][k];}
+        if(l<log_high){const auto& next=numerator[i][l+1];if(derivative.size()<next.size())derivative.resize(next.size());for(std::size_t k=0;k<next.size();++k)derivative[k]+=next[k].scaled(l+1);}
+        check(derivative);auto residual=dp::multiply(dense_q[i],derivative,cutoff,spend);check(residual);
+        for(unsigned j=0;j<d;++j)if(!dense_p[i][j].empty()&&!numerator[j][l].empty()){
+          auto term=dp::multiply(dense_p[i][j],numerator[j][l],cutoff,spend);check(term);
+          if(residual.size()<term.size())residual.resize(term.size());for(std::size_t k=0;k<term.size();++k)residual[k]-=term[k];check(residual);
+        }
+        for(const auto& coefficient:residual)require(coefficient.zero(),"cached affine defining polynomial residual is nonzero within frontier");
+      }
+    } else {
     std::vector<std::vector<Exact>> numerator(d,std::vector<Exact>(log_high+1,z));
     for(const auto& [t,name]:indexed) {
       const auto k=integer_offset(t->power-canonical.exponents[c].power,cutoffs[c]);
@@ -197,6 +235,7 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
         residual=residual-budget.multiply(p[i][j],numerator[j][l]);budget.check(residual);
       }
       for(const auto& term:residual.numerator_terms())require(term.powers[xi]>cutoffs[c],"cached affine defining polynomial residual is nonzero within frontier");
+    }
     }
     // A polynomial ODE alone permits arbitrary resonant homogeneous constants.
     // These checks bind precisely the zero-integration-constant convention used

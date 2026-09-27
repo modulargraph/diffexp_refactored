@@ -12,7 +12,7 @@ struct Storage {
 };
 // Bump this revision for changes to sampling, gauges, selection, or tail
 // estimates.
-inline constexpr const char *algorithm = "DiffExp.FTSpectralCompletedArm/v1";
+inline constexpr const char *algorithm = "DiffExp.FTSpectralCompletedArm/v3";
 inline std::string identity(const ExactEpsilonMatrix &matrix,
                             const LaurentRows &initial,
                             const ExactEpsilonMatrix &forcing,
@@ -31,6 +31,7 @@ inline std::string identity(const ExactEpsilonMatrix &matrix,
       {"max_block_size", spectral.max_block_size},
       {"max_block_nodes", spectral.max_block_nodes},
       {"max_cells", spectral.max_cells},
+      {"max_subdivisions", spectral.max_subdivisions},
       {"seconds_budget_ieee_bits",
        std::to_string(std::bit_cast<std::uint64_t>(spectral.seconds_budget))}};
   return artifacts::detail::sha256(artifacts::detail::canonical(payload));
@@ -87,6 +88,9 @@ inline json::object encode(const LaurentRows &rows, const std::string &key,
       {"rows", numerical_rows_io::exact_rows(rows)},
       {"diagnostics",
        json::object{{"legs", diagnostics.legs},
+                    {"subdivisions", diagnostics.subdivisions},
+                    {"accepted_subsegments", diagnostics.accepted_subsegments},
+                    {"last_failure", diagnostics.last_failure},
                     {"nodes", integers(diagnostics.nodes)},
                     {"block_sizes", integers(diagnostics.block_sizes)},
                     {"normalized_diagonals", diagnostics.normalized_diagonals},
@@ -122,7 +126,7 @@ inline LaurentRows decode(const json::value &envelope, const std::string &key,
   auto rows = numerical_rows_io::read_rows(p.at("rows"));
   validate(rows, initial, low);
   const auto &d = p.at("diagnostics").as_object();
-  artifacts::detail::keys(d, {"legs", "nodes", "block_sizes",
+  artifacts::detail::keys(d, {"legs", "nodes", "block_sizes", "subdivisions", "accepted_subsegments", "last_failure",
                               "normalized_diagonals", "clustered_legs",
                               "absolute_stability_components"});
   ft_spectral::Diagnostics loaded;
@@ -130,10 +134,18 @@ inline LaurentRows decode(const json::value &envelope, const std::string &key,
   if (loaded.legs != legs)
     throw std::invalid_argument(
         "FT spectral checkpoint is not a completed arm");
+  loaded.subdivisions=count(d.at("subdivisions"));
+  loaded.accepted_subsegments=count(d.at("accepted_subsegments"));
+  loaded.last_failure=artifacts::detail::string(d.at("last_failure"));
+  const auto segments=options.max_subdivisions?loaded.accepted_subsegments:legs;
+  if(options.max_subdivisions>4096 || loaded.subdivisions>options.max_subdivisions ||
+     (options.max_subdivisions && segments!=static_cast<std::size_t>(legs)+loaded.subdivisions) ||
+     (!options.max_subdivisions && loaded.accepted_subsegments))
+    throw std::invalid_argument("FT spectral checkpoint subdivision counts");
   const auto &nodes = d.at("nodes").as_array();
   const auto &blocks = d.at("block_sizes").as_array();
-  if (nodes.size() > 9ULL * legs ||
-      blocks.size() > initial.columns() * static_cast<std::size_t>(legs))
+  if (nodes.size() > 9ULL * segments ||
+      blocks.size() > initial.columns() * static_cast<std::size_t>(segments))
     throw std::invalid_argument("FT spectral checkpoint diagnostic shape");
   for (const auto &value : nodes) {
     auto n = count(value);
@@ -152,7 +164,7 @@ inline LaurentRows decode(const json::value &envelope, const std::string &key,
   loaded.absolute_stability_components =
       count(d.at("absolute_stability_components"));
   if (loaded.normalized_diagonals > initial.columns() ||
-      loaded.clustered_legs > legs)
+      loaded.clustered_legs > segments)
     throw std::invalid_argument("FT spectral checkpoint gauge count");
   // No factorization or numerical work occurs on reuse; retained structure is
   // reported.

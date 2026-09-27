@@ -8,6 +8,7 @@
 #include <fstream>
 #include <optional>
 #include <string_view>
+#include <system_error>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -223,8 +224,12 @@ class Store {
     std::vector<std::string> candidates;
     for(const auto& entry:fs::directory_iterator(directory)) {
       if(entry.path().extension()!=".json")continue;
+      // macOS creates AppleDouble sidecars on ExFAT volumes. They are metadata,
+      // not artifact records; retain fail-closed handling for all real records.
+      const auto stem=entry.path().stem().string();
+      if(stem.rfind("._",0)==0 && detail::hash_string(stem.substr(2)))continue;
       if(!entry.is_regular_file() || fs::is_symlink(entry.symlink_status()))throw std::runtime_error("invalid artifact directory entry");
-      candidates.push_back(entry.path().stem().string());
+      candidates.push_back(stem);
       if(candidates.size()>maximum_candidates_)throw std::runtime_error("artifact lookup candidate budget exhausted");
     }
     std::sort(candidates.begin(),candidates.end());std::optional<Record> best;
@@ -292,9 +297,14 @@ class Store {
       }
       if(::fchmod(fd,0444) || ::fsync(fd))throw std::runtime_error("cannot sync immutable artifact");
       if(::close(fd)) {fd=-1;throw std::runtime_error("cannot close artifact staging file");}fd=-1;
-      // link is atomic and never replaces an existing immutable content file.
-      if(::link(temporary.c_str(),target.c_str())!=0) {
-        if(errno!=EEXIST)throw std::runtime_error("cannot atomically publish artifact");
+      // Publish a complete file without replacing an existing content address.
+      // This requires a hard-link-capable filesystem (e.g. APFS/ext4); an APFS
+      // disk image can provide this on an ExFAT external drive. Never replace
+      // this primitive with a check-then-rename that races concurrent writers.
+      const int published=::link(temporary.c_str(),target.c_str());
+      if(published!=0) {
+        const int error=errno;
+        if(error!=EEXIST)throw std::system_error(error,std::generic_category(),"cannot atomically publish artifact");
         if(detail::canonical(read_json(target))!=bytes)throw std::runtime_error("immutable artifact content collision or corruption");
       }
       fs::remove(temporary);detail::sync_directory(target.parent_path());

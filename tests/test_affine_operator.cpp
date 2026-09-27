@@ -42,6 +42,37 @@ int main(int argc, char **argv) {
     check(denominator_rejected,
           "direct exact evaluator accepted zero denominator");
 
+    // Apparent moving poles from a rational gauge can be removed in the
+    // physical frame. Its Wronskian is proved from the exact trace identity,
+    // not guessed from the finite Taylor determinant.
+    for(int sign:{-1,1}){
+      auto a=e("1/(x+eps)")*e("1").constant(sign);
+      auto moving=AffineFrobeniusSeries::prepare({{a}},0,1,5);
+      check(!moving.terms().wronskian_prefactor,"raw moving-pole frame acquired an unjustified guard");
+      auto g=fuchsify::detail::power(e("x+eps"),-sign);
+      auto physical=moving.project(std::vector<Exact>{g});
+      physical.wronskian_prefactor=moving.gauged_wronskian_prefactor({{g}},{{a}},{{e("0")}});
+      check(physical.wronskian_prefactor==std::optional<Exact>(fuchsify::detail::power(e("eps"),-sign)),"rational gauge Wronskian normalization changed");
+      auto inverse=ao::prepare(moving,physical,x,3);
+      check(inverse.success()&&inverse.wronskian_verified,"apparent moving-pole inverse failed: "+inverse.reason);
+      near(inverse.inverse.coefficients[0][0][sign-inverse.inverse.low],B(1));
+      bool rejected=false;try{moving.gauged_wronskian_prefactor({{e("1")}},{{a}},{{e("0")}});}
+      catch(const std::domain_error&){rejected=true;}check(rejected,"incorrect gauge trace identity accepted");
+    }
+    for(int sign:{-1,1}){
+      auto a=e("1/(x+eps)")*e("1").constant(sign);
+      auto moving=AffineFrobeniusSeries::prepare({{a}},0,1,5);auto physical=moving.terms();
+      physical.wronskian_prefactor=moving.gauged_wronskian_prefactor({{e("1")}},{{a}},{{a}});
+      check(physical.wronskian_prefactor==std::optional<Exact>(fuchsify::detail::power(e("(x+eps)/eps"),sign)),"integer moving-pole residue was not certified exactly");
+      auto inverse=ao::prepare(moving,physical,x,3);
+      if(sign==1)check(inverse.success()&&inverse.wronskian_verified,"polynomial moving-pole fundamental solution rejected");
+      else check(inverse.status==am::Status::NeedMoreXOrder,"nonuniform finite moving-pole truncation bypassed retained determinant check");
+    }
+    for(const char* text:{"eps/(x+eps)","1/(x+eps)^2","1/(2*x+2*eps)"}){
+      auto a=e(text);auto unsupported=AffineFrobeniusSeries::prepare({{a}},0,1,4);
+      check(!unsupported.gauged_wronskian_prefactor({{e("1")}},{{a}},{{a}}),"non-Laurent moving singularity acquired a gauge certificate");
+    }
+
     auto scalar = AffineFrobeniusSeries::prepare({{e("eps/x")}}, 0, 1, 4);
     ao::Options lazy_options;
     lazy_options.max_row_normalization_steps = 32;
@@ -67,6 +98,87 @@ int main(int argc, char **argv) {
     check(ao::apply_operator(short_op, boundary, {-2, 0}).status ==
               am::Status::NeedMoreSource,
           "missing operator high padded to zero");
+    // Coalescing Frobenius columns can create a removable epsilon pole in
+    // the frame inverse. Integral[0,x] (1,0)F F(x)^-1 = [x,-x/(1+eps)].
+    auto coalescing = AffineFrobeniusSeries::prepare(
+        {{e("0"), e("1/x")}, {e("0"), e("eps/x")}}, 0, 1, 4);
+    ao::Options certificate_options;
+    certificate_options.certify_operator_principal_part = true;
+    auto coalescing_inverse = ao::prepare(coalescing, x, 5, certificate_options);
+    check(coalescing_inverse.success(), coalescing_inverse.reason);
+    auto coalescing_primitive = coalescing.dr_integral_from_zero(
+        coalescing.project(std::vector<Exact>{e("1"), e("0")}));
+    auto conservative = ao::compose(coalescing_inverse, coalescing, coalescing_primitive, x, 2);
+    auto certified = ao::compose(coalescing_inverse, coalescing, coalescing_primitive, x, 2, certificate_options);
+    check(conservative.success() && conservative.row_lower_bounds[0] < 0,
+          "coalescing example did not exercise a conservative pole");
+    check(certified.success() && certified.principal_part_certified &&
+          certified.row_lower_bounds[0] == 0 && !certified.omitted_tail_certified,
+          "exact principal-part cancellation failed: " + certified.principal_part_reason);
+    for (int k=certified.matrix.low; k<=2; ++k) {
+      near(certified.matrix.coefficients[0][0][k-certified.matrix.low], k==0 ? x : B(0));
+      near(certified.matrix.coefficients[0][1][k-certified.matrix.low], k<0 ? B(0) : (k%2 ? x : -x));
+      if(k<0) for(unsigned j=0;j<2;++j)
+        check(certified.matrix.coefficients[0][j][k-certified.matrix.low].is_zero(),
+              "certified principal coefficient is not exact zero");
+    }
+    auto cached_certificate=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,certificate_options);
+    check(cached_certificate.principal_part_certified&&
+          cached_certificate.row_lower_bounds==certified.row_lower_bounds&&
+          cached_certificate.principal_part_exact_operations<certified.principal_part_exact_operations,
+          "shared exact K cache did not reduce repeated proof work");
+    std::cout << "Coalescing retained operator lower bound " << conservative.row_lower_bounds[0]
+              << " -> " << certified.row_lower_bounds[0] << "; exact proof operations "
+              << certified.principal_part_exact_operations << " first, "
+              << cached_certificate.principal_part_exact_operations << " cached\n";
+    am::Boundary just_enough{0,0,{{B(1)},{B(2)}}};
+    check(ao::apply_operator(certified,just_enough,{0,0}).success(),
+          "certified removable pole still demands an extra boundary order");
+    check(ao::apply_operator(conservative,just_enough,{0,0}).status==am::Status::NeedMoreBoundary,
+          "conservative operator unexpectedly waived a boundary coefficient");
+    auto limited=certificate_options;limited.principal_part_max_operations=0;
+    auto fallback=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,limited);
+    check(fallback.success() && fallback.principal_part_attempted &&
+          !fallback.principal_part_certified && fallback.row_lower_bounds==conservative.row_lower_bounds,
+          "over-budget certificate changed conservative bounds");
+    for(unsigned j=0;j<2;++j)for(int k=fallback.matrix.low;k<=fallback.matrix.high;++k)
+      check(acb_equal(fallback.matrix.coefficients[0][j][k-fallback.matrix.low].raw(),
+                      conservative.matrix.coefficients[0][j][k-conservative.matrix.low].raw()),
+            "failed certificate changed numeric coefficients");
+    auto genuine=coalescing.dr_integral_from_zero(
+        coalescing.project(std::vector<Exact>{e("1/eps"),e("0")}));
+    auto genuine_operator=ao::compose(coalescing_inverse,coalescing,genuine,x,2,certificate_options);
+    check(genuine_operator.success() && genuine_operator.principal_part_certified &&
+          genuine_operator.row_lower_bounds[0]==-1,
+          "exact certificate removed a genuine epsilon pole: "+genuine_operator.principal_part_reason);
+    check(ao::apply_operator(genuine_operator,just_enough,{0,0}).status==am::Status::NeedMoreBoundary,
+          "genuine pole no longer requires its missing boundary coefficient");
+    auto no_data=ao::prepare(coalescing,x,5);
+    auto no_proof=ao::compose(no_data,coalescing,coalescing_primitive,x,2,certificate_options);
+    check(no_proof.success()&&!no_proof.principal_part_certified&&
+          no_proof.row_lower_bounds==conservative.row_lower_bounds,
+          "certificate without retained exact data did not fall back");
+    auto specialized_certificate_options=certificate_options;
+    specialized_certificate_options.specialize_exact_point=true;
+    auto specialized_certificate_inverse=ao::prepare(coalescing,x,5,specialized_certificate_options);
+    auto specialized_certificate=ao::compose(specialized_certificate_inverse,coalescing,coalescing_primitive,x,2,specialized_certificate_options);
+    check(specialized_certificate.success()&&specialized_certificate.principal_part_certified&&
+          specialized_certificate.matrix.low==0,"specialized principal-part certificate failed");
+    auto all_primitives=coalescing.dr_integral_from_zero(coalescing.terms());
+    auto all_certified=ao::compose(coalescing_inverse,coalescing,all_primitives,x,2,certificate_options);
+    check(all_certified.success()&&all_certified.principal_part_certified&&
+          all_certified.row_lower_bounds==std::vector<int>({0,0})&&all_certified.matrix.low==0,
+          "multirow principal-part certificate failed: "+all_certified.principal_part_reason);
+    auto time_limited=certificate_options;time_limited.principal_part_max_milliseconds=0;
+    auto timed_out=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,time_limited);
+    check(timed_out.success()&&!timed_out.principal_part_certified&&
+          timed_out.row_lower_bounds==conservative.row_lower_bounds,
+          "time-limited certificate did not preserve conservative bounds");
+    auto depth_limited=certificate_options;depth_limited.principal_part_max_depth=0;
+    auto depth_fallback=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,depth_limited);
+    check(depth_fallback.success()&&!depth_fallback.principal_part_certified&&
+          depth_fallback.row_lower_bounds==conservative.row_lower_bounds,
+          "depth-limited certificate did not preserve conservative bounds");
     auto colliding = AffineFrobeniusSeries::prepare(
         {{e("eps/x"), e("1/x")}, {e("0"), e("0")}}, 0, 1, 4);
     auto collision_inverse = ao::prepare(colliding, x, 8);
@@ -101,6 +213,26 @@ int main(int argc, char **argv) {
     // two huge independently rounded coefficients; the exact result is zero.
     auto constant_series = AffineFrobeniusSeries::prepare(
         {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2);
+    auto varying_frame=constant_series.project(std::vector<std::vector<Exact>>{
+      {e("x+eps*x^2"),e("1")},{e("x+eps*x^2"),e("1+eps*(1+x)")}});
+    auto specialized_options=numeric_options;specialized_options.specialize_exact_point=true;
+    for(const char* at:{"1/8","3/16","1/128"}){
+      const auto point=B::from_strings(at);
+      auto symbolic_inverse=ao::prepare(constant_series,varying_frame,point,3,numeric_options);
+      auto point_inverse=ao::prepare(constant_series,varying_frame,point,3,specialized_options);
+      check(symbolic_inverse.success()&&point_inverse.success(),symbolic_inverse.reason+point_inverse.reason);
+      check(point_inverse.specialized_exact_point&&point_inverse.wronskian_verified,"exact rational point specialization was not checked");
+      check(point_inverse.inverse.low==symbolic_inverse.inverse.low,"point specialization changed epsilon valuation");
+      for(unsigned i=0;i<2;++i)for(unsigned j=0;j<2;++j)for(int k=point_inverse.inverse.low;k<=3;++k)
+        near(point_inverse.inverse.coefficients[i][j][k-point_inverse.inverse.low],symbolic_inverse.inverse.coefficients[i][j][k-symbolic_inverse.inverse.low]);
+      auto composed=ao::compose(point_inverse,constant_series,varying_frame,point,2,specialized_options);
+      check(composed.success(),composed.reason);
+      for(unsigned i=0;i<2;++i)for(unsigned j=0;j<2;++j)for(int k=composed.matrix.low;k<=2;++k)
+        near(composed.matrix.coefficients[i][j][k-composed.matrix.low],B(k==0&&i==j?1:0));
+    }
+    auto interval_point=x;arb_add_error_2exp_si(acb_realref(interval_point.raw()),-100);
+    auto interval_inverse=ao::prepare(constant_series,varying_frame,interval_point,2,specialized_options);
+    check(interval_inverse.success()&&!interval_inverse.specialized_exact_point,"uncertain point was specialized as an exact rational");
     auto big = e("2^512+1");
     auto adversarial = constant_series.project(std::vector<std::vector<Exact>>{
         {e("1+eps+eps^2"), e("1")},

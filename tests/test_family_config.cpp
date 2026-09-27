@@ -22,6 +22,10 @@ int main(int argc,char** argv) {
   auto config=family_config::parse(document);
   if(config.ibp_provider!="ibp-solver"||config.ibp_dots!=2||config.ibp_numerators!=3)throw std::runtime_error("IBP provider configuration forwarding");
   if(config.numerical.ordinary_method!=recursion::OrdinaryMethod::spectral || config.numerical.spectral.accuracy_goal!=32)throw std::runtime_error("FT solver configuration forwarding");
+  auto coefficient_document=document;
+  coefficient_document.as_object().at("numerical").as_object()["transport"]="ultraspherical";
+  if(family_config::parse(coefficient_document).numerical.ordinary_method!=recursion::OrdinaryMethod::ultraspherical)
+    throw std::runtime_error("ultraspherical configuration forwarding");
   auto graph=recursion::prepare(config.family,config.integrals,config.preparation);
   auto result=recursion::Evaluator(graph,config.numerical).evaluate(0);
   using B=kernel::ComplexBall;B::set_precision(384);B root,argument,atanh;

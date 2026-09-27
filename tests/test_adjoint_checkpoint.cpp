@@ -74,8 +74,19 @@ int main(){try {
   const auto key=cp::identity(a,initial,forcing,path,options);const auto file=directory/(key+".json");
   auto different=initial;different.coefficients[0][0][0]+=B(1);
   require(key!=cp::identity(a,different,forcing,path,options),"cache identity omitted original input balls");
+  for(unsigned flag=0;flag<3;++flag) {
+    auto variant=options;
+    if(flag==0)variant.circuit_grouped_dot=!variant.circuit_grouped_dot;
+    if(flag==1)variant.compact_centered_only=!variant.compact_centered_only;
+    if(flag==2)variant.compact_centered_recovery=!variant.compact_centered_recovery;
+    require(key!=cp::identity(a,initial,forcing,path,variant),"cache identity omitted compact execution policy");
+  }
   auto alternate=options;alternate.taylor_order=81;
   require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted order");
+  alternate=options;alternate.centered_map_working_bits=128;
+  require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted homogeneous map precision");
+  alternate=options;alternate.centered_before_rational=true;
+  require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted centered routing");
   alternate=options;alternate.max_charts_per_leg=19999;
   require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted finite chart budget");
   require(key!=cp::identity({{two/(x+two)}},initial,forcing,path,options),"cache identity omitted connection");

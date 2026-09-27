@@ -32,6 +32,39 @@ int main(){try{
   require(factored.statistics().exact_plans==1 && !actual.taylor_tail_certified,"factored plan reuse/tail contract");
   auto before=factored.statistics();(void)factored.evaluate(0);
   require(factored.statistics().numeric_evaluations==before.numeric_evaluations,"factored expression/value cache desynchronized");
+  // Scaling all parent observables by eps^-2 creates simultaneous endpoint
+  // and middle-integrand poles. They consume child coefficients independently.
+  auto pole_graph=graph;auto epsilon=graph.dimension.variable(path_epsilon_variables(graph.dimension).second);
+  for(auto& row:pole_graph.nodes[0].observable_rows)for(auto& entry:row)entry=entry/epsilon.pow(2);
+  std::map<std::string,std::pair<int,int>> windows;int first_child_demand=-1;
+  settings.progress=[&](std::size_t depth,const std::string& phase,int high) {
+    if(!depth && phase=="child boundary" && first_child_demand<0)first_child_demand=high;
+  };
+  settings.operator_observer=[&](std::size_t depth,const std::string& phase,const LaurentRows& rows) {
+    if(!depth)windows[phase]={rows.low,rows.high};
+  };
+  recursion::Evaluator poles(pole_graph,settings);auto pole_value=poles.evaluate(0);
+  settings.operator_observer={};settings.progress={};
+  auto through_two=baseline.evaluate(2);
+  for(unsigned i=0;i<pole_value.values.size();++i)
+    for(int k=std::max(pole_value.low,through_two.low-2);k<=0;++k)
+      require(upper(pole_value.values[i][k-pole_value.low]-through_two.values[i][k+2-through_two.low])<1e-13,
+          "separate factored demands changed an epsilon-pole observable");
+  const auto [lower_low,initial_high]=windows.at("lower factored map");
+  const auto [integrated_low,integrated_high]=windows.at("middle integrated map");
+  const auto physical_high=windows.at("upper factored map").second;
+  const auto left_low=windows.at("lower endpoint operator").first;
+  const auto right_low=windows.at("upper endpoint operator").first;
+  const auto observable_low=integrated_low-lower_low;
+  require(physical_high==std::max(integrated_high,integrated_high-right_low) &&
+      initial_high==std::max({integrated_high-left_low,physical_high,integrated_high-observable_low}),
+      "pipeline did not keep endpoint and integrated map demands separate");
+  const auto& pole_child=poles.linear_expression(1);
+  const int inverse_gauge_loss=std::max(0,pole_child.transform.low-lower_low);
+  require(first_child_demand==initial_high+pole_child.leaf_source->low+inverse_gauge_loss,
+      "factored preflight retained the duplicated epsilon lookahead");
+  require(std::max(integrated_high-left_low,physical_high-observable_low)>initial_high,
+      "pole regression did not remove the duplicated endpoint/integrand lookahead");
   settings.linear_method=recursion::LinearMethod::automatic;
   recursion::Evaluator automatic(graph,settings);auto chosen=automatic.evaluate(0);
   require(automatic.statistics().factored_selections+automatic.statistics().adjoint_selections==1,

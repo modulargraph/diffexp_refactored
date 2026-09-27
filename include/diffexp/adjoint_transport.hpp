@@ -1,9 +1,15 @@
 #pragma once
 #include "diffexp/laurent_transport.hpp"
 #include "diffexp/polynomial_transport.hpp"
+#include "diffexp/rational_circuit.hpp"
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <atomic>
+#include <exception>
+#include <thread>
+#include <mpfr.h>
 
 namespace diffexp {
 // A bounded numerical method exhausted its conditioning control. Distinct
@@ -27,10 +33,23 @@ struct LaurentRows {
     return d;
   }
 };
+struct AdjointPhaseTimer {
+  using Clock=std::chrono::steady_clock;
+  double* destination=nullptr;Clock::time_point start=Clock::now();
+  ~AdjointPhaseTimer(){if(destination)*destination+=std::chrono::duration<double>(Clock::now()-start).count();}
+};
 struct AdjointConditioningStats {
   std::size_t polynomial_charts=0, rational_cross_checks=0, rational_compilations=0;
   std::size_t centered_charts=0, homogeneous_chart_maps=0, centered_budget_skips=0, conditioning_subdivisions=0;
   std::size_t polynomial_homogeneous_columns=0, rational_homogeneous_columns=0;
+  std::size_t polynomial_midpoint_charts=0, rational_midpoint_charts=0;
+  std::size_t reduced_precision_homogeneous_maps=0, full_precision_map_retries=0;
+  std::size_t centered_before_rational_charts=0, centered_first_fallbacks=0;
+  std::size_t centered_only_charts=0, centered_only_fallbacks=0, exact_input_map_columns_skipped=0;
+  unsigned max_homogeneous_map_workers=0;
+  std::size_t circuit_charts=0,circuit_homogeneous_columns=0,circuit_preparations=0;
+  std::size_t circuit_addmul_operations=0,circuit_scalar_operations=0,circuit_dot_products=0,circuit_peak_live_cells=0;
+  double compilation_seconds=0,preparation_seconds=0,source_seconds=0,homogeneous_seconds=0,reference_seconds=0;
 };
 // State after an accepted chart, expressed on the ORIGINAL path leg. Keeping
 // its parameterization preserves the subsequent finite Taylor polynomials.
@@ -45,10 +64,32 @@ struct AdjointOptions {
   // Taylor-array cells per batch; persistent coefficients retain their own cap.
   std::size_t max_taylor_cells=20000000;
   bool polynomial_recurrence=true;
+  // Compact rational execution preserves the same retained-polynomial and
+  // uncertainty contracts. False selects the archived recurrence explicitly.
+  bool rational_circuit_recurrence=true;
+  bool circuit_grouped_dot=true;
+  // Inherited uncertainty can already exceed the arithmetic reserve. Recover
+  // with the enclosing midpoint/map decomposition before paying for a second
+  // whole-input recurrence, even when this step grows that uncertainty <2x.
+  bool compact_centered_recovery=true;
+  // Once inherited uncertainty already consumes the half-precision reserve,
+  // evaluate the enclosing midpoint/map decomposition directly. The guarded
+  // midpoint, map precision retry and final conditioning test still apply.
+  bool compact_centered_only=true;
   // Apply inherited interval uncertainty once through the local homogeneous
   // map when both direct recurrences suffer arithmetic wrapping. This keeps
-  // the same retained Taylor polynomial, epsilon window and working precision.
+  // the same retained Taylor polynomial and epsilon window.
   bool centered_input=true;
+  // Zero preserves full working precision. A positive value only changes the
+  // homogeneous map acting on inherited noise; midpoint and outer guards keep
+  // full precision. Inadequate maps are retried at full precision.
+  slong centered_map_working_bits=0;
+  // Opt-in independent homogeneous columns; 1 preserves serial execution.
+  // Up to four workers share the total max_taylor_cells workspace budget.
+  unsigned centered_map_workers=1;
+  // Try the enclosing centered evaluation before the uncertain-input rational
+  // recurrence. Its midpoint/column guards and final conditioning test remain.
+  bool centered_before_rational=false;
   std::size_t max_centered_map_cells=20000000;
   // A remaining large loss of arithmetic accuracy rejects this step and
   // reduces its length. Zero preserves the original geometric chart sequence.
@@ -130,15 +171,65 @@ inline LaurentBoundary apply_laurent_rows(const LaurentRows& rows,const LaurentB
 }
 
 namespace adjoint_detail {
+inline thread_local bool homogeneous_column_worker=false;
+// Workers only fill disjoint caller-owned slots. Join before reading results or
+// rethrowing the lowest-index failure, independent of scheduling. A worker may
+// enter this helper recursively, but never starts another pool.
+template<class Work>
+inline unsigned homogeneous_columns(unsigned count,unsigned requested,slong bits,Work&& work) {
+  if(!requested || requested>4 || bits<64)throw std::invalid_argument("homogeneous map worker/precision budget");
+  if(!count)return 0;
+  unsigned workers=homogeneous_column_worker?1:std::min(count,requested);
+#if !FLINT_USES_TLS
+  workers=1;
+#endif
+  if(!mpfr_buildopt_tls_p())workers=1;
+  if(workers==1) {
+    struct PrecisionRestore {slong previous=Jet::Ball::precision();~PrecisionRestore(){Jet::Ball::set_precision(previous);}} restore;
+    Jet::Ball::set_precision(bits);
+    for(unsigned column=0;column<count;++column)work(column);return 1;
+  }
+  std::atomic<unsigned> next{0};std::vector<std::exception_ptr> failures(count);
+  std::vector<std::jthread> pool;pool.reserve(workers);
+  for(unsigned worker=0;worker<workers;++worker)pool.emplace_back([&] {
+    struct WorkerScope {
+      slong previous_bits=Jet::Ball::precision();
+      bool previous_worker=homogeneous_column_worker;
+      int previous_flint_workers=-1;
+      explicit WorkerScope(slong precision) {
+        Jet::Ball::set_precision(precision);homogeneous_column_worker=true;
+        // Do not mutate FLINT's global pool or allow nested FLINT workers.
+        if(flint_get_num_threads()>1)previous_flint_workers=flint_set_num_workers(0);
+      }
+      ~WorkerScope() {
+        if(previous_flint_workers>=0)flint_reset_num_workers(previous_flint_workers);
+        Jet::Ball::set_precision(previous_bits);homogeneous_column_worker=previous_worker;
+        flint_cleanup();
+      }
+    } scope(bits);
+    for(unsigned column;(column=next.fetch_add(1,std::memory_order_relaxed))<count;)
+      try {work(column);}catch(...) {failures[column]=std::current_exception();}
+  });
+  for(auto& worker:pool)worker.join();
+  for(const auto& failure:failures)if(failure)std::rethrow_exception(failure);
+  return workers;
+}
+
+inline NativeTailMagnitude enclosure_uncertainty(const Jet::Ball& value) {
+  using B=Jet::Ball;using M=NativeTailMagnitude;
+  if(!value.is_finite())return M::upper_abs(value);
+  B error;
+  arf_set_mag(arb_midref(acb_realref(error.raw())),arb_radref(acb_realref(value.raw())));
+  arf_set_mag(arb_midref(acb_imagref(error.raw())),arb_radref(acb_imagref(value.raw())));
+  return M::upper_abs(error);
+}
 // Absolute accuracy near zero and relative accuracy for large coefficients.
 // This is an arithmetic conditioning guard, not an omitted-tail estimator.
 inline NativeTailMagnitude enclosure_quality(const Jet::Ball& value) {
   using B=Jet::Ball;using M=NativeTailMagnitude;
   if(!value.is_finite())return M::upper_abs(value);
-  B midpoint,error;acb_get_mid(midpoint.raw(),value.raw());
-  arf_set_mag(arb_midref(acb_realref(error.raw())),arb_radref(acb_realref(value.raw())));
-  arf_set_mag(arb_midref(acb_imagref(error.raw())),arb_radref(acb_imagref(value.raw())));
-  return M::upper_abs(error)/M::maximum(M::one(),M::lower_abs(midpoint));
+  B midpoint;acb_get_mid(midpoint.raw(),value.raw());
+  return enclosure_uncertainty(value)/M::maximum(M::one(),M::lower_abs(midpoint));
 }
 inline NativeTailMagnitude enclosure_quality(const Boundary& values) {
   NativeTailMagnitude result;
@@ -189,6 +280,28 @@ inline Boundary conditioned_chart(const Boundary& input,Fast fast,Reference refe
   if(needs_rational_cross_check(input,output)) {
     if(stats)++stats->rational_cross_checks;
     output=intersect_retained_enclosures(std::move(output),reference(input));
+  }
+  return output;
+}
+// The exact midpoint has no inherited input uncertainty. Use the finite-lag
+// recurrence while it retains the same half-precision reserve required of
+// homogeneous map columns. The outer uncertain-input cross-check, centered
+// enclosure intersection and subdivision guard still apply independently.
+template<class Fast,class Reference>
+inline Boundary conditioned_midpoint_chart(const Boundary& midpoint,Fast fast,Reference reference,
+    AdjointConditioningStats* stats) {
+  using B=Jet::Ball;
+  for(const auto& row:midpoint)for(const auto& value:row)
+    if(!value.is_finite() || !arb_is_exact(acb_realref(value.raw())) ||
+        !arb_is_exact(acb_imagref(value.raw())))
+      throw std::invalid_argument("centered midpoint recurrence requires finite exact input");
+  auto output=fast(midpoint);
+  if(stats)++stats->polynomial_midpoint_charts;
+  B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
+  const auto quality=enclosure_quality(output);
+  if(!quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve)) {
+    if(stats)++stats->rational_midpoint_charts;
+    output=intersect_retained_enclosures(std::move(output),reference(midpoint));
   }
   return output;
 }
@@ -300,11 +413,24 @@ inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary&
   B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
   const auto reserve_bound=M::upper_abs(reserve);
   if(input.size()!=output.size())throw std::logic_error("conditioning subdivision shape mismatch");
+  // Coupling transfers existing uncertainty into initially exact zero entries
+  // (especially integral accumulators). That transfer is not newly lost
+  // arithmetic precision and cannot be repaired by shrinking a step to zero.
+  // Keep the independent recurrence/centered-map checks, all output radii and
+  // the same 256-fold growth guard, but include the incoming absolute radius
+  // in the scale of the receiving component.
+  M incoming;
+  for(const auto& row:input)for(const auto& value:row)
+    incoming=M::maximum(incoming,enclosure_uncertainty(value));
   for(unsigned i=0;i<input.size();++i) {
     if(input[i].size()!=output[i].size())throw std::logic_error("conditioning subdivision window mismatch");
-    for(unsigned k=0;k<input[i].size();++k)
-      if(!output[i][k].is_finite() || enclosure_quality(output[i][k])>
-          M::maximum(reserve_bound,M::from_ui(256)*enclosure_quality(input[i][k])))return true;
+    for(unsigned k=0;k<input[i].size();++k) {
+      if(!output[i][k].is_finite())return true;
+      B midpoint;acb_get_mid(midpoint.raw(),output[i][k].raw());
+      const auto inherited=incoming/M::maximum(M::one(),M::lower_abs(midpoint));
+      if(enclosure_quality(output[i][k])>
+          M::maximum(reserve_bound,M::from_ui(256)*M::maximum(enclosure_quality(input[i][k]),inherited)))return true;
+    }
   }
   return false;
 }
@@ -314,6 +440,52 @@ inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary&
 // cancellations such as A^2=0 are resolved before input intervals enter.
 // Every term remains a ball enclosure of the SAME retained polynomial; this
 // operation neither discards radii nor supplies an omitted-series-tail bound.
+// Only nontrivial reachable map entries are stored; exact identity columns
+// (including FT accumulators) have no numerical coefficient payload.
+struct SparseChartMap {
+  struct Entry {unsigned row;std::vector<Jet::Ball> coefficients;};
+  struct Column {bool identity=false;std::vector<Entry> entries;unsigned minimum_input_order=0;};
+  std::size_t dimension=0,width=0;
+  std::vector<Column> columns;
+};
+template<class Reference>
+inline Boundary centered_action(const Boundary& input,Reference reference,
+    const SparseChartMap& homogeneous,std::size_t block_dimension) {
+  using B=Jet::Ball;const auto d=homogeneous.dimension,width=homogeneous.width;
+  if(!d || d!=block_dimension || homogeneous.columns.size()!=d || input.size()<d+1 ||
+      (input.size()-1)%d || !width)throw std::invalid_argument("sparse centered chart map/input shape");
+  Boundary midpoint=input,delta=input;
+  for(unsigned i=0;i<input.size();++i) {
+    if(input[i].size()!=width)throw std::invalid_argument("sparse centered chart window mismatch");
+    for(unsigned k=0;k<width;++k) {
+      if(!input[i][k].is_finite())throw std::domain_error("nonfinite centered chart input");
+      acb_get_mid(midpoint[i][k].raw(),input[i][k].raw());
+      acb_sub(delta[i][k].raw(),input[i][k].raw(),midpoint[i][k].raw(),B::precision());
+    }
+  }
+  for(const auto& value:delta.back())if(!value.is_zero())
+    throw std::invalid_argument("centered chart requires an exact constant forcing source");
+  auto output=reference(midpoint);
+  if(output.size()!=input.size())throw std::logic_error("sparse centered chart reference shape");
+  for(const auto& row:output)if(row.size()!=width)throw std::logic_error("sparse centered chart reference window");
+  for(std::size_t first=0;first+1<input.size();first+=d)for(unsigned j=0;j<d;++j) {
+    const auto& column=homogeneous.columns[j];
+    if(column.minimum_input_order>width)throw std::logic_error("sparse map input support exceeds window");
+    for(unsigned k=0;k<column.minimum_input_order;++k)
+      if(!delta[first+j][k].is_zero())throw std::logic_error("truncated map received uncertainty below its known support");
+    if(column.identity) {
+      if(!column.entries.empty())throw std::logic_error("identity map column has numerical entries");
+      for(unsigned k=0;k<width;++k)output[first+j][k]+=delta[first+j][k];
+    } else for(const auto& entry:column.entries) {
+      if(entry.row>=d || entry.coefficients.size()!=width-column.minimum_input_order)throw std::logic_error("sparse map entry shape");
+      for(unsigned k=0;k<width;++k)for(unsigned e=0;e<=k && e<entry.coefficients.size();++e)
+        if(!entry.coefficients[e].is_zero() && !delta[first+j][k-e].is_zero())
+          acb_addmul(output[first+entry.row][k].raw(),entry.coefficients[e].raw(),delta[first+j][k-e].raw(),B::precision());
+    }
+  }
+  return output;
+}
+// Dense reference adapter retained for compatibility and independent tests.
 template<class Reference>
 inline Boundary centered_action(const Boundary& input,Reference reference,
     const LaurentRows& homogeneous,std::size_t block_dimension) {
@@ -355,7 +527,9 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
     const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,const AdjointOptions& options={}) {
   using B=Jet::Ball;const auto d=initial.columns(),r=initial.coefficients.size();
   if(matrix.size()!=d || forcing.size()!=r || vertices.empty() || options.taylor_order<8 || options.taylor_order>1000 || !options.max_charts_per_leg ||
-      !options.max_centered_map_cells || options.max_centered_map_cells>20000000 || options.max_conditioning_halvings>32)
+      !options.max_centered_map_cells || options.max_centered_map_cells>20000000 || options.max_conditioning_halvings>32 ||
+      !options.centered_map_workers || options.centered_map_workers>4 ||
+      (options.centered_map_working_bits && (options.centered_map_working_bits<64 || options.centered_map_working_bits>1000000)))
     throw std::invalid_argument("adjoint transport dimensions/path/budget");
   for(const auto& row:matrix)if(row.size()!=d)throw std::invalid_argument("adjoint connection must be square");
   auto [xi,ei]=path_epsilon_variables(vertices[0]);int low=std::min(0,initial.low);
@@ -409,12 +583,17 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       compact.push_back({static_cast<unsigned>(i*d+j),static_cast<unsigned>(r*d),0,width*normalized.substitute(point)});
     }
     std::optional<polynomial_transport::Compiled> polynomial;
+    std::vector<rational_circuit::Compiled> circuits;
+    std::optional<rational_circuit::Compiled> homogeneous_circuit;
+    std::vector<RationalLineEntry> homogeneous_entries;
+    for(const auto& entry:compact)if(entry.row<d && entry.column<d)homogeneous_entries.push_back(entry);
     std::vector<adjoint_detail::Entry> compiled;
     std::optional<std::vector<adjoint_detail::Entry>> homogeneous_compiled;
     std::optional<polynomial_transport::Compiled> homogeneous_polynomial;
     bool rational_compiled=false;
     const auto ensure_rational=[&] {
       if(rational_compiled)return;
+      AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->compilation_seconds:nullptr};
       std::vector<RationalLineEntry> expanded;
       for(const auto& entry:compact) {
         auto coefficients=feynman::scalar_functional_detail::epsilon_series(entry.coefficient,ei,initial.high-low);
@@ -423,7 +602,48 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       compiled=adjoint_detail::compile(expanded);rational_compiled=true;
       if(options.conditioning_stats)++options.conditioning_stats->rational_compilations;
     };
-    if(options.polynomial_recurrence) {
+    if(options.polynomial_recurrence && options.rational_circuit_recurrence) {
+      AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->compilation_seconds:nullptr};
+      rational_circuit::Options limits;limits.max_cells=options.max_taylor_cells;
+      limits.grouped_dot=options.circuit_grouped_dot;
+      limits.max_terms=2000000;limits.max_dimension=static_cast<unsigned>(r*d+1);
+      limits.max_epsilon_degree=std::max(limits.max_epsilon_degree,static_cast<unsigned>(initial.high-low));
+      // The compact recurrence has auxiliary rings in addition to Y history.
+      // Retry smaller independent-row batches transactionally if their full
+      // declared storage cannot fit. Exploration time remains accounted for.
+      for(;;) {
+        circuits.clear();bool fits=true;
+        for(std::size_t first=0;first<r;first+=batch_rows) {
+          const auto begin=first*d,count=std::min(batch_rows,r-first)*d;
+          std::vector<RationalLineEntry> selected;
+          for(const auto& entry:compact)if(entry.row>=begin && entry.row<begin+count) {
+            auto column=entry.column==r*d?count:entry.column-begin;
+            if(column>count)throw std::logic_error("circuit batch crosses independent observable rows");
+            selected.push_back({static_cast<unsigned>(entry.row-begin),static_cast<unsigned>(column),entry.epsilon,entry.coefficient});
+          }
+          auto candidate=rational_circuit::compile(selected,count+1,xi,ei,initial.high-low,options.taylor_order,limits);
+          const auto& plan=candidate.data();
+          // Upper bounds are small enough for uint64 by the admitted d,N,K and
+          // compilation term caps; prepare() independently checks every sum.
+          std::uint64_t rings=0,largest=0;
+          for(const auto& stream:plan.streams)if(!plan.denominators[stream.denominator].one)
+            rings+=std::min(options.taylor_order,stream.lag+1)*std::uint64_t(epsilon_count);
+          for(const auto& poly:plan.polynomials)largest=std::max(largest,std::uint64_t(poly.size()));
+          auto shared=std::uint64_t(plan.coefficient_cells)+plan.denominators.size();
+          auto live=(std::uint64_t(options.taylor_order)+2)*plan.dimension*epsilon_count+rings+shared+2;
+          if(limits.grouped_dot)live+=2*rational_circuit::dot_capacity(plan,options.taylor_order,epsilon_count)+1;
+          auto preparation=shared+2*largest+3;
+          if(std::max(live,preparation)>limits.max_cells){fits=false;break;}
+          circuits.push_back(std::move(candidate));
+        }
+        if(fits)break;
+        if(batch_rows==1)throw std::length_error("adjoint circuit cannot fit one observable row within the live-cell budget");
+        batch_rows=(batch_rows+1)/2;
+      }
+      limits.max_dimension=d;
+      homogeneous_circuit=rational_circuit::compile(homogeneous_entries,d,xi,ei,initial.high-low,options.taylor_order,limits);
+    } else if(options.polynomial_recurrence) {
+      AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->compilation_seconds:nullptr};
       polynomial_transport::Options limits;limits.max_cells=options.max_taylor_cells;
       limits.max_dimension=static_cast<unsigned>(r*d+1);
       limits.max_epsilon_degree=std::max(limits.max_epsilon_degree,static_cast<unsigned>(initial.high-low));
@@ -446,23 +666,62 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       if(++charts>options.max_charts_per_leg)throw std::runtime_error("adjoint transport chart budget exhausted");
       double next=clearance_endpoint(center,roots);
       if(!(next>center) || next>1)throw std::runtime_error("adjoint transport geometric chart made no progress");
+      // Prepared coefficients depend on center/order/precision, not the trial
+      // step or RHS. Keep them through conditioning halvings at this center.
+      std::vector<std::optional<rational_circuit::Prepared>> circuit_prepared(circuits.size());
+      std::optional<rational_circuit::Prepared> homogeneous_prepared;
+      slong homogeneous_prepared_bits=0;
       for(unsigned halvings=0;;++halvings) {
       // A rejected chart must not leak partially updated observable batches
       // into its retry. No precision, order or epsilon window is changed.
       Boundary before;
       if(options.max_conditioning_halvings)before=state;
       B c,end;acb_set_d(c.raw(),center);acb_set_d(end.raw(),next);
+      const auto circuit_chart=[&](std::size_t index,const Boundary& input) {
+        if(!circuit_prepared.at(index)) {
+          AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->preparation_seconds:nullptr};
+          circuit_prepared[index]=rational_circuit::prepare(circuits.at(index),c,options.taylor_order,epsilon_count);
+          if(options.conditioning_stats)++options.conditioning_stats->circuit_preparations;
+        }
+        AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->source_seconds:nullptr};
+        rational_circuit::Statistics work;
+        auto out=rational_circuit::chart(*circuit_prepared[index],input,end-c,&work);
+        if(auto* stats=options.conditioning_stats) {
+          ++stats->circuit_charts;stats->circuit_addmul_operations+=work.addmul_operations;
+          stats->circuit_scalar_operations+=work.scalar_operations;
+          stats->circuit_dot_products+=work.dot_products;
+          stats->circuit_peak_live_cells=std::max(stats->circuit_peak_live_cells,work.live_cells);
+        }
+        return out;
+      };
       // All observable blocks share this homogeneous map, including across
-      // independent-row batches. Construct its columns sequentially, so the
-      // Taylor workspace never exceeds the already checked single-row budget.
-      std::optional<LaurentRows> homogeneous_map;
-      const auto centered_guard=[&](const Boundary& input,Boundary output,const auto& reference) {
-        if(!options.centered_input || !adjoint_detail::needs_centered_action(input,output))return output;
+      // independent-row batches. Parallel columns share the existing Taylor
+      // workspace budget; the complete map commits only after every solve.
+      std::optional<adjoint_detail::SparseChartMap> homogeneous_map;
+      // Snapshot support before the first observable batch is advanced. This
+      // is needed even when conditioning subdivisions have been disabled.
+      std::vector<unsigned> first_uncertain_order(d,epsilon_count);
+      for(std::size_t first=0;first+1<state.size();first+=d)
+        for(unsigned column=0;column<d;++column)
+          for(unsigned k=0;k<first_uncertain_order[column];++k) {
+            const auto& value=state[first+column][k];
+            if(!arb_is_exact(acb_realref(value.raw())) || !arb_is_exact(acb_imagref(value.raw())))
+              first_uncertain_order[column]=k;
+          }
+      bool reduced_homogeneous_map=false;
+      const bool compact_recovery=!circuits.empty() && options.compact_centered_recovery;
+      const auto needs_centered=[&](const Boundary& input,const Boundary& output) {
+        return compact_recovery?adjoint_detail::needs_rational_cross_check(input,output):
+          adjoint_detail::needs_centered_action(input,output);
+      };
+      const auto centered_guard=[&](const Boundary& input,Boundary output,const auto& reference,
+          bool centered_only=false) {
+        if(!options.centered_input || (!centered_only && !needs_centered(input,output)))return output;
         if(d>options.max_centered_map_cells/epsilon_count/d) {
           if(options.conditioning_stats)++options.conditioning_stats->centered_budget_skips;
           return output;
         }
-        if(!homogeneous_map) {
+        if(!homogeneous_map && !homogeneous_circuit) {
           ensure_rational();
           if(!homogeneous_compiled) {
             homogeneous_compiled.emplace();
@@ -484,43 +743,196 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
                   epsilon_count-1,options.taylor_order,limits);
             }
           }
-          homogeneous_map=LaurentRows{0,static_cast<int>(epsilon_count)-1,
-            std::vector(d,std::vector(d,std::vector<B>(epsilon_count,B(0))))};
+        }
+        const auto build_homogeneous_map=[&](slong map_bits) {
+          struct PrecisionRestore { slong bits=B::precision(); ~PrecisionRestore(){B::set_precision(bits);} } precision_restore;
+          if(map_bits<64 || map_bits>precision_restore.bits)throw std::invalid_argument("centered map precision must lie between 64 and working precision");
+          B::set_precision(map_bits);
+          AdjointPhaseTimer phase_timer{options.conditioning_stats?&options.conditioning_stats->homogeneous_seconds:nullptr};
+          if(homogeneous_circuit && (!homogeneous_prepared || homogeneous_prepared_bits!=map_bits)) {
+            AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->preparation_seconds:nullptr};
+            homogeneous_prepared=rational_circuit::prepare(*homogeneous_circuit,c,options.taylor_order,epsilon_count);
+            homogeneous_prepared_bits=map_bits;
+            if(options.conditioning_stats)++options.conditioning_stats->circuit_preparations;
+          }
+          homogeneous_map=adjoint_detail::SparseChartMap{d,epsilon_count,
+            std::vector<adjoint_detail::SparseChartMap::Column>(d)};
           std::vector<bool> active_column(d,false);
-          for(const auto& entry:*homogeneous_compiled)for(const auto& [row,column]:entry.positions)
-            active_column[column]=true;
+          for(const auto& entry:homogeneous_entries)active_column[entry.column]=true;
+          std::vector<unsigned> columns;
           for(unsigned column=0;column<d;++column) {
             // Zero connection columns have exactly constant unit solutions.
             // In particular, factored integral accumulators need no solves.
-            if(!active_column[column]) {homogeneous_map->coefficients[column][column][0]=B(1);continue;}
-            Boundary basis(d,std::vector<B>(epsilon_count,B(0)));basis[column][0]=B(1);
+            if(!active_column[column]) {
+              homogeneous_map->columns[column].identity=true;
+            }
+            else {
+              // The map is shared across observable batches: inspect the
+              // entire original chart input, never just the current batch.
+              if(first_uncertain_order[column]<epsilon_count) {
+                columns.push_back(column);
+                if(options.compact_centered_only && homogeneous_circuit)
+                  homogeneous_map->columns[column].minimum_input_order=first_uncertain_order[column];
+              }
+              else {
+                homogeneous_map->columns[column].minimum_input_order=epsilon_count;
+                if(options.conditioning_stats)++options.conditioning_stats->exact_input_map_columns_skipped;
+              }
+            }
+          }
+          struct ColumnResult {Boundary values;bool polynomial=false,rational=false,circuit=false;rational_circuit::Statistics work;};
+          std::vector<ColumnResult> results(columns.size());
+          const auto workspace_cells=homogeneous_prepared?homogeneous_prepared->data().workspace_cells:
+            static_cast<std::size_t>(options.taylor_order+1)*d*epsilon_count;
+          const auto shared_cells=homogeneous_prepared?
+            homogeneous_prepared->data().live_cells-homogeneous_prepared->data().workspace_cells:0;
+          const unsigned requested=static_cast<unsigned>(std::min<std::size_t>(options.centered_map_workers,
+              (options.max_taylor_cells-shared_cells)/workspace_cells));
+          const auto workers=adjoint_detail::homogeneous_columns(columns.size(),requested,map_bits,[&](unsigned index) {
+            const auto column=columns[index];auto& result=results[index];
+            const auto column_width=epsilon_count-homogeneous_map->columns[column].minimum_input_order;
+            Boundary basis(d,std::vector<B>(column_width,B(0)));basis[column][0]=B(1);
             Boundary mapped;bool rational_needed=true;
-            if(homogeneous_polynomial) {
+            if(homogeneous_prepared) {
+              mapped=rational_circuit::chart(*homogeneous_prepared,basis,end-c,&result.work);
+              result.circuit=true;result.polynomial=true;
+              B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
+              const auto quality=adjoint_detail::enclosure_quality(mapped);
+              rational_needed=!quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve);
+            } else if(homogeneous_polynomial) {
               mapped=polynomial_transport::chart(*homogeneous_polynomial,basis,c,end-c,options.taylor_order);
-              if(options.conditioning_stats)++options.conditioning_stats->polynomial_homogeneous_columns;
+              result.polynomial=true;
               B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
               const auto quality=adjoint_detail::enclosure_quality(mapped);
               rational_needed=!quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve);
             }
-            if(rational_needed) {
+            result.rational=rational_needed;
+            if(rational_needed && !homogeneous_circuit) {
               auto reference=adjoint_detail::chart(*homogeneous_compiled,basis,c,end-c,options.taylor_order);
-              if(options.conditioning_stats)++options.conditioning_stats->rational_homogeneous_columns;
               mapped=homogeneous_polynomial?adjoint_detail::intersect_retained_enclosures(std::move(mapped),reference):std::move(reference);
             }
-            for(unsigned row=0;row<d;++row)homogeneous_map->coefficients[row][column]=std::move(mapped[row]);
+            result.values=std::move(mapped);
+          });
+          // Commit columns and counters on the caller thread in index order.
+          for(unsigned index=0;index<columns.size();++index) {
+            auto& result=results[index];const auto column=columns[index];
+            if(result.rational && homogeneous_circuit) {
+              if(!homogeneous_compiled) {
+                ensure_rational();homogeneous_compiled.emplace();
+                for(const auto& entry:compiled) {
+                  adjoint_detail::Entry selected{entry.epsilon,entry.coefficient,{}};
+                  for(const auto& [row,col]:entry.positions)if(row<d && col<d)selected.positions.emplace_back(row,col);
+                  if(!selected.positions.empty())homogeneous_compiled->push_back(std::move(selected));
+                }
+              }
+              const auto column_width=epsilon_count-homogeneous_map->columns[column].minimum_input_order;
+              Boundary basis(d,std::vector<B>(column_width,B(0)));basis[column][0]=B(1);
+              AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->reference_seconds:nullptr};
+              auto reference=adjoint_detail::chart(*homogeneous_compiled,basis,c,end-c,options.taylor_order);
+              result.values=adjoint_detail::intersect_retained_enclosures(std::move(result.values),reference);
+            }
+            for(unsigned row=0;row<d;++row) {
+              auto& values=result.values[row];
+              if(std::any_of(values.begin(),values.end(),[](const B& value){return !value.is_zero();}))
+                homogeneous_map->columns[column].entries.push_back({row,std::move(values)});
+            }
+            if(options.conditioning_stats) {
+              options.conditioning_stats->polynomial_homogeneous_columns+=result.polynomial;
+              options.conditioning_stats->rational_homogeneous_columns+=result.rational;
+              options.conditioning_stats->circuit_homogeneous_columns+=result.circuit;
+              options.conditioning_stats->circuit_addmul_operations+=result.work.addmul_operations;
+              options.conditioning_stats->circuit_scalar_operations+=result.work.scalar_operations;
+              options.conditioning_stats->circuit_dot_products+=result.work.dot_products;
+              options.conditioning_stats->circuit_peak_live_cells=std::max(options.conditioning_stats->circuit_peak_live_cells,result.work.live_cells);
+            }
           }
-          if(options.conditioning_stats)++options.conditioning_stats->homogeneous_chart_maps;
+          if(options.conditioning_stats) {
+            ++options.conditioning_stats->homogeneous_chart_maps;
+            options.conditioning_stats->max_homogeneous_map_workers=std::max(options.conditioning_stats->max_homogeneous_map_workers,workers);
+          }
+        };
+        const auto full_bits=B::precision();
+        const auto map_bits=options.centered_map_working_bits?std::min(full_bits,options.centered_map_working_bits):full_bits;
+        const auto apply_map=[&] {
+          auto centered=adjoint_detail::centered_action(input,reference,*homogeneous_map,d);
+          if(options.conditioning_stats)++options.conditioning_stats->centered_charts;
+          return centered_only?centered:adjoint_detail::intersect_retained_enclosures(output,centered);
+        };
+        try {
+          if(!homogeneous_map) {
+            reduced_homogeneous_map=map_bits<full_bits;
+            if(reduced_homogeneous_map && options.conditioning_stats)++options.conditioning_stats->reduced_precision_homogeneous_maps;
+            build_homogeneous_map(map_bits);
+          }
+          auto centered=apply_map();
+          if(!reduced_homogeneous_map || !adjoint_detail::needs_conditioning_subdivision(input,centered))return centered;
+        } catch(const std::domain_error&) {
+          if(!reduced_homogeneous_map)throw;
         }
-        auto centered=adjoint_detail::centered_action(input,reference,*homogeneous_map,d);
-        if(options.conditioning_stats)++options.conditioning_stats->centered_charts;
-        return adjoint_detail::intersect_retained_enclosures(std::move(output),centered);
+        // A low-precision failure must not force a smaller chart or weaken
+        // the existing arithmetic reserve. Recompute the same retained map.
+        reduced_homogeneous_map=false;
+        if(options.conditioning_stats)++options.conditioning_stats->full_precision_map_retries;
+        build_homogeneous_map(full_bits);
+        return apply_map();
+      };
+      const auto polynomial_advance=[&](const Boundary& input,const auto& fast,
+          const auto& reference,const auto& midpoint) {
+        if(compact_recovery && options.compact_centered_only && options.centered_input &&
+            d<=options.max_centered_map_cells/epsilon_count/d &&
+            adjoint_detail::needs_rational_cross_check(input,input)) {
+          try {
+            auto centered=centered_guard(input,{},midpoint,true);
+            if(!adjoint_detail::needs_conditioning_subdivision(input,centered)) {
+              if(options.conditioning_stats)++options.conditioning_stats->centered_only_charts;
+              return centered;
+            }
+          } catch(const ArithmeticConditioningFailure&) {
+            homogeneous_map.reset();reduced_homogeneous_map=false;
+          }
+          // A valid but insufficiently conditioned centered evaluation can
+          // still benefit from intersecting the whole-input recurrence.
+          if(options.conditioning_stats)++options.conditioning_stats->centered_only_fallbacks;
+        }
+        if((options.centered_before_rational || compact_recovery) && options.centered_input &&
+            d<=options.max_centered_map_cells/epsilon_count/d) {
+          auto output=fast(input);
+          if(options.conditioning_stats)++options.conditioning_stats->polynomial_charts;
+          if(needs_centered(input,output)) {
+            try {
+              auto centered=centered_guard(input,output,midpoint);
+              if(adjoint_detail::needs_conditioning_subdivision(input,centered)) {
+                if(options.conditioning_stats)++options.conditioning_stats->rational_cross_checks;
+                centered=adjoint_detail::intersect_retained_enclosures(std::move(centered),reference(input));
+              }
+              if(options.conditioning_stats)++options.conditioning_stats->centered_before_rational_charts;
+              return centered;
+            } catch(const ArithmeticConditioningFailure&) {
+              // A map may exceed resources or lose conditioning even when a
+              // direct rational chart works. Recover the established ordering.
+              homogeneous_map.reset();reduced_homogeneous_map=false;
+              if(options.conditioning_stats)++options.conditioning_stats->centered_first_fallbacks;
+            }
+          }
+          if(adjoint_detail::needs_rational_cross_check(input,output)) {
+            if(options.conditioning_stats)++options.conditioning_stats->rational_cross_checks;
+            output=adjoint_detail::intersect_retained_enclosures(std::move(output),reference(input));
+          }
+          return centered_guard(input,std::move(output),midpoint);
+        }
+        auto output=adjoint_detail::conditioned_chart(input,fast,reference,options.conditioning_stats);
+        return centered_guard(input,std::move(output),midpoint);
       };
       if(batch_rows==r) {
-        const auto reference=[&](const Boundary& input){ensure_rational();return adjoint_detail::chart(compiled,input,c,end-c,options.taylor_order);};
-        auto output=polynomial?adjoint_detail::conditioned_chart(state,
-          [&](const Boundary& input){return polynomial_transport::chart(*polynomial,input,c,end-c,options.taylor_order);},
-          reference,options.conditioning_stats):reference(state);
-        state=centered_guard(state,std::move(output),reference);
+        const auto reference=[&](const Boundary& input){ensure_rational();AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->reference_seconds:nullptr};return adjoint_detail::chart(compiled,input,c,end-c,options.taylor_order);};
+        const auto fast=[&](const Boundary& input){return circuits.empty()?polynomial_transport::chart(*polynomial,input,c,end-c,options.taylor_order):circuit_chart(0,input);};
+        const auto midpoint_chart=[&](const Boundary& input) {
+          if(polynomial || !circuits.empty())return adjoint_detail::conditioned_midpoint_chart(input,fast,reference,options.conditioning_stats);
+          if(options.conditioning_stats)++options.conditioning_stats->rational_midpoint_charts;
+          return reference(input);
+        };
+        state=(polynomial || !circuits.empty())?polynomial_advance(state,fast,reference,midpoint_chart):
+          centered_guard(state,reference(state),midpoint_chart);
       } else {
         // One exact compilation and pole geometry per leg. Each batch borrows
         // the interned polynomial pool instead of recompiling the connection.
@@ -543,7 +955,12 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
             }
             return adjoint_detail::chart(view,input,c,end-c,options.taylor_order);
           };
-          if(polynomial) {
+          if(!circuits.empty()) {
+            const auto fast=[&](const Boundary& input){return circuit_chart(first/batch_rows,input);};
+            batch=polynomial_advance(batch,fast,rational_batch,[&](const Boundary& input) {
+              return adjoint_detail::conditioned_midpoint_chart(input,fast,rational_batch,options.conditioning_stats);
+            });
+          } else if(polynomial) {
             polynomial_transport::Compiled view;
             view.dimension=count+1;view.epsilon_high=polynomial->epsilon_high;
             view.expected_order=polynomial->expected_order;view.options=polynomial->options;
@@ -557,12 +974,15 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               if(!selected.positions.empty())view.fallback.push_back(std::move(selected));
             }
             view.polynomials=std::move(polynomial->polynomials);
-            auto output=adjoint_detail::conditioned_chart(batch,
-              [&](const Boundary& input){return polynomial_transport::chart(view,input,c,end-c,options.taylor_order);},
-              rational_batch,options.conditioning_stats);
+            const auto fast=[&](const Boundary& input){return polynomial_transport::chart(view,input,c,end-c,options.taylor_order);};
+            batch=polynomial_advance(batch,fast,rational_batch,[&](const Boundary& input) {
+              return adjoint_detail::conditioned_midpoint_chart(input,fast,rational_batch,options.conditioning_stats);
+            });
             polynomial->polynomials=std::move(view.polynomials);
-            batch=centered_guard(batch,std::move(output),rational_batch);
-          } else batch=centered_guard(batch,rational_batch(batch),rational_batch);
+          } else batch=centered_guard(batch,rational_batch(batch),[&](const Boundary& input) {
+            if(options.conditioning_stats)++options.conditioning_stats->rational_midpoint_charts;
+            return rational_batch(input);
+          });
           for(std::size_t j=0;j<count;++j)state[begin+j]=std::move(batch[j]);
         }
       }

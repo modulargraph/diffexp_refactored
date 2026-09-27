@@ -33,6 +33,27 @@ int main(){try {
   B::set_precision(256);
   auto number=evaluate(data::Reader("(* data only *) -2^(-1) + 3 I").read(),context,{}).at(0);
   require((number-B::from_strings("-1/2","3")).is_zero(),"reader operator precedence");
+  // Node construction must preserve association and unary precedence while
+  // moving large subtrees instead of copying the growing expression.
+  auto association=evaluate(data::Reader("(10-3-2)/(8/2/2)+2^3").read(),context,{}).at(0);
+  require((association-B::from_strings("21/2")).is_zero(),"reader binary association is unchanged");
+  auto power=data::Reader("2^3^2").read();
+  require(power.head=="^" && power.args[1].head=="^","reader powers remain right-associated");
+  auto nested=data::Reader("a -> {-(b+c), f[d^(-e)], q -> r -> s}").read();
+  require(nested.head=="Rule" && nested.args[1].head=="List" &&
+      nested.args[1].args[0].head=="neg" && nested.args[1].args[0].args[0].head=="+" &&
+      nested.args[1].args[1].head=="f" && nested.args[1].args[1].args[0].args[1].head=="neg" &&
+      nested.args[1].args[2].args[1].head=="Rule","reader nested nodes and right-associated rules");
+  std::string large="0";
+  for(unsigned i=1;i<=2048;++i)large+="+"+std::to_string(i);
+  auto tree=data::Reader(large).read();const auto* branch=&tree;
+  for(unsigned i=2048;i;--i) {
+    require(branch->head=="+" && branch->args.size()==2 &&
+        branch->args[1].head==std::to_string(i) && branch->args[1].atom(),
+        "large reader expression retains every operand in order");
+    branch=&branch->args[0];
+  }
+  require(branch->head=="0" && branch->atom(),"large reader expression retains its first operand");
   auto scientific=evaluate(data::Reader("1.25`30*^-3").read(),context,{}).at(0);
   require((scientific-B::from_strings("1/800")).contains_zero(),"annotated scientific input");
   bool rejected=false;try{evaluate(data::Reader("Run[1]").read(),context,{});}catch(const std::invalid_argument&){rejected=true;}

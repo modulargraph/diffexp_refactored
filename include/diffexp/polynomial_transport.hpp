@@ -43,11 +43,7 @@ struct Compiled {
 };
 namespace detail {
 inline B ball(const Rational &q) {
-  auto s = q.str();
-  auto slash = s.find('/');
-  return slash == std::string::npos ? B::from_strings(s)
-                                    : B::from_strings(s.substr(0, slash)) /
-                                          B::from_strings(s.substr(slash + 1));
+  B result; acb_set_fmpq(result.raw(), q.raw(), B::precision()); return result;
 }
 inline void validate_parameters(const Exact &e, std::size_t xi,
                                 std::optional<std::size_t> ei) {

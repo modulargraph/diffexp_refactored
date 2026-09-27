@@ -24,6 +24,16 @@ int main(){try {
   const B expected=B::from_strings(exact.str())*value;
   check(acb_contains(guarded[0][0].raw(),expected.raw()),"guarded retained polynomial excludes independent exact recurrence enclosure");
   check(acb_overlaps(guarded[0][0].raw(),reference[0][0].raw()),"intersection lost rational enclosure");
+  AdjointConditioningStats midpoint_stats;
+  const auto guarded_midpoint=adjoint_detail::conditioned_midpoint_chart(Boundary{{B(1)}},fast,old,&midpoint_stats);
+  check(midpoint_stats.polynomial_midpoint_charts==1 && midpoint_stats.rational_midpoint_charts==1,
+      "ill-conditioned exact midpoint did not fall back to rational recurrence");
+  check(acb_contains(guarded_midpoint[0][0].raw(),B::from_strings(exact.str()).raw()),
+      "midpoint fallback excluded independent exact retained polynomial");
+  bool uncertain_midpoint_rejected=false;
+  try{adjoint_detail::conditioned_midpoint_chart(input,fast,old,nullptr);}
+  catch(const std::invalid_argument&){uncertain_midpoint_rejected=true;}
+  check(uncertain_midpoint_rejected,"midpoint fast path accepted uncertain input");
   // The same high-degree denominator also makes a polynomial homogeneous
   // column lose its accuracy reserve. Its rational fallback must retain the
   // independent exact N80 value, including the inherited input uncertainty.
@@ -55,5 +65,18 @@ int main(){try {
   auto batched=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},many,{{zero},{zero},{zero}},{zero,Exact(f,"1/4")},options);
   check(stats.rational_cross_checks>0 && stats.rational_compilations==1,"batched fallback did not reuse one lazy compilation per leg");
   check(acb_overlaps(batched.coefficients[0][0][0].raw(),batched.coefficients[2][0][0].raw()),"batched fallback changed independent row result");
+  // A known input radius can flow into an exactly zero accumulator. Its
+  // exact solution is y1=y0(0), y2=x*y0(0), including the inherited radius.
+  B inherited(1);arb_add_error_2exp_si(acb_realref(inherited.raw()),-130);
+  AdjointConditioningStats transfer_stats;AdjointOptions transfer_options;
+  transfer_options.conditioning_stats=&transfer_stats;
+  auto transferred=transport_adjoint_rows({{zero,-one},{zero,zero}},
+      LaurentRows{0,0,{{{inherited},{B(0)}}}},{{zero,zero}},{zero,one},transfer_options);
+  for(unsigned j=0;j<2;++j)check(acb_contains(transferred.coefficients[0][j][0].raw(),inherited.raw()),
+      "coupled uncertainty transfer excluded the exact interval solution");
+  check(transfer_stats.conditioning_subdivisions==0,"existing uncertainty caused futile conditioning subdivision");
+  B widened(0);arb_add_error_2exp_si(acb_realref(widened.raw()),-110);
+  check(adjoint_detail::needs_conditioning_subdivision({{inherited},{B(0)}},{{inherited},{widened}}),
+      "uncertainty transfer disabled the bounded arithmetic growth check");
   std::cout<<"Conditioned adjoint: exact adversarial retained polynomial, fixed reserve, intersections, nonfinite rejection, lazy fast path and batching passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

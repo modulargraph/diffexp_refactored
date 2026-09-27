@@ -25,14 +25,13 @@ inline std::optional<std::int64_t> exact_epsilon_valuation(const Exact& value,
     std::size_t epsilon_variable,unsigned long max_degree=1000000) {
   if(epsilon_variable>=value.variable_count())throw std::out_of_range("epsilon valuation variable index");
   if(value.is_zero())return std::nullopt;
-  auto minimum=[&](const std::vector<Exact::Term>& terms) {
-    auto degree=std::numeric_limits<unsigned long>::max();
-    for(const auto& term:terms)degree=std::min(degree,term.powers.at(epsilon_variable));
+  auto minimum=[&](bool denominator) {
+    auto degree=value.minimum_exponent(epsilon_variable,denominator);
     if(degree>max_degree || degree>static_cast<unsigned long>(std::numeric_limits<std::int64_t>::max()))
       throw std::overflow_error("epsilon valuation exceeds the finite degree bound");
     return static_cast<std::int64_t>(degree);
   };
-  return minimum(value.numerator_terms())-minimum(value.denominator_terms());
+  return minimum(false)-minimum(true);
 }
 
 namespace epsilon_gauge_detail {

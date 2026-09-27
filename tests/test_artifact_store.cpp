@@ -37,6 +37,9 @@ int main(){try {
   require(original.content_id==same.content_id,"idempotent immutable publication");
   a::Store reopened(root);auto found=reopened.lookup(upstream,fixed,{"exact","native-rational-v1","full-equation"});
   require(found && found->content_id==original.content_id,"durable exact roundtrip");
+  std::ofstream(root/upstream.key()/("._"+original.content_id+".json"))<<"AppleDouble metadata";
+  require(reopened.lookup(upstream,fixed)->content_id==original.content_id,
+          "macOS external-volume metadata treated as an artifact");
   require(!reopened.lookup(wrong_basis,fixed) && !reopened.lookup(wrong_branch,fixed),"scientific mismatch reused artifact");
   rejects([&]{reopened.read(wrong_basis,original.content_id);},"wrong identity direct load accepted");
   // Receiving-only extension across fresh store instances. Upstream semantic

@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
           else if(option=="--ordinary-order")numerical.ordinary_order=number;
           else if(option=="--precision-bits")numerical.working_bits=number;
           else if(option=="--leaf-digits")numerical.leaf_digits=number;
+          else if(option=="--basis-scan-seconds"){if(number>60)throw std::invalid_argument("basis scan seconds must be in 0..60");numerical.automatic_basis_scan=number!=0;if(number)numerical.basis_scan_seconds=number;}
           else if(option=="--ft-transport-digits"){if(!number || number>100000)throw std::invalid_argument("FT transport digits must be in 1..100000");numerical.spectral.accuracy_goal=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
         } else throw std::invalid_argument("unknown prepare option: "+option);
@@ -208,7 +209,7 @@ int main(int argc, char** argv) {
         }
         const auto& stats=evaluator.statistics();
         boost::json::array rejected;for(const auto& reason:stats.spectral_rejections)rejected.emplace_back(reason);
-        report["ft_transport"]=boost::json::object{{"spectral_attempts",stats.spectral_attempts},{"spectral_accepted",stats.spectral_accepted},{"spectral_legs",stats.spectral_legs},{"spectral_reused",stats.spectral_reused},{"rejections",rejected}};
+        report["ft_transport"]=boost::json::object{{"direct_endpoints",stats.direct_endpoints},{"spectral_attempts",stats.spectral_attempts},{"spectral_accepted",stats.spectral_accepted},{"spectral_legs",stats.spectral_legs},{"spectral_reused",stats.spectral_reused},{"rejections",rejected}};
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
         report["timings"].as_object()["spectral_seconds"]=stats.spectral_seconds;
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; verified series reused "<<stats.endpoint_series_reused<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"

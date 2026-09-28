@@ -53,6 +53,47 @@ int main(){try {
   require(accumulator_stats.centered_only_charts==1 && accumulator_stats.circuit_homogeneous_columns==0 &&
           accumulator_stats.exact_input_map_columns_skipped==2,
           "exact active input columns were needlessly solved");
+  // A rational nilpotent connection has a known finite Taylor map, but
+  // reduced-precision interval cancellation consumes its arithmetic reserve.
+  // Retry the compact map at full precision before any legacy column solves.
+  B::set_precision(512);
+  ExactEpsilonMatrix cancellation{{e("-1000/(3+x)"),e("-1000/(3+x)")},
+                                  {e("1000/(3+x)"),e("1000/(3+x)")}};
+  B first(1),second(2);
+  arb_add_error_2exp_si(acb_realref(first.raw()),-80);
+  arb_add_error_2exp_si(acb_realref(second.raw()),-80);
+  LaurentRows noisy{0,0,{{{first},{second}}}};
+  ExactEpsilonMatrix no_forcing{{z,z}};
+  AdjointOptions retry_options;retry_options.taylor_order=16;
+  retry_options.centered_map_working_bits=128;retry_options.centered_map_workers=2;
+  AdjointConditioningStats retry_stats;retry_options.conditioning_stats=&retry_stats;
+  const std::vector<Exact> retry_path{z,e("1/2")};
+  auto retried=transport_adjoint_rows(cancellation,noisy,no_forcing,retry_path,retry_options);
+  require(retry_stats.full_precision_map_retries==1 && retry_stats.rational_homogeneous_columns==0 &&
+          retry_stats.rational_compilations==0 && retry_stats.reference_seconds==0,
+          "deficient low-precision map entered legacy before compact full-precision retry");
+  require(retry_stats.circuit_homogeneous_columns==4 && retry_stats.polynomial_homogeneous_columns==4,
+          "discarded low-precision map work missing from counters");
+  require(retry_stats.conditioning_subdivisions==0 && retry_stats.centered_only_fallbacks==0,
+          "map retry weakened acceptance or changed chart subdivision");
+  retry_options.centered_map_working_bits=512;
+  AdjointConditioningStats full_stats;retry_options.conditioning_stats=&full_stats;
+  auto full=transport_adjoint_rows(cancellation,noisy,no_forcing,retry_path,retry_options);
+  require(full_stats.full_precision_map_retries==0 && full_stats.rational_homogeneous_columns==0,
+          "full-precision control unexpectedly needed fallback");
+  B logarithm(0),power(1),ratio=B(1)/B(6);
+  for(unsigned n=1;n<=retry_options.taylor_order;++n) {
+    power*=ratio;
+    logarithm+=(n%2?B(1):B(-1))*power/B(n);
+  }
+  const auto correction=B(1000)*logarithm*(first-second);
+  const std::vector<B> exact_retained{first+correction,second+correction};
+  for(unsigned j=0;j<2;++j) {
+    require(acb_overlaps(retried.coefficients[0][j][0].raw(),exact_retained[j].raw()),
+            "retried map disagrees with closed retained polynomial");
+    require(acb_equal(retried.coefficients[0][j][0].raw(),full.coefficients[0][j][0].raw()),
+            "retry changed the full-precision retained enclosure");
+  }
   // Deliberately misuse a shortened map: future callers must not silently
   // interpret uncomputed high coefficients as structural zero coefficients.
   adjoint_detail::SparseChartMap map{1,3,std::vector<adjoint_detail::SparseChartMap::Column>(1)};

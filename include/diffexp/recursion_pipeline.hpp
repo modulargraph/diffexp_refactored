@@ -1134,7 +1134,11 @@ class Evaluator {
       auto bound=NativeTailMagnitude::upper_abs(coefficient);
       if(!coefficient.is_finite() || !bound.is_finite() || bound>tolerance)
         throw std::domain_error("physical endpoint constraint failed: "+label+" at epsilon "+
-          std::to_string(value.low+static_cast<int>(k)));
+          std::to_string(value.low+static_cast<int>(k))+"; midpoint=("+
+          coefficient.real_midpoint(16)+","+coefficient.imag_midpoint(16)+"); radius2exp=("+
+          coefficient.real_radius_exponent()+","+coefficient.imag_radius_exponent()+
+          "); contains_zero="+(coefficient.contains_zero()?"true":"false")+
+          "; absolute tolerance="+options_.endpoint_constraint_tolerance.str());
       statistics_.maximum_endpoint_constraint_residual=std::max(statistics_.maximum_endpoint_constraint_residual,bound.approximate_upper());
       ++statistics_.endpoint_constraint_coefficients;
     }

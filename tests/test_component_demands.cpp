@@ -65,6 +65,18 @@ int main(){try{
  // A retained all-zero operator has UNKNOWN tail at high+1, not infinity.
  auto zero_map=rows(1,2,0,1);
  check(ed::pullback(zero_map,{3})==ed::Highs({1,1}),"zero retained operator treated as exact zero");
+ // An all-zero retained input through -1 starts its unknown tail at zero.
+ // A map known zero through 1 therefore has zero product through 1 without
+ // needing its unknown coefficient at 2.
+ auto padded_input=rows(2,2,-1,1);
+ ed::Expression padded{{padded_input,source},{-1,-1}};
+ auto padded_product=ed::compose(zero_map,padded,1);
+ for(const auto& column:padded_product.transform.coefficients[0])for(const auto& value:column)
+   check(value.is_zero(),"zero-prefix composition produced a nonzero coefficient");
+ rejects<linear_boundary::CompositionDemand>([&]{ed::compose(zero_map,padded,2);},"stored zeros beyond component high treated as known");
+ padded.value.transform.coefficients[0][0][0]=B(0);
+ arb_add_error_2exp_si(acb_realref(padded.value.transform.coefficients[0][0][0].raw()),-220);
+ rejects<linear_boundary::CompositionDemand>([&]{ed::compose(zero_map,padded,1);},"zero-containing input coefficient treated as exact zero");
  auto short_input=input;short_input.high={0,0};
  rejects<linear_boundary::CompositionDemand>([&]{ed::compose(zero_map,short_input,3);},"unknown operator tail accepted");
  auto consumer=rows(1,2,-1,5);consumer.coefficients[0][1][0]=B(1);

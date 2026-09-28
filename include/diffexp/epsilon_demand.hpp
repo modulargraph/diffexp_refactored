@@ -87,7 +87,21 @@ inline linear_boundary::Expression compose(const LaurentRows& outer,const Expres
   validate(inner);const auto& in=inner.value.transform;
   linear_boundary::detail::validate(outer,{});
   if(outer.columns()!=inner.high.size())throw std::invalid_argument("component composition shape");
-  const int outer_need=checked(static_cast<long>(high)-in.low);
+  // Stored low may include exact-zero padding (for example a component
+  // requested only below its first possible coefficient). Such padding must
+  // not demand an extra outer coefficient. Stop at each component's known
+  // high: the next coefficient is unknown even if its storage contains zero.
+  int inner_low=in.high+1;
+  for(std::size_t j=0;j<inner.high.size();++j) {
+    int first=in.low;
+    if(inner.high[j])for(;first<=*inner.high[j];++first) {
+      bool nonzero=false;
+      for(const auto& column:in.coefficients[j])if(!column[first-in.low].is_zero()) {nonzero=true;break;}
+      if(nonzero)break;
+    }
+    inner_low=std::min(inner_low,first);
+  }
+  const int outer_need=checked(static_cast<long>(high)-inner_low);
   if(outer.high<outer_need)throw linear_boundary::CompositionDemand(outer_need,in.high);
   auto demand=pullback(outer,Highs(outer.coefficients.size(),high));
   for(std::size_t j=0;j<demand.size();++j)if(demand[j] && *demand[j]>=in.low &&

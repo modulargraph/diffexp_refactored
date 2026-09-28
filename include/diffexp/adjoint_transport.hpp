@@ -813,7 +813,29 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
             }
             result.values=std::move(mapped);
           });
-          // Commit columns and counters on the caller thread in index order.
+          // Count completed circuit work even if the low-precision map is
+          // discarded. Reference-column counters below count actual fallbacks.
+          for(const auto& result:results) {
+            if(options.conditioning_stats) {
+              options.conditioning_stats->polynomial_homogeneous_columns+=result.polynomial;
+              options.conditioning_stats->circuit_homogeneous_columns+=result.circuit;
+              options.conditioning_stats->circuit_addmul_operations+=result.work.addmul_operations;
+              options.conditioning_stats->circuit_scalar_operations+=result.work.scalar_operations;
+              options.conditioning_stats->circuit_dot_products+=result.work.dot_products;
+              options.conditioning_stats->circuit_peak_live_cells=std::max(options.conditioning_stats->circuit_peak_live_cells,result.work.live_cells);
+            }
+          }
+          if(options.conditioning_stats)
+            options.conditioning_stats->max_homogeneous_map_workers=std::max(options.conditioning_stats->max_homogeneous_map_workers,workers);
+          // A deficient reduced-precision column should first retry the same
+          // circuit at full precision. The outer handler performs that retry;
+          // full-precision columns retain their original legacy fallback and
+          // acceptance guards. Do not run serial low-precision references on
+          // a map which a full-precision circuit can already enclose tightly.
+          if(homogeneous_circuit && map_bits<precision_restore.bits &&
+              std::any_of(results.begin(),results.end(),[](const ColumnResult& result){return result.rational;}))
+            throw ArithmeticConditioningFailure("reduced-precision homogeneous map exhausted arithmetic reserve");
+          // Commit columns and reference counters on the caller thread in index order.
           for(unsigned index=0;index<columns.size();++index) {
             auto& result=results[index];const auto column=columns[index];
             if(result.rational && homogeneous_circuit) {
@@ -836,20 +858,10 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               if(std::any_of(values.begin(),values.end(),[](const B& value){return !value.is_zero();}))
                 homogeneous_map->columns[column].entries.push_back({row,std::move(values)});
             }
-            if(options.conditioning_stats) {
-              options.conditioning_stats->polynomial_homogeneous_columns+=result.polynomial;
+            if(options.conditioning_stats)
               options.conditioning_stats->rational_homogeneous_columns+=result.rational;
-              options.conditioning_stats->circuit_homogeneous_columns+=result.circuit;
-              options.conditioning_stats->circuit_addmul_operations+=result.work.addmul_operations;
-              options.conditioning_stats->circuit_scalar_operations+=result.work.scalar_operations;
-              options.conditioning_stats->circuit_dot_products+=result.work.dot_products;
-              options.conditioning_stats->circuit_peak_live_cells=std::max(options.conditioning_stats->circuit_peak_live_cells,result.work.live_cells);
-            }
           }
-          if(options.conditioning_stats) {
-            ++options.conditioning_stats->homogeneous_chart_maps;
-            options.conditioning_stats->max_homogeneous_map_workers=std::max(options.conditioning_stats->max_homogeneous_map_workers,workers);
-          }
+          if(options.conditioning_stats)++options.conditioning_stats->homogeneous_chart_maps;
         };
         const auto full_bits=B::precision();
         const auto map_bits=options.centered_map_working_bits?std::min(full_bits,options.centered_map_working_bits):full_bits;

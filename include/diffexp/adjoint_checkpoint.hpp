@@ -26,10 +26,8 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
   for(const auto& row:initial.coefficients)for(const auto& series:row)for(const auto& b:series)
     if(!b.is_finite())throw std::invalid_argument("checkpoint initial ball is nonfinite");
   const bool compact=options.polynomial_recurrence && options.rational_circuit_recurrence;
-  const bool optimized=compact && (options.circuit_grouped_dot || options.compact_centered_only);
-  json::object payload{{"algorithm",optimized?"DiffExp.AdjointOriginalPath/v8-centered-dot":compact?
-    (options.compact_centered_recovery?"DiffExp.AdjointOriginalPath/v7-centered-circuit":
-      "DiffExp.AdjointOriginalPath/v6-circuit"):"DiffExp.AdjointOriginalPath/v5"},
+  json::object payload{{"algorithm",compact?"DiffExp.AdjointOriginalPath/v9-circuit-precision-retry":
+      "DiffExp.AdjointOriginalPath/v5"},
     {"flint_version",FLINT_VERSION},{"precision_bits",Jet::Ball::precision()},
     {"field_symbols",symbols},{"connection",numerical_rows_io::exact_matrix(matrix)},
     {"forcing",numerical_rows_io::exact_matrix(forcing)},{"initial",numerical_rows_io::exact_rows(initial)},
@@ -37,7 +35,7 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
     {"max_taylor_cells",options.max_taylor_cells},{"polynomial_recurrence",options.polynomial_recurrence},
     {"centered_input",options.centered_input},{"centered_before_rational",options.centered_before_rational},{"centered_map_working_bits",options.centered_map_working_bits},{"max_centered_map_cells",options.max_centered_map_cells},
     {"max_conditioning_halvings",options.max_conditioning_halvings},{"max_rows_per_batch",options.max_rows_per_batch}};
-  if(optimized) {
+  if(compact) {
     payload.emplace("circuit_grouped_dot",options.circuit_grouped_dot);
     payload.emplace("compact_centered_only",options.compact_centered_only);
     payload.emplace("compact_centered_recovery",options.compact_centered_recovery);

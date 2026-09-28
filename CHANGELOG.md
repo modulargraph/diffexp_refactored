@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Retry deficient reduced-precision uncertainty maps with the compact recurrence
+  at full precision before invoking legacy reference columns.
+- Avoid unnecessary epsilon refinements caused by exact-zero padding while
+  preserving unknown upper coefficients and uncertain intervals.
+- Include coefficient values and radii in endpoint constraint failures, and
+  report homogeneous fallback and precision-retry counters on failures.
+
 - Schedule factored Feynman-trick transport by per-component epsilon demand and
   compose exact adjacent maps before truncation.
 - Rank physical bases by coefficient demand before expression size, reuse

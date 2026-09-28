@@ -4,7 +4,11 @@ using namespace diffexp;using B=Jet::Ball;
 void require(bool ok,const char* why){if(!ok)throw std::runtime_error(why);}
 template<class F>void rejects(F f,const char* why){try{f();}catch(const std::domain_error&){return;}throw std::runtime_error(why);}
 template<class F>void rejects_physical(F f){try{f();}catch(const std::domain_error& error){
-  require(std::string(error.what()).find("physical endpoint constraint failed")!=std::string::npos,"invalid physical boundary failed for an unrelated reason");return;
+  const std::string message=error.what();
+  require(message.find("physical endpoint constraint failed")!=std::string::npos,"invalid physical boundary failed for an unrelated reason");
+  for(const auto* field:{"midpoint=(","radius2exp=(","contains_zero=","absolute tolerance="})
+    require(message.find(field)!=std::string::npos,"endpoint failure omitted its numerical diagnostic");
+  return;
 }throw std::runtime_error("nonzero physical divergent mode was silently projected away");}
 double upper(const B& value){return NativeTailMagnitude::upper_abs(value).approximate_upper();}
 recursion::Graph model(feynman::Operation operation,bool logarithm=false,bool wrong=false) {

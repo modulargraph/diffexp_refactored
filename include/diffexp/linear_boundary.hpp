@@ -171,11 +171,22 @@ inline LaurentBoundary materialize(const Expression &expression,
   if (columns != expression.leaf_source->values.size())
     throw std::invalid_argument("linear boundary materialization dimensions");
   detail::order(output_high, options);
+  // Composition and component packing may retain leading structural zeros.
+  // Only discard coefficients proved exactly zero across the entire map;
+  // an interval containing zero still carries a source demand. Keep at least
+  // one retained coefficient, preserving the original unknown upper tail.
+  int transform_low=expression.transform.low;
+  for(;transform_low<expression.transform.high;++transform_low) {
+    bool nonzero=false;
+    for(const auto& row:expression.transform.coefficients)for(const auto& column:row)
+      if(!column[transform_low-expression.transform.low].is_zero())nonzero=true;
+    if(nonzero)break;
+  }
   const int transform_high = detail::order(static_cast<long>(output_high) -
                                                expression.leaf_source->low,
                                            options),
             source_high = detail::order(static_cast<long>(output_high) -
-                                            expression.transform.low,
+                                            transform_low,
                                         options);
   if (expression.transform.high < transform_high)
     throw OperatorDemand(transform_high);
@@ -184,11 +195,16 @@ inline LaurentBoundary materialize(const Expression &expression,
                                       "additional leaf-source coefficients");
   detail::product({expression.transform.coefficients.size(), columns,
                    static_cast<std::size_t>(expression.transform.high -
-                                            expression.transform.low + 1),
+                                            transform_low + 1),
                    static_cast<std::size_t>(expression.leaf_source->high() -
                                             expression.leaf_source->low + 1)},
                   options.max_operations);
-  return apply_laurent_rows(expression.transform, *expression.leaf_source,
-                            output_high);
+  if(transform_low==expression.transform.low)
+    return apply_laurent_rows(expression.transform, *expression.leaf_source,output_high);
+  auto trimmed=expression.transform;
+  for(auto& row:trimmed.coefficients)for(auto& column:row)
+    column.erase(column.begin(),column.begin()+(transform_low-trimmed.low));
+  trimmed.low=transform_low;
+  return apply_laurent_rows(trimmed,*expression.leaf_source,output_high);
 }
 } // namespace diffexp::linear_boundary

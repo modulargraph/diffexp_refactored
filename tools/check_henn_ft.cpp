@@ -479,6 +479,10 @@ int main(int argc,char** argv) {
     {"compilation_seconds",conditioning.compilation_seconds},{"preparation_seconds",conditioning.preparation_seconds},
     {"source_seconds",conditioning.source_seconds},{"homogeneous_seconds",conditioning.homogeneous_seconds},
     {"reference_seconds",conditioning.reference_seconds},{"rational_cross_checks",conditioning.rational_cross_checks},
+    {"rational_homogeneous_columns",conditioning.rational_homogeneous_columns},
+    {"rational_midpoint_charts",conditioning.rational_midpoint_charts},
+    {"reduced_precision_homogeneous_maps",conditioning.reduced_precision_homogeneous_maps},
+    {"full_precision_map_retries",conditioning.full_precision_map_retries},
     {"conditioning_subdivisions",conditioning.conditioning_subdivisions}};
   report["exact_events"]=std::move(events);report["exact_systems_built"]=built;report["exact_systems_reused"]=reused;
   report["total_seconds"]=elapsed(start);output<<json::serialize(report)<<'\n';

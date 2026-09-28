@@ -103,6 +103,28 @@ int main() {
       demanded = d.required_high == 2;
     }
     check(demanded, "leaf upper source demand missing");
+    // Leading exact-zero padding does not require inaccessible leaf orders.
+    // Retained high remains unchanged: coefficients beyond it are unknown.
+    auto padded=matrix({{B(0)}},-16,1);
+    padded.coefficients[0][0][9]=B(2); // true first coefficient is eps^-7
+    auto finite_leaf=std::make_shared<LaurentBoundary>(
+        LaurentBoundary{-1,{std::vector<B>(9,B(3))},false}); // known through 7
+    auto unpadded=matrix({{B(2)}},-7,1);
+    auto padding_result=lb::materialize({padded,finite_leaf},0);
+    auto padding_reference=lb::materialize({unpadded,finite_leaf},0);
+    check(padding_result.low==padding_reference.low,"materialization kept false pole padding");
+    for(int k=padding_result.low;k<=0;++k)
+      near(padding_result.values[0][k-padding_result.low],padding_reference.values[0][k-padding_reference.low]);
+    check(padded.low==-16,"materialization mutated shared transform");
+    demanded=false;
+    try {lb::materialize({padded,finite_leaf},1);}
+    catch(const lb::OperatorDemand& d){demanded=d.required_high==2;}
+    check(demanded,"padding removal promoted unknown transform tail to zero");
+    arb_add_error_2exp_si(acb_realref(padded.coefficients[0][0][0].raw()),-220);
+    demanded=false;
+    try {lb::materialize({padded,finite_leaf},0);}
+    catch(const BoundaryDemand& d){demanded=d.required_high==16;}
+    check(demanded,"materialization stripped a zero-containing leading ball");
     lb::Options budget;
     budget.max_operations = 1;
     bool limited = false;

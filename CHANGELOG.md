@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Generic transport reuses a chart's Taylor coefficients when an accuracy
+  refinement shortens its step, predicts the shorter step from the truncation
+  estimate, and no longer charges a missed truncation target to the finite-lag
+  recurrence.
+- Rational physical-basis entries use an O(N deg) product recurrence, and the
+  uncertainty map of a centered chart uses a short mantissa.
+- A pole on the transport path or at its endpoint is reported at once, with
+  its path parameter.
+- Fix the kite example with the built-in IBP solver: per-variable degree boxes
+  have their own cap and are no longer cut by a total degree; the CLI enables
+  coordinate slices; budget errors name the exhausted limit.
+- Fix "recursive local operator lookahead invariant failed" after exact-zero
+  padding was trimmed from a child value but not from its stored map.
+- Reject scalar-leaf power divergences that epsilon does not regulate, fix the
+  spectral coupled-block node budget, and repair the stale batched expectation
+  in the conditioned-adjoint test.
+
 - Retry deficient reduced-precision uncertainty maps with the compact recurrence
   at full precision before invoking legacy reference columns.
 - Avoid unnecessary epsilon refinements caused by exact-zero padding while

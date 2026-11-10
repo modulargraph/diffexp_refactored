@@ -524,6 +524,121 @@ inline Chart series_evaluate(const SeriesExpansion& s,const B& step,bool save,lo
   if(save)result.saved=series_saved(s,step,digits);
   return result;
 }
+// Canonical (epsilon-linear) systems are triangular in epsilon: order e is the
+// integral of letters times order e-1. Solving order by order therefore needs
+// no fundamental matrix to start a chart away from its centre: the constant
+// of each order is fixed by the input at `input_offset`. One expansion then
+// covers [centre-h, centre+h] at the convergence ratio a one-sided chart
+// spends on [centre, centre+h].
+struct CenteredCanonical {
+  unsigned order=0,d=0,w=0;
+  B center,input_offset;
+  Boundary input_tail;
+  std::unique_ptr<AcbArray> values;
+  acb_srcptr at(unsigned n,unsigned i,unsigned e)const{return values->p+(static_cast<slong>(n)*d+i)*w+e;}
+};
+inline CenteredCanonical centered_canonical_expand(const Compiled& c,const Boundary& initial,const std::vector<B>& center_roots,
+    const B& center,const B& input_offset,unsigned order) {
+  if(!c.canonical || order<8)throw std::invalid_argument("centred chart requires a canonical connection and order >= 8");
+  const auto bits=B::precision();const unsigned d=c.dimension,w=c.epsilon_order+1;
+  if(center_roots.size()!=c.squares.size())throw std::invalid_argument("centred chart root dimensions");
+  if(static_cast<std::uint64_t>(order+1)*d*w>10000000)throw std::length_error("centred chart workspace budget");
+  CenteredCanonical out;out.order=order;out.d=d;out.w=w;out.center=center;out.input_offset=input_offset;
+  out.input_tail=Boundary(d,std::vector<B>(w,B(0)));
+  out.values=std::make_unique<AcbArray>(static_cast<slong>(order+1)*d*w);
+  const slong stride=static_cast<slong>(d)*w;
+  const auto at=[&](unsigned n,unsigned i,unsigned e){return out.values->p+(static_cast<slong>(n)*d+i)*w+e;};
+  Jet x(0,order+2,bits);x.set(0,center);x.set(1,B(1));std::map<std::string,Jet> vars{{"x",x}};
+  for(unsigned r=0;r<c.squares.size();++r) {
+    auto square=evaluate(data::Reader(c.squares[r].str()).read(),x,vars),root=square.sqrt();
+    auto factor=root.constant(0);factor.set(0,center_roots[r]/root.at(0));root=root*factor;vars.emplace("r"+std::to_string(r),std::move(root));
+  }
+  AcbArray letters(static_cast<slong>(c.letters.size())*order);
+  for(unsigned l=0;l<c.letters.size();++l) {
+    auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=c.letter_forms[l]?letter:letter.derivative()/letter;
+    for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(letters.p+l*order+n,value.raw());}
+  }
+  // One convolution per (letter, source) or per (letter, target), whichever a
+  // letter has fewer of: its weight matrix factors through either side.
+  struct Term {unsigned other;B weight;};
+  struct Group {unsigned letter,index;bool by_source;std::vector<Term> terms;};
+  std::vector<Group> groups;
+  {
+    std::vector<std::set<unsigned>> rows(c.letters.size()),columns(c.letters.size());
+    for(const auto& e:c.canonical_entries){rows[e.letter].insert(e.row);columns[e.letter].insert(e.column);}
+    std::map<std::tuple<unsigned,bool,unsigned>,unsigned> ids;
+    for(const auto& e:c.canonical_entries) {
+      const bool by_source=columns[e.letter].size()<=rows[e.letter].size();
+      auto [it,added]=ids.try_emplace({e.letter,by_source,by_source?e.column:e.row},groups.size());
+      if(added)groups.push_back({e.letter,by_source?e.column:e.row,by_source,{}});
+      groups[it->second].terms.push_back({by_source?e.row:e.column,B::from_strings(e.coefficient.str())});
+    }
+  }
+  // support[i][e]: highest Taylor order at which component (i,e) is not an
+  // exact zero; a convolution only runs over its source's support.
+  std::vector<std::vector<int>> support(d,std::vector<int>(w,-1));
+  const auto measure=[&](unsigned i,unsigned e){int top=static_cast<int>(order);while(top>=0 && acb_is_zero(at(top,i,e)))--top;support[i][e]=top;};
+  for(unsigned i=0;i<d;++i){acb_set(at(0,i,0),initial[i][0].raw());measure(i,0);}
+  AcbArray combination(order);B product;
+  const bool offset=!input_offset.is_zero();
+  for(unsigned e=1;e<w;++e) {
+    for(const auto& group:groups) {
+      acb_srcptr series=letters.p+static_cast<slong>(group.letter)*order;
+      if(group.by_source) {
+        const int top=support[group.index][e-1];if(top<0)continue;
+        for(unsigned n=0;n<order;++n) {
+          const unsigned reach=std::min<unsigned>(n,top);
+          acb_dot(product.raw(),nullptr,0,series+(n-reach),1,at(reach,group.index,e-1),-stride,reach+1,bits);
+          for(const auto& term:group.terms)acb_addmul(at(n+1,term.other,e),product.raw(),term.weight.raw(),bits);
+        }
+      } else {
+        int top=-1;for(const auto& term:group.terms)top=std::max(top,support[term.other][e-1]);
+        if(top<0)continue;
+        for(int n=0;n<=top && n<static_cast<int>(order);++n) {
+          acb_zero(combination.p+n);
+          for(const auto& term:group.terms)if(n<=support[term.other][e-1])acb_addmul(combination.p+n,at(n,term.other,e-1),term.weight.raw(),bits);
+        }
+        for(unsigned n=0;n<order;++n) {
+          const unsigned reach=std::min<unsigned>(n,std::min<int>(top,order-1));
+          acb_dot(product.raw(),nullptr,0,series+(n-reach),1,combination.p+reach,-1,reach+1,bits);
+          acb_add(at(n+1,group.index,e),at(n+1,group.index,e),product.raw(),bits);
+        }
+      }
+    }
+    for(unsigned n=1;n<=order;++n)for(unsigned i=0;i<d;++i)acb_div_ui(at(n,i,e),at(n,i,e),n,bits);
+    for(unsigned i=0;i<d;++i) {
+      // The input fixes this order's constant: y_e(input)=initial_e.
+      B sum(0),tail(0),power(1);
+      if(offset) {
+        for(unsigned n=order;n>0;--n){acb_add(sum.raw(),sum.raw(),at(n,i,e),bits);acb_mul(sum.raw(),sum.raw(),input_offset.raw(),bits);}
+        std::vector<B> powers(order+1,B(1));for(unsigned n=1;n<=order;++n)powers[n]=powers[n-1]*input_offset;
+        for(unsigned n=order-3;n<=order;++n){B term;acb_mul(term.raw(),at(n,i,e),powers[n].raw(),bits);tail+=magnitude(term);}
+      }
+      acb_sub(at(0,i,e),initial[i][e].raw(),sum.raw(),bits);
+      // The omitted input-side terms shift this constant; later orders are
+      // built on it, so the estimate travels with the ball from here on.
+      out.input_tail[i][e]=upper_estimate(tail);
+      arb_add_error(acb_realref(at(0,i,e)),acb_realref(out.input_tail[i][e].raw()));
+      arb_add_error(acb_imagref(at(0,i,e)),acb_realref(out.input_tail[i][e].raw()));
+      measure(i,e);
+    }
+  }
+  return out;
+}
+inline Chart centered_canonical_evaluate(const CenteredCanonical& s,const B& step) {
+  const auto bits=B::precision();const unsigned d=s.d,w=s.w,order=s.order;
+  Chart result{Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),{},false};
+  std::vector<B> powers(order+1,B(1));for(unsigned n=1;n<=order;++n)powers[n]=powers[n-1]*step;
+  for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e) {
+    auto& v=result.values[i][e];
+    for(unsigned n=order+1;n-->0;){acb_mul(v.raw(),v.raw(),step.raw(),bits);acb_add(v.raw(),v.raw(),s.at(n,i,e),bits);}
+    if(!v.is_finite())throw std::runtime_error("transport chart produced a non-finite value");
+    B tail=s.input_tail[i][e];
+    for(unsigned n=order-3;n<=order;++n){B term;acb_mul(term.raw(),s.at(n,i,e),powers[n].raw(),bits);tail+=magnitude(term);}
+    result.truncation_errors[i][e]=tail;result.errors[i][e]=tail+arithmetic_error(v);
+  }
+  return result;
+}
 // One chart's retained coefficients, by either recurrence.
 struct Expansion {
   std::optional<FiniteLagSeries> lag;
@@ -861,6 +976,81 @@ inline json::value run(const json::value& input) {
     for(unsigned root=0;root<root_values.size();++root)root_values[root]=continue_polynomial_sqrt(c.square_polynomials[root],B(0),end,root_values[root]);
     center=next;++charts;
   }
+  // Canonical systems outside the finite-lag regime use charts centred between
+  // their input and output. `centered_scale` remembers how far below the
+  // nominal radius/division the accuracy goal pushed recent charts, so that a
+  // rejected (and recomputed) centre stays the exception.
+  const auto* lag_plan=save_requested?nullptr:finite_lag_plan(c);
+  const bool centered_canonical=c.canonical && !save_requested && order>=8 && !(lag_plan && order>=4*lag_plan->max_degree);
+  double centered_scale=1;unsigned centered_charts=0;
+  const auto clearance_radius=[&](double point) {
+    double clearance=4;B p;acb_set_d(p.raw(),point);
+    for(const auto& root:c.singularities){auto delta=p-root;arf_t lower;arf_init(lower);acb_get_abs_lbound_arf(lower,delta.raw(),bits);
+      clearance=std::min(clearance,arf_get_d(lower,ARF_RND_FLOOR));arf_clear(lower);}
+    return clearance;
+  };
+  while(centered_canonical && center<1) {
+    if(++charts>20000)throw std::runtime_error("transport chart budget exhausted");
+    Chart result;double middle=center,next=center;B at,mid,end;acb_set_d(at.raw(),center);unsigned attempts=0;
+    const B tolerance=B::from_strings("1e-"+std::to_string(goal+8));
+    const auto worst=[&](bool input_only,const CenteredCanonical& expansion) {
+      double ratio=0;
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto value=(input_only?expansion.input_tail[i][e]:result.truncation_errors[i][e])/((magnitude(result.values[i][e])+B(1))*tolerance);
+        arf_t upper;arf_init(upper);arb_get_ubound_arf(upper,acb_realref(value.raw()),64);
+        const double bound=arf_get_d(upper,ARF_RND_CEIL);arf_clear(upper);
+        if(!(bound<1e300))return 1e300;ratio=std::max(ratio,bound);
+      }
+      return ratio;
+    };
+    const auto shrink=[&](double ratio) {
+      if(attempts>3 || !(ratio<1e300))return 0.5;
+      const double rho=0.9*std::pow(std::max(ratio,1.0),-1.0/static_cast<double>(order-3));
+      return rho<0.5?0.5:rho>0.9?0.9:rho;
+    };
+    for(;;) {
+      // Solve middle-center = scale*radius(middle)/division; the radius is
+      // 1-Lipschitz, so this fixed point contracts with factor 1/division.
+      double half=centered_scale*clearance_radius(center)/division;
+      for(unsigned i=0;i<6;++i){middle=center+half;half=centered_scale*clearance_radius(middle)/division;}
+      middle=center+half;
+      while(middle-center>centered_scale*clearance_radius(middle)/division)middle=center+(middle-center)*0.9;
+      if(!(middle>center))throw std::runtime_error("transport has no nonzero continuation step");
+      next=middle+centered_scale*clearance_radius(middle)/division;
+      if(middle>=1){middle=center+(1-center)/2;next=1;} else if(next>1)next=1;
+      acb_set_d(mid.raw(),middle);acb_set_d(end.raw(),next);
+      std::vector<B> middle_roots;
+      for(unsigned root=0;root<root_values.size();++root)middle_roots.push_back(continue_polynomial_sqrt(c.square_polynomials[root],at,mid,root_values[root]));
+      auto expansion=centered_canonical_expand(c,current,middle_roots,mid,at-mid,order);
+      result=centered_canonical_evaluate(expansion,end-mid);
+      if(goal==0)break;
+      bool recenter=false;
+      for(;;) {
+        const double total=worst(false,expansion);
+        if(total<=1)break;
+        if(++attempts>24)throw std::runtime_error("chart could not meet AccuracyGoal within 24 local refinements");
+        // The input-side sum is fixed by the centre: only a closer centre
+        // repairs it. The output side merely re-evaluates a shorter step.
+        const double input=worst(true,expansion);
+        if(2*input>1){centered_scale*=shrink(2*input);recenter=true;break;}
+        const double rho=shrink(total);centered_scale*=rho;
+        next=middle+(next-middle)*rho;acb_set_d(end.raw(),next);
+        if(!(next>middle))throw std::runtime_error("transport has no nonzero continuation step");
+        result=centered_canonical_evaluate(expansion,end-mid);
+      }
+      if(!recenter)break;
+    }
+    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      errors[i][e]=result.errors[i][e];
+      auto tail=result.truncation_errors[i][e];
+      arb_add_error(acb_realref(result.values[i][e].raw()),acb_realref(tail.raw()));
+      arb_add_error(acb_imagref(result.values[i][e].raw()),acb_realref(tail.raw()));
+    }
+    current=std::move(result.values);++centered_charts;
+    for(unsigned root=0;root<root_values.size();++root)root_values[root]=continue_polynomial_sqrt(c.square_polynomials[root],at,end,root_values[root]);
+    center=next;centered_scale=std::min(1.0,centered_scale*1.03);
+    if(charts%20==0)std::cerr<<"Transport chart "<<charts<<", path parameter "<<center<<"\n";
+  }
   while(center<1) {
     if(++charts>20000)throw std::runtime_error("transport chart budget exhausted");
     auto next=clearance_endpoint(center,c.singularities);next=center+(next-center)*4.0/division;next=std::min(next,1.0);
@@ -982,7 +1172,7 @@ inline json::value run(const json::value& input) {
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
   output["spectral"]=spectral_diagnostic;
   if(save_requested)output["segments_complete"]=segments_complete;
-  output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
+  output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"centered_charts",centered_charts},{"finite_lag_rejections",finite_lag_rejections},
     {"max_polynomial_degree",c.finite_lag?c.finite_lag->max_degree:0},
     {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason},
     // How omitted-tail estimates reached the endpoint: inside the balls of

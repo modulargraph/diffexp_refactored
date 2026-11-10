@@ -274,6 +274,50 @@ int main() {
     if(dropped.at("segments_complete").as_bool() || !dropped.at("segments").as_array().empty() || std::abs(real(j::value(dropped))-1)>1e-15)
       throw std::runtime_error("optional segment budget did not degrade to an unsaved transport");
   }
+  // Canonical systems outside the finite-lag regime use charts centred between
+  // input and output. They must reproduce analytic values, including a
+  // continued square root on a complex path, uncertain input and a goal that
+  // forces a closer centre, and agree with the finite-lag recurrence.
+  {
+    B::set_precision(384);
+    auto dilog=j::parse(R"JSON({"dimension":3,"epsilon_order":2,"taylor_order":30,"working_bits":384,"accuracy_goal":30,"recurrence":"series","paths":{"t":"3*x/4"},"entries":[{"row":1,"column":0,"epsilon":1,"variable":"dlog","expression":"1-t","coefficient":"-1"},{"row":2,"column":1,"epsilon":1,"variable":"dlog","expression":"t","coefficient":"1"}],"boundary":[["1","0","0"],["0","0","0"],["0","0","0"]]})JSON");
+    const auto ball=[](const j::object& output,unsigned row,unsigned epsilon) {
+      const auto& cell=output.at("values").as_array()[row].as_array()[epsilon].as_object();
+      B value=B::from_strings(transport::string(cell.at("real_midpoint")),transport::string(cell.at("imaginary_midpoint"))),radius=B::from_strings(transport::string(cell.at("radius")));
+      arb_add_error(acb_realref(value.raw()),acb_realref(radius.raw()));arb_add_error(acb_imagref(value.raw()),acb_realref(radius.raw()));return value;
+    };
+    const auto tight=[](const B& value,const char* bound){return arb_lt(acb_realref(transport::arithmetic_error(value).raw()),acb_realref(B::from_strings(bound).raw()));};
+    auto centred=transport::run(dilog).as_object();const auto& how=centred.at("recurrence").as_object();
+    if(how.at("centered_charts").as_uint64()==0 || how.at("series_charts").as_uint64()!=0 || how.at("finite_lag_charts").as_uint64()!=0)
+      throw std::runtime_error("canonical series transport did not use centred charts");
+    B li2,log4;acb_polylog_si(li2.raw(),2,B::from_strings("3/4").raw(),384);acb_log(log4.raw(),B(4).raw(),384);
+    if(!acb_contains(ball(centred,2,2).raw(),li2.raw()) || !acb_contains(ball(centred,1,1).raw(),log4.raw()) || !tight(ball(centred,2,2),"1e-30"))
+      throw std::runtime_error("centred canonical charts missed the dilogarithm");
+    dilog.as_object()["recurrence"]="taylor";auto lagged=transport::run(dilog).as_object();
+    if(lagged.at("recurrence").as_object().at("finite_lag_charts").as_uint64()==0 || !acb_overlaps(ball(lagged,2,2).raw(),ball(centred,2,2).raw()))
+      throw std::runtime_error("centred and finite-lag canonical transports disagree");
+    if(centred.at("charts").as_uint64()>=lagged.at("charts").as_uint64())throw std::runtime_error("centred charts did not lengthen the steps");
+    auto root=j::parse(R"JSON({"dimension":2,"epsilon_order":2,"taylor_order":24,"working_bits":384,"accuracy_goal":28,"recurrence":"series","paths":{"t":"x/2+I*x*(1-x)/4"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"t+Sqrt[1+t^2]"}],"boundary":[["0","0","0"],["1","0","0"]],"boundary_errors":[["0","0","0"],["10^-40","0","0"]]})JSON");
+    auto continued=transport::run(root).as_object();B asinh_half;acb_asinh(asinh_half.raw(),B::from_strings("1/2").raw(),384);
+    if(continued.at("recurrence").as_object().at("centered_charts").as_uint64()==0 || !acb_contains(ball(continued,0,1).raw(),asinh_half.raw()) || !tight(ball(continued,0,1),"1e-28"))
+      throw std::runtime_error("centred canonical chart lost a continued square root or its input uncertainty");
+    // Direct chart: input at the left end, output at the right end, against a
+    // one-sided chart from the same input.
+    auto pair=j::parse(R"JSON({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"2+t","coefficient":"3/2"},{"row":1,"column":0,"epsilon":1,"variable":"dlog","expression":"3-t"},{"row":0,"column":0,"epsilon":1,"variable":"dlog","expression":"3-t","coefficient":"-2"}]})JSON");
+    auto pair_system=transport::compile(pair.as_object(),2,3,384);Boundary start{{B(1),B(2),B(0),B(0)},{B(0),B::from_strings("1/3"),B(0),B(0)}};
+    arb_add_error_2exp_si(acb_realref(start[0][1].raw()),-120);
+    const B left=B::from_strings("1/4"),middle=B::from_strings("1/2"),right=B::from_strings("3/4");
+    auto both=transport::centered_canonical_expand(pair_system,start,{},middle,left-middle,40);
+    auto arrived=transport::centered_canonical_evaluate(both,right-middle);
+    auto back=transport::centered_canonical_evaluate(both,left-middle);
+    auto one_sided=transport::chart(pair_system,transport::numerical_entries(pair_system),start,{},left,right-left,40,false,120,true,10000000,true,false);
+    for(unsigned i=0;i<2;++i)for(unsigned e=0;e<4;++e) {
+      if(!acb_overlaps(back.values[i][e].raw(),start[i][e].raw()))throw std::runtime_error("centred chart does not reproduce its input");
+      // 4^-40 against 2^-40: the one-sided chart from the left end is the coarser one.
+      auto slack=transport::magnitude(arrived.values[i][e]-one_sided.values[i][e]);
+      if(!arb_lt(acb_realref(slack.raw()),acb_realref(B::from_strings("1e-10").raw())))throw std::runtime_error("centred and one-sided charts disagree");
+    }
+  }
   // A pole on the open path is reported at once, with its location, instead
   // of after the chart clearance has shrunk through the refinement budget.
   auto crossing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"accuracy_goal":20,"paths":{"t":"2*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");

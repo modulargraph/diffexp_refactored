@@ -4,7 +4,9 @@
 #include <flint/nmod.h>
 #include <flint/fmpq.h>
 #include <optional>
+#include <functional>
 #include <numeric>
+#include <span>
 
 namespace diffexp::modular {
 using Word=mp_limb_t;
@@ -56,6 +58,9 @@ inline std::vector<Word> values(const std::vector<Power>& powers,const std::vect
   std::vector<Word> out;for(const auto& term:powers){Word v=1;for(std::size_t i=0;i<term.size();++i)v=nmod_mul(v,nmod_pow_ui(point.at(i)%mod.n,term[i],mod),mod);out.push_back(v);}return out;
 }
 struct Sample {std::vector<Word> point;std::vector<Word> coefficients;};
+// Fits read samples in place: one row carries every coefficient of a probe, so
+// copying a training prefix per coefficient would cost O(samples*coefficients).
+using Samples=std::span<const Sample>;
 struct Ansatz {
   std::vector<Power> numerator,denominator;
   std::size_t pivot=0;
@@ -85,7 +90,7 @@ inline std::optional<Word> evaluate(const Image& image,const std::vector<Word>& 
 // Homogeneous rational interpolation avoids assuming a nonzero constant
 // denominator. A one-dimensional nullspace fixes the normalized coefficient
 // vector. Degenerate points or an insufficient degree budget are explicit.
-inline std::optional<Image> fit(const std::vector<Sample>& samples,std::size_t coefficient,
+inline std::optional<Image> fit(Samples samples,std::size_t coefficient,
     const Ansatz& ansatz,Word p,bool fixed_pivot=false) {
   const auto columns=ansatz.numerator.size()+ansatz.denominator.size();
   if(samples.size()+1<columns||columns<2)return std::nullopt;
@@ -105,27 +110,47 @@ inline std::optional<Image> fit(const std::vector<Sample>& samples,std::size_t c
   for(std::size_t i=0;i<columns;++i)result.coefficients.push_back(nmod_mul(nmod_mat_entry(kernel,i,0),scale,kernel->mod));
   nmod_mat_clear(kernel);return result;
 }
-inline std::optional<Image> discover(const std::vector<Sample>& samples,std::size_t coefficient,
-    std::size_t variables,unsigned max_degree,Word p) {
-  if(samples.size()<4)return std::nullopt;
-  const std::vector<Sample> training(samples.begin(),samples.end()-3);
+// The last `holdouts` samples never enter a fit. A candidate is accepted only if
+// it reproduces them: with rows = columns-1 a kernel vector exists for ANY data,
+// so agreement with the training rows alone proves nothing.
+inline constexpr std::size_t holdouts=3;
+inline std::optional<Image> fit_with_holdouts(Samples samples,std::size_t coefficient,
+    const Ansatz& ansatz,Word p) {
+  if(samples.size()<=holdouts)return std::nullopt;
+  auto image=fit(samples.first(samples.size()-holdouts),coefficient,ansatz,p);if(!image)return std::nullopt;
+  for(const auto& held:samples.last(holdouts))
+    if(evaluate(*image,held.point,p)!=std::optional<Word>(held.coefficients.at(coefficient)))return std::nullopt;
+  return image;
+}
+// `checkpoint`, when supplied, is called before every dense ansatz so a caller's
+// deadline is honoured inside the (n,d) scan, not only between coefficients.
+inline std::optional<Image> discover(Samples samples,std::size_t coefficient,
+    std::size_t variables,unsigned max_degree,Word p,const std::function<void()>& checkpoint={}) {
+  if(samples.size()<=holdouts)return std::nullopt;
+  const auto training=samples.size()-holdouts;
   std::vector<std::vector<Power>> terms;for(unsigned d=0;d<=max_degree;++d){
     try{terms.push_back(monomials(variables,d));}catch(const std::runtime_error&){break;}}
   struct Choice{std::size_t count;unsigned n,d;};std::vector<Choice> choices;
   for(unsigned n=0;n<terms.size();++n)for(unsigned d=0;d<terms.size();++d)
-    if(terms[n].size()+terms[d].size()<=training.size()+1)choices.push_back({terms[n].size()+terms[d].size(),n,d});
+    if(terms[n].size()+terms[d].size()<=training+1)choices.push_back({terms[n].size()+terms[d].size(),n,d});
   std::sort(choices.begin(),choices.end(),[](auto a,auto b){return std::tie(a.count,a.n,a.d)<std::tie(b.count,b.n,b.d);});
-  for(auto c:choices)if(auto result=fit(training,coefficient,{terms[c.n],terms[c.d],0},p)) {
-    bool valid=true;for(std::size_t i=training.size();i<samples.size();++i)
-      if(evaluate(*result,samples[i].point,p)!=std::optional<Word>(samples[i].coefficients.at(coefficient)))valid=false;
-    if(valid)return result;
-  }
+  for(auto c:choices){if(checkpoint)checkpoint();if(auto result=fit_with_holdouts(samples,coefficient,{terms[c.n],terms[c.d],0},p))return result;}
   return std::nullopt;
+}
+// True once every (numerator,denominator) total-degree pair up to max_degree
+// already fits the training rows: further samples cannot help the dense scan.
+inline bool dense_scan_saturated(std::size_t samples,std::size_t variables,unsigned max_degree) {
+  if(samples<=holdouts)return false;
+  try{return 2*monomials(variables,max_degree).size()<=samples-holdouts+1;}
+  catch(const std::runtime_error&){return false;}
 }
 // A generic univariate slice preserves each coordinate degree and valuation
 // unless that specialization cancels a factor. Treat the resulting box only
 // as a hypothesis: fit it at unrelated multivariate points and retain heldouts.
-inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigned max_degree,
+// The box is NOT cut by a total degree: a coefficient of bidegree (15,2) is
+// far cheaper than its dense total-degree-17 hull, and a global total-degree
+// cap would silently delete monomials such as x^15 eps^2 from the ansatz.
+inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigned max_variable_degree,
     std::size_t limit=1024) {
   Ansatz result;
   auto terms=[&](bool denominator)->std::optional<std::vector<Power>> {
@@ -134,28 +159,19 @@ inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigne
       const auto& powers=denominator?image.ansatz.denominator:image.ansatz.numerator;
       const auto offset=denominator?image.ansatz.numerator.size():0;
       if(image.coefficients.size()!=image.ansatz.numerator.size()+image.ansatz.denominator.size())throw std::invalid_argument("slice image shape");
-      unsigned lo=max_degree+1,hi=0;
+      unsigned lo=max_variable_degree+1,hi=0;
       for(std::size_t j=0;j<powers.size();++j){if(powers[j].size()!=1)throw std::invalid_argument("degree slice must be univariate");
         if(image.coefficients[offset+j]){lo=std::min(lo,powers[j][0]);hi=std::max(hi,powers[j][0]);}}
-      if(lo>max_degree)return std::nullopt;ranges.emplace_back(lo,hi);
+      if(lo>max_variable_degree)return std::nullopt;ranges.emplace_back(lo,hi);
     }
     std::vector<Power> out;Power power(slices.size());bool overflow=false;
-    auto visit=[&](auto&& self,std::size_t i,unsigned sum)->void {
+    auto visit=[&](auto&& self,std::size_t i)->void {
       if(overflow)return;if(i==ranges.size()){out.push_back(power);overflow=out.size()>limit;return;}
-      for(unsigned e=ranges[i].first;e<=ranges[i].second&&e<=max_degree-sum;++e){power[i]=e;self(self,i+1,sum+e);}
-    };visit(visit,0,0);if(overflow||out.empty())return std::nullopt;return out;
+      for(unsigned e=ranges[i].first;e<=ranges[i].second&&!overflow;++e){power[i]=e;self(self,i+1);}
+    };visit(visit,0);if(overflow||out.empty())return std::nullopt;return out;
   };
   auto n=terms(false),d=terms(true);if(!n||!d)return std::nullopt;
   result.numerator=std::move(*n);result.denominator=std::move(*d);return result;
-}
-inline std::optional<Image> fit_with_holdouts(const std::vector<Sample>& samples,std::size_t coefficient,
-    const Ansatz& ansatz,Word p) {
-  if(samples.size()<4)return std::nullopt;
-  const std::vector<Sample> training(samples.begin(),samples.end()-3);
-  auto image=fit(training,coefficient,ansatz,p);if(!image)return std::nullopt;
-  for(std::size_t i=training.size();i<samples.size();++i)
-    if(evaluate(*image,samples[i].point,p)!=std::optional<Word>(samples[i].coefficients.at(coefficient)))return std::nullopt;
-  return image;
 }
 struct Lift {
   Ansatz ansatz;std::vector<Integer> residues;Integer modulus;

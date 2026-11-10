@@ -250,17 +250,24 @@ inline void insert_derivative(Relation& result,const Integral& indices,std::size
   }
 }
 
+// One row per IBP operator d/dl_i . v, ordered by loop i and then by vector v
+// (loops, then externals); entry k is v . dD_k/dl_i rewritten in denominators.
+// Every consumer of the IBP relations reads this single table.
+inline std::vector<std::vector<Affine>> contractions(const PropagatorBasis& basis) {
+  std::vector<std::vector<Affine>> out;
+  for(unsigned i=0;i<basis.space.loops;++i)
+    for(unsigned v=0;v<basis.space.loops+basis.space.externals();++v) {
+      out.emplace_back();
+      for(const auto& d:basis.denominators)
+        out.back().push_back(basis.rewrite(basis.space.contraction(d,i,v)));
+    }
+  return out;
+}
+
 class Generator {
  public:
   Generator(PropagatorBasis basis,Exact dimension)
-      : basis_(std::move(basis)),dimension_(std::move(dimension)) {
-    for(unsigned i=0;i<basis_.space.loops;++i)
-      for(unsigned v=0;v<basis_.space.loops+basis_.space.externals();++v) {
-        contractions_.emplace_back();
-        for(const auto& d:basis_.denominators)
-          contractions_.back().push_back(basis_.rewrite(basis_.space.contraction(d,i,v)));
-      }
-  }
+      : basis_(std::move(basis)),dimension_(std::move(dimension)),contractions_(contractions(basis_)) {}
   const PropagatorBasis& basis() const {return basis_;}
   std::vector<Relation> relations(const Integral& indices) const {
     validate(indices);std::vector<Relation> result;std::size_t contraction=0;

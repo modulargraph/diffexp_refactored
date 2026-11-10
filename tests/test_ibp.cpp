@@ -40,6 +40,13 @@ void merged_bubble() {
   Generator generator(PropagatorBasis(merge(raw,0,1,x)),d);
   check(generator.basis().physical_count==1 && generator.basis().denominators.size()==2,
     "one merged physical propagator and one explicit ISP");
+  // The shared contraction table is the generator's: one row per operator
+  // (loop, vector), and a relation is assembled from that row alone.
+  {const auto table=contractions(generator.basis());const Integral seed{2,-1};const auto relations=generator.relations(seed);
+    check(table.size()==relations.size()&&table.size()==2&&table[0].size()==2,"contraction table shape");
+    for(std::size_t op=0;op<table.size();++op){Relation rebuilt;if(op==0)add(rebuilt,seed,d);
+      for(std::size_t k=0;k<seed.size();++k)insert_derivative(rebuilt,seed,k,table[op][k],d.constant(-seed[k]));
+      check(rebuilt==relations[op],"generator does not use the shared contraction table");}}
   ExactReducer reducer(x);
   for(int a=1;a<=4;++a) for(int isp=0;isp>=-2;--isp)
     for(auto& equation:generator.relations({a,isp})) reducer.insert(std::move(equation));

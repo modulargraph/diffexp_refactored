@@ -36,5 +36,41 @@ int main(){try{
   if(!sx||!sy)throw std::runtime_error("cancellation setup failed");auto bad_box=modular::degree_box({*sx,*sy},4);
   if(!bad_box||modular::fit_with_holdouts(checks,0,*bad_box,prime))throw std::runtime_error("nongeneric degree slice was accepted");
   if(!modular::discover(checks,0,2,4,prime))throw std::runtime_error("dense fallback failed");
+  // The kite tadpole coefficient has bidegree (15,2)/(17,0). Its dense hull has
+  // total degree 17 and 342 unknowns; the per-variable box has 66. A global
+  // total-degree cap must neither cut x^15*eps^2 from the box nor be needed.
+  {
+    std::string numerator="1",denominator="3";
+    for(unsigned n=1;n<=15;++n)numerator+="+"+std::to_string(n+1)+"*x^"+std::to_string(n)+"*(1+"+std::to_string(n)+"*eps+eps^2)";
+    for(unsigned n=1;n<=17;++n)denominator+="+"+std::to_string(2*n+1)+"*x^"+std::to_string(n);
+    auto wide=x.parse("("+numerator+")/("+denominator+")");std::vector<modular::Image> wide_slices;
+    for(unsigned axis=0;axis<2;++axis){std::vector<modular::Sample> line;
+      for(unsigned i=0;i<48;++i){auto p=modular::point(3,1,1500+i);auto t=p[axis];p[1-axis]=41;line.push_back({{t},{modular::evaluate(wide,p,prime)}});}
+      auto shape=modular::discover(line,0,1,20,prime);if(!shape)throw std::runtime_error("wide univariate degree discovery failed");wide_slices.push_back(*shape);
+    }
+    auto wide_box=modular::degree_box(wide_slices,20);
+    if(!wide_box||wide_box->numerator.size()!=48||wide_box->denominator.size()!=18)throw std::runtime_error("per-variable box was cut by a total degree");
+    if(std::find(wide_box->numerator.begin(),wide_box->numerator.end(),modular::Power{15,2})==wide_box->numerator.end())throw std::runtime_error("box lost its corner monomial");
+    std::vector<modular::Sample> generic;
+    for(unsigned i=0;i<69;++i){auto p=modular::point(3,1,2000+i);generic.push_back({{p[0],p[1]},{modular::evaluate(wide,p,prime)}});}
+    auto wide_image=modular::fit_with_holdouts(generic,0,*wide_box,prime);if(!wide_image)throw std::runtime_error("wide box fit failed at its stated sample count");
+    for(unsigned i=0;i<10;++i){auto p=modular::point(3,1,2600+i);if(modular::evaluate(*wide_image,{p[0],p[1]},prime)!=std::optional<modular::Word>(modular::evaluate(wide,p,prime)))throw std::runtime_error("wide box independent evaluation failed");}
+    // Dense total degree 16 can never fit it, however many points are supplied.
+    if(modular::discover(generic,0,2,16,prime))throw std::runtime_error("dense scan below the true total degree succeeded");
+    if(modular::dense_scan_saturated(64,2,16)||!modular::dense_scan_saturated(512,2,16))throw std::runtime_error("dense saturation threshold");
+    unsigned calls=0;modular::discover(generic,0,2,4,prime,[&]{++calls;});
+    if(!calls)throw std::runtime_error("dense scan ignored its deadline checkpoint");
+  }
+  // Fits read a view of the caller's samples: a prefix needs no copy, and the
+  // withheld tail of that prefix, not of the full set, decides acceptance.
+  {
+    modular::Samples all(samples[0]);auto prefix=all.first(20);
+    auto viewed=modular::discover(prefix,2,2,6,modular::prime(1)),whole=modular::discover(all,2,2,6,modular::prime(1));
+    if(!viewed||!whole||viewed->coefficients!=whole->coefficients||viewed->ansatz.numerator!=whole->ansatz.numerator)throw std::runtime_error("sample view changed the discovered image");
+    auto tail=samples[0];tail[19].coefficients[2]^=1;
+    if(modular::fit_with_holdouts(modular::Samples(tail).first(20),2,whole->ansatz,modular::prime(1)))throw std::runtime_error("corrupted held-out row of a view was accepted");
+    if(!modular::fit_with_holdouts(modular::Samples(tail).first(19),2,whole->ansatz,modular::prime(1)))throw std::runtime_error("held-out window is not the tail of the supplied view");
+    if(modular::fit_with_holdouts(all.first(modular::holdouts),1,whole->ansatz,modular::prime(1)))throw std::runtime_error("fit without any training row was accepted");
+  }
   std::cout<<"native multivariate modular interpolation, multi-prime CRT, large rational coefficients, zero-constant denominator and held-out corruption checks passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

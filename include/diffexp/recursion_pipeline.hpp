@@ -316,6 +316,13 @@ class Evaluator {
       :graph_(graph),options_(std::move(options)),plans_(graph.nodes.size()),cache_(graph.nodes.size()),expressions_(graph.nodes.size()),direct_demands_(graph.nodes.size()) {
     validate_numerical_options(options_);
     if(graph_.nodes.empty())throw std::invalid_argument("recursive numerical options or finite budgets: empty recursion graph");
+    // The scalar leaf is asked for leaf_digits digits, and nothing built on it
+    // is more accurate: a Taylor tail ten digits below that per chart keeps
+    // the transport from limiting the result without computing charts for
+    // digits the leaf does not have.
+    if(!options_.adjoint.truncation_bits)options_.adjoint.truncation_bits=static_cast<unsigned>(std::min<double>(
+      std::min<double>(2.0*options_.ordinary_order,static_cast<double>(options_.working_bits)-32),
+      std::ceil((options_.leaf_digits+10.0)*std::log2(10.0))));
     auto [xi,ei]=path_epsilon_variables(graph_.dimension);xi_=xi;ei_=ei;
     for(const auto& [depth,basis]:options_.physical_bases)
       if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf)
@@ -1451,6 +1458,14 @@ class Evaluator {
     if(ii==names.end())throw std::invalid_argument("recursive contour requires exact I variable");
     const auto imaginary=graph_.dimension.variable(ii-names.begin())*
       graph_.dimension.constant(Rational(prescription_.levels.at(depth).x_detour_sign));
+    // At a numeric dimension the moving poles of the master basis are real
+    // points in nearly coincident pairs all along the segment, and the
+    // coefficients are long whatever the centre: there the whole leg runs at
+    // the contour height, away from them.
+    if(graph_.specialised) {
+      const auto lift=imaginary*graph_.dimension.constant(options_.contour_height);
+      return {from,from+lift,to+lift,to};
+    }
     if(!prepared.real_singularities) {
       auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_);
       for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_))roots.push_back(std::move(root));
@@ -1490,17 +1505,31 @@ class Evaluator {
       char* text=fmpz_get_str(nullptr,10,whole);Rational result=Rational{std::string(text)}*grid;
       flint_free(text);fmpz_clear(whole);return result;
     };
-    for(std::size_t i=0;i<inside.size();++i) {
-      const Rational before=inside[i].first-(i?inside[i-1].second:low);
-      const Rational after=(i+1<inside.size()?inside[i+1].first:high)-inside[i].second;
+    // Singular points closer together than twice the contour height share
+    // one detour: passing a pole costs about a dozen charts however small
+    // the detour, so a row of poles is cheaper to pass at a distance.
+    const Rational height=options_.contour_height,reach=height*Rational(2);
+    for(std::size_t first=0;first<inside.size();) {
+      std::size_t last=first;
+      while(last+1<inside.size() && inside[last+1].first-inside[last].second<reach)++last;
+      const Rational before=inside[first].first-(first?inside[first-1].second:low);
+      const Rational after=(last+1<inside.size()?inside[last+1].first:high)-inside[last].second;
       Rational free=(before<after?before:after)/Rational(2);
-      if(options_.contour_height<free)free=options_.contour_height;
+      if(height<free)free=height;
       Rational size(1);while(free<size)size=size/Rational(2);
       const Rational grid=size/Rational(4);
-      const Rational left=floor_to(inside[i].first-size,grid,false),right=floor_to(inside[i].second+size,grid,true);
+      const Rational left=floor_to(inside[first].first-size,grid,false),right=floor_to(inside[last].second+size,grid,true);
       vertices.push_back(graph_.dimension.constant(left));
-      vertices.push_back(graph_.dimension.constant((left+right)/Rational(2))+imaginary*graph_.dimension.constant((right-left)/Rational(2)));
+      if(first==last) {
+        vertices.push_back(graph_.dimension.constant((left+right)/Rational(2))+imaginary*graph_.dimension.constant((right-left)/Rational(2)));
+      } else {
+        // A rectangle over the group, as high as the contour height allows.
+        Rational lift(1);while(height<lift)lift=lift/Rational(2);
+        vertices.push_back(graph_.dimension.constant(left)+imaginary*graph_.dimension.constant(lift));
+        vertices.push_back(graph_.dimension.constant(right)+imaginary*graph_.dimension.constant(lift));
+      }
       vertices.push_back(graph_.dimension.constant(right));
+      first=last+1;
     }
     vertices.push_back(graph_.dimension.constant(high));
     if(!ascending)std::reverse(vertices.begin(),vertices.end());

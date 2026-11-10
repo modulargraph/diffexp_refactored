@@ -407,6 +407,9 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
       // Prepared coefficients and Taylor series depend on the centre only,
       // not on the endpoint: they survive every shortening of this chart.
       std::vector<std::optional<rc::Prepared>> prepared(circuits.size());
+      // The Taylor series of a batch depends on the centre and on its input
+      // rows, not on the endpoint: shortening the step reuses it.
+      std::vector<std::optional<rc::Series>> expanded(circuits.size());
       std::optional<rc::Prepared> map_prepared;std::vector<std::optional<rc::Series>> map_columns(d);
       const auto prepare=[&](const rc::Compiled& circuit) {
         AdjointPhaseTimer timer{stats?&stats->preparation_seconds:nullptr};
@@ -487,7 +490,8 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         // Inherited uncertainty beyond the reserve would be wrapped by the
         // recurrence; a direct enclosure that lost the reserve was.
         if(map_fits && beyond_reserve(input))return centered(index,input,next);
-        auto values=fit(expand(*prepared[index],input),next,target);
+        if(!expanded[index])expanded[index]=expand(*prepared[index],input);
+        auto values=fit(*expanded[index],next,target);
         if(map_fits && beyond_reserve(values))return centered(index,input,next);
         return values;
       };
@@ -508,7 +512,10 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
           }
           complete=true;for(auto endpoint:evaluated)complete=complete && endpoint==next;
         }
-        if(probes && !folding && beyond_reserve(output)){fold();folding=true;continue;}
+        if(probes && !folding && beyond_reserve(output)) {
+          fold();folding=true;for(auto& series:expanded)series.reset(); // the inputs changed
+          continue;
+        }
         if(options.max_conditioning_halvings && adjoint_detail::needs_conditioning_subdivision(state,output)) {
           if(halvings>=options.max_conditioning_halvings)
             throw ArithmeticConditioningFailure("adjoint arithmetic-conditioning step budget exhausted");

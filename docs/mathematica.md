@@ -83,8 +83,18 @@ asymptotic initialization still requires rational input; apply algebraic
 prefactors on subsequent regular transport.
 
 Saved output has the original outer shape `{{point,values,errors}, metadata}`.
-For a physical plotting point, `ToPiecewise` uses native transport and caches
-the result. For a line varying one coordinate affinely, it starts from the
+When the transport path is not deformed by `DeltaPrescriptions` and no
+`BasisPrefactors` are configured, the saved run also stores the Taylor
+segments of the native transport, and `ToPiecewise` evaluates interior points
+directly from them, without launching the backend. Segment coefficients keep
+`AccuracyGoal + 10` digits (40 without a goal). A saved run therefore uses the
+local series recurrence rather than the finite-lag or spectral accelerations;
+`Recurrence -> "spectral"` keeps its speed and its replay-based evaluation.
+If the segments would exceed the 64 MiB native output budget they are dropped
+and evaluation replays as described next.
+
+For any other physical plotting point, `ToPiecewise` uses native transport and
+caches the result. For a line varying one coordinate affinely, it starts from the
 nearest previously computed physical sample, including the saved endpoint and
 initial boundary. Each new point is evaluated on its physical path; local
 polynomials on a complex contour are not extrapolated onto the real plotting

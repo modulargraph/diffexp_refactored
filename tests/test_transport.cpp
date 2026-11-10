@@ -213,6 +213,67 @@ int main() {
     auto far=transport::expand(system,system_entries,{{B(1),B(0)},{B(0),B(0)}},{},B(0),B::from_strings("19/20"),48,false,120,guarded);
     if(far.series->lag_entries!=1)throw std::runtime_error("finite-lag feedback guard");
   }
+  // Systems with epsilon-zero feedback accumulate omitted-tail estimates
+  // beside the balls. The folded endpoint radius must still cover the actual
+  // truncation error, also when the solution grows by e^30 along the path.
+  {
+    auto feedback=j::parse(R"JSON({"dimension":2,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":25,"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":1,"column":0,"epsilon":0,"variable":"t","expression":"1/(1+t)"}],"boundary":[["1"],["0"]]})JSON");
+    auto folded=transport::run(feedback).as_object();
+    if(folded.at("recurrence").as_object().at("tail_estimates")!="accumulated")throw std::runtime_error("coupled system did not accumulate tail estimates separately");
+    B::set_precision(256);
+    const auto covered=[&](const j::object& output,unsigned row,const B& exact,const char* goal_bound) {
+      const auto& cell=output.at("values").as_array()[row].as_array()[0].as_object();
+      B mid=B::from_strings(transport::string(cell.at("real_midpoint"))),radius=B::from_strings(transport::string(cell.at("radius")));
+      auto miss=transport::magnitude(mid-exact);
+      return arb_le(acb_realref(miss.raw()),acb_realref(radius.raw())) &&
+        arb_lt(acb_realref(radius.raw()),acb_realref((B::from_strings(goal_bound)*(transport::magnitude(exact)+B(1))).raw())) && !radius.is_zero();
+    };
+    if(!covered(folded,0,B::from_strings("5/4"),"1e-25") || !covered(folded,1,B::from_strings("3/4"),"1e-25"))
+      throw std::runtime_error("accumulated tail estimate does not cover the truncation error");
+    auto growing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"paths":{"t":"x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"30"}],"boundary":[["1"]]})JSON");
+    auto grown=transport::run(growing).as_object();B e30;acb_exp(e30.raw(),B(30).raw(),256);
+    if(grown.at("recurrence").as_object().at("tail_estimates")!="accumulated" || !covered(grown,0,e30,"1e-20"))
+      throw std::runtime_error("accumulated tail estimate lost a growing solution");
+    // Canonical and triangular systems keep propagating estimates in the balls.
+    auto triangular_run=j::parse(R"JSON({"dimension":2,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"}],"boundary":[["0"],["1"]]})JSON");
+    auto propagated=transport::run(triangular_run).as_object();B log2;acb_log(log2.raw(),B(2).raw(),256);
+    if(propagated.at("recurrence").as_object().at("tail_estimates")!="propagated" || !covered(propagated,0,log2,"1e-20"))
+      throw std::runtime_error("triangular system changed its tail propagation");
+  }
+  // Optional segment saving: the saved series reproduce interior values at
+  // the requested digits, and an exhausted output budget drops the segments
+  // without discarding the transport.
+  {
+    auto plotted=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"save_segments":true,"save_segments_optional":true,"segment_digits":25,"paths":{"t":"x/2"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
+    auto saved_run=transport::run(plotted).as_object();
+    if(!saved_run.at("segments_complete").as_bool() || saved_run.at("segments").as_array().empty())throw std::runtime_error("optional segments were not saved");
+    const auto number=[](const j::value& v){return std::stod(std::string(v.as_string()));};
+    double previous_end=0;
+    for(const double x:{0.0,0.3,0.71,1.0}) {
+      bool found=false;
+      for(const auto& item:saved_run.at("segments").as_array()) {
+        const auto& segment=item.as_object();const double begin=number(segment.at("start")),finish=number(segment.at("end")),center=number(segment.at("center"));
+        if(x<begin || x>finish || found)continue;
+        const auto& coefficients=segment.at("coefficients").as_array();double value=0;
+        for(std::size_t n=coefficients.size();n-->0;){
+          const auto& cell=coefficients[n].as_array()[0].as_array()[0].as_object();
+          if(cell.at("real_midpoint").as_string().size()>40)throw std::runtime_error("segment_digits was ignored");
+          value=value*(x-center)+number(cell.at("real_midpoint"));}
+        if(std::abs(value-1/(1-x/2))>1e-13)throw std::runtime_error("saved segment does not reproduce the interior solution");
+        found=true;
+      }
+      if(!found)throw std::runtime_error("saved segments do not cover the path");
+    }
+    for(const auto& item:saved_run.at("segments").as_array()) {
+      if(std::abs(number(item.as_object().at("start"))-previous_end)>1e-12)throw std::runtime_error("saved segments are not contiguous");
+      previous_end=number(item.as_object().at("end"));
+    }
+    if(std::abs(previous_end-1)>1e-12)throw std::runtime_error("saved segments stop before the endpoint");
+    auto overflow=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":1000,"working_bits":100000,"save_segments":true,"save_segments_optional":true,"paths":{"t":"x"},"entries":[],"boundary":[["1"]]})JSON");
+    auto dropped=transport::run(overflow).as_object();
+    if(dropped.at("segments_complete").as_bool() || !dropped.at("segments").as_array().empty() || std::abs(real(j::value(dropped))-1)>1e-15)
+      throw std::runtime_error("optional segment budget did not degrade to an unsaved transport");
+  }
   // A pole on the open path is reported at once, with its location, instead
   // of after the chart clearance has shrunk through the refinement budget.
   auto crossing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"accuracy_goal":20,"paths":{"t":"2*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");

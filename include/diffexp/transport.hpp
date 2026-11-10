@@ -209,6 +209,12 @@ inline json::array matrix_json(const Boundary& values,long digits) {
 }
 inline B magnitude(const B& v) {B b;acb_abs(acb_realref(b.raw()),v.raw(),B::precision());return b;}
 inline B arithmetic_error(const B& v) {B b;mag_t m;mag_init(m);mag_add(m,arb_radref(acb_realref(v.raw())),arb_radref(acb_imagref(v.raw())));arf_set_mag(arb_midref(acb_realref(b.raw())),m);mag_clear(m);return b;}
+// A nonnegative estimate as an exact upper bound: accumulating estimates
+// must not also accumulate the radii of the balls they were read from.
+inline B upper_estimate(const B& nonnegative) {
+  B out;arf_t upper;arf_init(upper);arb_get_ubound_arf(upper,acb_realref(nonnegative.raw()),B::precision());
+  if(arf_sgn(upper)>0)arf_set(arb_midref(acb_realref(out.raw())),upper);arf_clear(upper);return out;
+}
 // Endpoint normalization is supplied mathematical basis data. It is never
 // inferred from a component's value, a reference result, or a family name.
 inline std::vector<B> principal_roots_at(const Compiled& c,const B& point) {
@@ -670,7 +676,7 @@ inline std::optional<std::pair<Boundary,Boundary>> finite_start(const Compiled& 
 
 inline json::value run(const json::value& input) {
   const auto start=std::chrono::steady_clock::now();const auto& r=input.as_object();
-  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors","recurrence"},"transport");
+  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors","recurrence","save_segments_optional","segment_digits"},"transport");
   if(auto a=r.if_contains("asymptotic")) {
     known_keys(a->as_object(),{"constraints","cutoffs"},"asymptotic");
     for(const auto& v:a->as_object().at("constraints").as_array())known_keys(v.as_object(),{"row","epsilon","power","log_degree","value"},"asymptotic constraint");
@@ -682,6 +688,13 @@ inline json::value run(const json::value& input) {
   auto bits=integer(r,"working_bits",384,64,100000),division=integer(r,"division_order",4,2,100),goal=integer(r,"accuracy_goal",0,0,20000);
   if(goal*3.32193>bits-32)throw std::invalid_argument("working precision has insufficient reserve for AccuracyGoal");
   B::set_precision(bits);const long digits=bits*30103/100000+5;bool save=r.if_contains("save_segments") && r.at("save_segments").as_bool();
+  // Optional saving serves plotting: once the output budget is reached the
+  // transport continues without segments instead of discarding its work.
+  const bool save_requested=save,save_optional=r.if_contains("save_segments_optional") && r.at("save_segments_optional").as_bool();
+  bool segments_complete=true;
+  // Saved coefficients need not carry the full working precision: a plot or
+  // an interpolation asks for far fewer digits than the transported boundary.
+  const long segment_digits=std::min<long>(digits,integer(r,"segment_digits",digits,10,1000000));
   std::cerr<<"Preparing generic transport: "<<d<<" components, epsilon 0.."<<k<<"\n";
   std::string recurrence=r.if_contains("recurrence")?string(r.at("recurrence")):"auto";
   if(recurrence!="auto" && recurrence!="series" && recurrence!="taylor" && recurrence!="spectral")
@@ -763,6 +776,22 @@ inline json::value run(const json::value& input) {
   unsigned finite_lag_charts=0,series_charts=0,finite_lag_rejections=0;
   const auto prepared=std::chrono::steady_clock::now();
   Boundary current,errors(d,std::vector<B>(k+1,B(0)));double center=0;json::array segments;unsigned charts=0;std::uint64_t saved_budget_used=0;
+  // An omitted-tail ESTIMATE is not an enclosure. Folding it into the balls of
+  // a system with epsilon-zero feedback makes every later chart carry it
+  // through a d-column homogeneous map. Such systems accumulate the estimate
+  // beside the balls and fold it in once, at the endpoint. Triangular and
+  // canonical recurrences propagate radii at no extra cost and keep doing so;
+  // supplied boundary uncertainties always stay in the balls.
+  const bool separate_tails=!c.canonical && zero_order_feedback(c);
+  Boundary accumulated(d,std::vector<B>(k+1,B(0)));
+  const auto fold_accumulated=[&]() {
+    if(!separate_tails)return;
+    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      arb_add_error(acb_realref(current[i][e].raw()),acb_realref(accumulated[i][e].raw()));
+      arb_add_error(acb_imagref(current[i][e].raw()),acb_realref(accumulated[i][e].raw()));
+      errors[i][e]=errors[i][e]+accumulated[i][e];accumulated[i][e]=B(0);
+    }
+  };
   if(auto a=r.if_contains("asymptotic")) {
     if(!c.squares.empty())throw std::invalid_argument("asymptotic matching currently requires a rational connection");
     std::vector<B> finite=c.singularities;finite.erase(std::remove_if(finite.begin(),finite.end(),[](const B& p){return p.contains_zero();}),finite.end());
@@ -787,12 +816,14 @@ inline json::value run(const json::value& input) {
       const auto acceptable=[&](){for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e){auto bound=(magnitude(current[i][e])+B(1))*tolerance;if(!arb_le(acb_realref(errors[i][e].raw()),acb_realref(bound.raw())))return false;}return true;};
       while(!acceptable()){if(++attempts>30)throw std::runtime_error("asymptotic start cannot meet AccuracyGoal with the supplied boundary precision");next/=2;acb_set_d(endpoint.raw(),next);evaluate_start();}
     }
+    const bool initial_only=r.if_contains("initial_only") && r.at("initial_only").as_bool();
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      if(separate_tails && !initial_only){accumulated[i][e]=upper_estimate(errors[i][e]);continue;}
       arb_add_error(acb_realref(current[i][e].raw()),acb_realref(errors[i][e].raw()));
       arb_add_error(acb_imagref(current[i][e].raw()),acb_realref(errors[i][e].raw()));
     }
     center=next;++charts;
-    if(r.if_contains("initial_only") && r.at("initial_only").as_bool()) {
+    if(initial_only) {
       apply_basis_prefactors(c,endpoint,{},current,errors);
       const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
       return json::object{{"schema","DiffExp.TransportResult/v1"},{"parameter",decimal_mid(acb_realref(endpoint.raw()),digits)},
@@ -836,9 +867,11 @@ inline json::value run(const json::value& input) {
     if(!(next>center))throw std::runtime_error("transport has no nonzero continuation step");
     B at,end;acb_set_d(at.raw(),center);acb_set_d(end.raw(),next);
     if(save) {
-      const std::uint64_t estimate=static_cast<std::uint64_t>(order+1)*d*(k+1)*(3*(digits+32)+80);
-      if(estimate>64*1024*1024 || saved_budget_used>64*1024*1024-estimate)throw std::length_error("saved transport segments exceed the 64 MiB output budget");
-      saved_budget_used+=estimate;
+      const std::uint64_t estimate=static_cast<std::uint64_t>(order+1)*d*(k+1)*(3*(segment_digits+32)+80);
+      if(estimate>64*1024*1024 || saved_budget_used>64*1024*1024-estimate) {
+        if(!save_optional)throw std::length_error("saved transport segments exceed the 64 MiB output budget");
+        save=false;segments_complete=false;segments=json::array{};
+      } else saved_budget_used+=estimate;
     }
     // Saved coefficients are serialized once, for the accepted step only.
     Chart result;auto expansion=expand(c,entries,current,root_values,at,end-at,order,false,digits,result,true,10000000,true,!save);
@@ -902,8 +935,23 @@ inline json::value run(const json::value& input) {
         else series_only();
       }
     }
-    if(save)result.saved=series_saved(*expansion.series,end-at,digits);
-    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+    if(save)result.saved=series_saved(*expansion.series,end-at,segment_digits);
+    if(separate_tails) {
+      // Two models bound how an earlier estimate reaches this endpoint: it is
+      // carried unchanged, or the solution's relative error is preserved (as
+      // for a growing mode). Take the larger, then add this chart's tail.
+      B relative(0);
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto ratio=upper_estimate(accumulated[i][e]/(magnitude(current[i][e])+B(1)));
+        arb_max(acb_realref(relative.raw()),acb_realref(relative.raw()),acb_realref(ratio.raw()),bits);
+      }
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto scaled=upper_estimate(relative*(magnitude(result.values[i][e])+B(1)));
+        arb_max(acb_realref(accumulated[i][e].raw()),acb_realref(accumulated[i][e].raw()),acb_realref(scaled.raw()),bits);
+        accumulated[i][e]=upper_estimate(accumulated[i][e]+result.truncation_errors[i][e]);
+        errors[i][e]=arithmetic_error(result.values[i][e]);
+      }
+    } else for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
       errors[i][e]=result.errors[i][e];
       // Carry the estimated omitted terms into the next chart as input radii.
       // This remains an error estimate, not a proof of the infinite remainder.
@@ -917,6 +965,7 @@ inline json::value run(const json::value& input) {
     center=next;
     if(charts%20==0)std::cerr<<"Transport chart "<<charts<<", path parameter "<<center<<"\n";
   }
+  fold_accumulated();
   apply_basis_prefactors(c,B(1),root_values,current,errors);
   if(goal>0) {
     auto tolerance=B::from_strings("1e-"+std::to_string(goal));
@@ -932,9 +981,13 @@ inline json::value run(const json::value& input) {
     {"timings",json::object{{"preparation_seconds",std::chrono::duration<double>(prepared-start).count()},
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
   output["spectral"]=spectral_diagnostic;
+  if(save_requested)output["segments_complete"]=segments_complete;
   output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
     {"max_polynomial_degree",c.finite_lag?c.finite_lag->max_degree:0},
-    {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason}};
+    {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason},
+    // How omitted-tail estimates reached the endpoint: inside the balls of
+    // every chart, or accumulated beside them and folded in at the end.
+    {"tail_estimates",separate_tails?"accumulated":"propagated"}};
   if(!c.basis_prefactors.empty()) {
     output["basis_convention"]="principal_endpoint";
     output["segments_basis_convention"]="continued";

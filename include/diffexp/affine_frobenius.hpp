@@ -4,9 +4,14 @@
 #include "diffexp/univariate_rational.hpp"
 #include <flint/fmpq_poly.h>
 #include <flint/fmpz_mpoly_factor.h>
-#include <map>
-#include <tuple>
+#include <atomic>
+#include <exception>
 #include <functional>
+#include <iterator>
+#include <map>
+#include <mutex>
+#include <thread>
+#include <tuple>
 
 namespace diffexp {
 namespace affine_frobenius_detail {
@@ -735,7 +740,10 @@ public:
     bool finite_lag_recurrence = true;
     unsigned max_clearing_degree = 32;
     std::size_t max_projection_products=100000000;
+    // Called with (columns completed, columns) under a lock; the columns are
+    // solved on `threads` threads (0: one per hardware thread).
     std::function<void(unsigned,unsigned)> column_progress;
+    unsigned threads = 0;
   };
   struct Term {
     unsigned row, column, log_degree;
@@ -932,15 +940,28 @@ private:
       out.expansion_.wronskian_prefactor =
           affine_frobenius_detail::determinant(out.frame_);
     const IntegerRecurrence recurrence(g, derivative_lags, out.frame_, ei);
-    IntegerPolynomial numerator, denominator, shared, divisor;
+    // Columns are independent, so they are solved on separate threads and
+    // their terms appended in column order: the result does not depend on the
+    // thread count. Orders beyond a column's absolute frontier cannot
+    // contribute to any retained coefficient.
+    std::vector<unsigned> tops(d);
     for (unsigned column = 0; column < d; ++column) {
-      // Columns are independent. Orders beyond this column's absolute
-      // frontier cannot contribute to any retained coefficient.
       const auto cutoff=out.frontiers_[column]-out.eigen_[column].power;
       if(!is_integer(cutoff)||cutoff.sign()<0)throw std::logic_error("nonintegral affine column frontier");
       if(cutoff>Rational(n))throw std::logic_error("affine column frontier exceeds prepared order");
-      recurrence.column(out.eigen_, out.successor_, column,
-          static_cast<unsigned>(integer_value(cutoff)),
+      tops[column]=static_cast<unsigned>(integer_value(cutoff));
+    }
+    std::vector<std::vector<Term>> columns(d);
+    std::atomic<unsigned> next{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr failure;
+    std::mutex shared_state;
+    unsigned completed = 0;
+    const auto solve_columns = [&] {
+      IntegerPolynomial numerator, denominator, shared, divisor;
+      for (unsigned column; !failed && (column = next++) < d;) try {
+        auto &terms = columns[column];
+        recurrence.column(out.eigen_, out.successor_, column, tops[column],
           static_cast<std::size_t>(d) * (n + 1),
           [&](unsigned k, unsigned row, const IntegerRecurrence::Value &logs,
               const IntegerPolynomial &scale, const IntegerPolynomial &common,
@@ -959,17 +980,40 @@ private:
                 fmpz_poly_neg(divisor.raw(), divisor.raw());
               fmpz_poly_div(numerator.raw(), numerator.raw(), divisor.raw());
               fmpz_poly_div(denominator.raw(), shared.raw(), divisor.raw());
-              out.expansion_.terms.push_back(
+              terms.push_back(
                   {row, column, l, out.eigen_[column].power + Rational(k),
                    out.eigen_[column].slope,
                    z.from_reduced_univariate_polynomials(numerator.raw(),
                                                          denominator.raw(), ei)});
             }
-            if (out.expansion_.terms.size() > options.max_terms)
+            if (terms.size() > options.max_terms)
               throw std::length_error("affine Frobenius term budget exhausted");
           });
-      if(options.column_progress)options.column_progress(column+1,d);
+        const std::lock_guard lock(shared_state);
+        ++completed;
+        if(options.column_progress)options.column_progress(completed,d);
+      } catch (...) {
+        const std::lock_guard lock(shared_state);
+        if (!failure) failure = std::current_exception();
+        failed = true;
+      }
+    };
+    const unsigned workers = std::min<unsigned>(d,
+        options.threads ? options.threads : std::max(1u, std::thread::hardware_concurrency()));
+    {
+      std::vector<std::jthread> pool;
+      for (unsigned i = 1; i < workers; ++i)
+        pool.emplace_back([&] { solve_columns(); flint_cleanup(); });
+      solve_columns();
     }
+    if (failure) std::rethrow_exception(failure);
+    std::size_t total = 0;
+    for (const auto &terms : columns) total += terms.size();
+    if (total > options.max_terms)
+      throw std::length_error("affine Frobenius term budget exhausted");
+    out.expansion_.terms.reserve(total);
+    for (auto &terms : columns)
+      std::move(terms.begin(), terms.end(), std::back_inserter(out.expansion_.terms));
     return out;
   }
 public:

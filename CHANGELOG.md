@@ -6,6 +6,10 @@
   `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.
 - `--fire-seconds` also bounds one elimination of the built-in IBP solver
   (it was fixed at 20 s).
+- Endpoint series solve their independent columns on one thread per hardware
+  thread; the result is identical for any thread count.
+- `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
+  uses the built-in IBP solver when no FIRE path is given.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the
   master basis the reduction selected moves to the simplest regular rational
   within 3/20 of it, and the progress output says so; it used to abort. The

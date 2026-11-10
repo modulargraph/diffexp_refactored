@@ -706,10 +706,13 @@ inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Sta
 #include "diffexp/detail/compact_recurrence.ipp"
 // False selects expand_balls for every chart (tests and comparisons).
 inline std::atomic<bool> compact_recurrence{std::getenv("DIFFEXP_BALL_RECURRENCE")==nullptr};
+// Charts expanded by each core since the start of the process.
+inline std::atomic<std::size_t> compact_expansions{0},ball_expansions{0};
 inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
   detail::validate_boundary(prepared.data(),boundary);
   if(compact_recurrence.load(std::memory_order_relaxed))
-    if(auto series=expand_compact(prepared,boundary,statistics))return std::move(*series);
+    if(auto series=expand_compact(prepared,boundary,statistics)){++compact_expansions;return std::move(*series);}
+  ++ball_expansions;
   return expand_balls(prepared,boundary,statistics);
 }
 // Horner value of the retained polynomial at step; truncation_log2 receives

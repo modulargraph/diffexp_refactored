@@ -320,6 +320,8 @@ int main(int argc, char** argv) {
           <<"Seconds: endpoint series "<<stats.endpoint_series_seconds<<", endpoint operators "<<stats.endpoint_operator_seconds
           <<", basis selection "<<stats.basis_selection_seconds<<", leaf "<<stats.leaf_seconds<<", ordinary transport "<<stats.ordinary_seconds<<".\n"
           <<"Centered chart actions "<<conditioning.centered_charts<<"; conditioning subdivisions "<<conditioning.conditioning_subdivisions<<".\n"
+          <<"Taylor recurrences: "<<diffexp::rational_circuit::compact_expansions.load()<<" on compact numbers, "
+          <<diffexp::rational_circuit::ball_expansions.load()<<" in ball arithmetic.\n"
           <<(result.taylor_tail_certified?"Certified scalar-leaf coefficient enclosures.\n":"Numerical recursive series result; omitted endpoint and transport tails are not certified.\n");
         if(canonical_basis) {
           auto poles=diffexp::henn::audit_negative_poles(result,diffexp::Rational("1/100000000000000000000"),numerical.working_bits);

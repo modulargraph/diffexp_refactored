@@ -1281,7 +1281,8 @@ class Evaluator {
               <<" centred, "<<stats->conditioning_subdivisions-before.conditioning_subdivisions<<" halved)";
           text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
           if(stats)text<<" (compile "<<stats->compilation_seconds-before.compilation_seconds<<", prepare "
-              <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds<<")";
+              <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds
+              <<"; "<<stats->circuit_terms-before.circuit_terms<<" products)";
           report(depth,text.str(),high);
           return result;
         };

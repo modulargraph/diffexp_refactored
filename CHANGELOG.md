@@ -15,6 +15,14 @@
   bit-identical for any thread count.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
+- The Taylor recurrence of a chart runs on compact numbers (contiguous
+  fixed-size limb vectors, limb-aligned exponents, scaled-double radii) with
+  the semantics of the ball recurrence, which stays as `expand_balls`,
+  reference and fallback. Transport legs of the expanded recursion follow
+  the real axis and detour only around real singular points. The Taylor tail
+  admitted per chart follows the requested leaf digits. On one core the
+  kite takes 5.1 s of numerical time instead of 12.5, the planar double box
+  18.7 instead of 40.8, the four-loop banana 49.4 instead of 240.8.
 - Uncertainty propagation in the recursion's transports. A chart that would
   wrap its inherited uncertainty used to be evaluated through the chart map,
   one expansion per master. The recursion now transports midpoints from the

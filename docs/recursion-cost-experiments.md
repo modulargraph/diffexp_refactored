@@ -136,9 +136,65 @@ charts at an error near 1e-33.
 Of a 227 s double-pentagon sample, 192 s is transport and about 150 s of
 that the Taylor recurrences of the 69-row and 33-row levels.
 
+## One core
+
+The figures above are on four threads. The following changes are gains on a
+single core; numerical seconds on one thread, against the code before any of
+the changes in this note (the last column is the transport alone).
+
+| | Before | Now | Transport |
+| --- | ---: | ---: | ---: |
+| Kite | 12.5 | 5.1 | 9.1 -> 1.9 |
+| Planar double box | 40.8 | 18.7 | 34.5 -> 12.3 |
+| Four-loop banana, expanded | 240.8 | 49.4 | 218.8 -> 27.6 |
+| Four-loop banana, one sample (epsilon = 1/400) | 76.9 | 7.8 | 23.7 -> 4.0 |
+| Double pentagon, one sample (four threads) | 1360 | 157 | 413 -> 123 |
+
+**Real-axis paths.** Every leg used to rise to the contour height, run there
+and come down, whether or not a singular point lay on its real segment. A leg
+of the expanded recursion now stays on the real axis, where chart centres and
+hence all shifted coefficients are real, and passes a real singular point of
+its level over a triangle on the causal side (neighbouring points share one
+rectangle). Passing a pole costs about a dozen charts whatever the size of
+the detour, so detours are as wide as the free distance allows. A sampled
+recursion keeps the lifted path: its moving poles are real points in nearly
+coincident pairs all along each segment.
+
+**Compact recurrence.** One chart of the double box performs 2.5 million
+multiply-adds of an exact coefficient, mostly one limb, with a
+working-precision value. Through `acb_dot` each cost 120-200 ns, and a
+microbenchmark showed why: with operands scattered over a chart-sized
+working set (a value is a 96-byte struct pointing at two heap blocks)
+`acb_dot` takes 127 ns per term, on cached operands 55 ns, while one
+`mpn_addmul_1` over contiguous limbs takes about 6. The recurrence now runs
+on values of 2L contiguous limbs with limb-aligned exponents (no bit shifts
+to align a product), stores the orders a product sum walks through next to
+each other, and keeps one radius per value as a scaled double. Semantics are
+those of the ball recurrence, which remains as reference and fallback and is
+compared coefficient by coefficient in `tests/test_compact_recurrence.cpp`.
+A replacement of `acb_dot` alone, on the old storage, gained 15-30 % in a
+microbenchmark and nothing end to end.
+
+**Tail from the leaf accuracy.** A chart's Taylor tail is now admitted at ten
+digits below the requested leaf digits (2^-127 by default) instead of 2^-160:
+about a fifth fewer charts, with results equal to the old ones to 1e-37.
+
+**What limits a core now.** An instruction profile of the recurrence shows
+one third limb arithmetic, a quarter the full-precision multiplications by
+the inverse pivots of the quotient streams, and the rest bookkeeping spread
+thinly over the product loop; in a sampled recursion the coefficients are
+several limbs long and the products are at their arithmetic cost. Outside
+the transport, the exact stages of the expanded recursion (endpoint
+projection, endpoint series, matching coefficients, all rational-function
+arithmetic in epsilon) are untouched and are now 35 to 60 % of a run: 3.2 of
+5.1 s for the kite, 21.8 of 49.4 s for the four-loop banana. A fraction-free
+rewrite of the projection was tried and was slower, because the stored
+coefficients have a different epsilon-denominator at every order.
+
 ## The double pentagon, end to end
 
-With a sample at 227 s on four threads the whole family is within reach of
+With a sample at 227 s on four threads (157 s after the single-core work
+above) the whole family is within reach of
 one machine: twelve samples at epsilon = +-k/400, four at a time on one
 thread each, took 48 minutes of wall time (6312 s of CPU; the tool then
 still ran its first sample alone, which costs eight of those minutes),

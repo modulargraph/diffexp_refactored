@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Mathematica `WorkingPrecision` defaults to `Automatic` (twice the
+  `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.
+- `--fire-seconds` also bounds one elimination of the built-in IBP solver
+  (it was fixed at 20 s).
 - Removed the inherited prepared-input compatibility runtime (`src/kernel`,
   `tests/kernel`, the `kernel` command and `DIFFEXP_BUILD_KERNEL_RUNTIME`).
   The exact `series` command now uses a direct recurrence; it also corrects

@@ -107,7 +107,10 @@ precision is capped at the configured integration precision before exact path
 construction.
 
 `WorkingPrecision`, `ExpansionOrder`, `EpsilonOrder`, `DivisionOrder` and
-`AccuracyGoal` control the native calculation. Error estimates include retained
+`AccuracyGoal` control the native calculation. `WorkingPrecision` defaults to
+`Automatic`: twice the `AccuracyGoal` plus 30 digits, or 100 digits without a
+goal. (DiffExp 1 used a fixed 500 digits; set a number to choose it
+yourself.) Error estimates include retained
 arithmetic and local truncation estimates; they are not full tail certificates.
 Legacy strategy, Padé, Möbius and chopping options are retained for call
 compatibility, while the native engine chooses its continuation method.

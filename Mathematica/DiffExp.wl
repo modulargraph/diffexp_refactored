@@ -98,11 +98,18 @@ $defaultConfiguration = <|AccuracyGoal -> "?", BasisPrefactors -> {}, ChopPrecis
  DeltaPrescriptions -> {}, DivisionOrder -> 3, EpsilonOrder -> 4, ExpansionOrder -> 50,
  LineParameter -> Global`x, MatrixDirectory -> "", RadiusOfConvergence -> 1, Recurrence -> "auto",
  SegmentationStrategy -> "Predivision", IntegrationStrategy -> "Default", UseMobius -> False,
- UsePade -> False, Variables -> {}, Verbosity -> 1, WorkingPrecision -> 500|>;
+ UsePade -> False, Variables -> {}, Verbosity -> 1, WorkingPrecision -> Automatic|>;
 If[!AssociationQ[$configuration], $configuration = $defaultConfiguration];
 $matrixEntries = {}; $matrixDimension = 0; $lastTimings = <||>;
 compatFailure[tag_, message_, data_:<||>] := Throw[Failure[tag, Join[<|"MessageTemplate" -> message|>, data]], "DiffExpCompatibility"];
 configValue[key_] := Lookup[$configuration, key, Lookup[$defaultConfiguration, key, Missing["NotConfigured"]]];
+(* WorkingPrecision -> Automatic follows the accuracy goal: twice the goal plus
+   a 30-digit reserve, or 100 digits without a goal. A fixed 500 digits made
+   every ball operation several times more expensive than a 15-30 digit
+   result needs. An explicit number is used as given. *)
+configValue[WorkingPrecision] := With[{precision = Lookup[$configuration, WorkingPrecision, Automatic],
+   goal = Lookup[$configuration, AccuracyGoal, "?"]},
+  If[precision === Automatic, If[NumberQ[goal], Max[60, Ceiling[2 goal] + 30], 100], precision]];
 CurrentConfiguration[] := $configuration;
 DiffExpLastTimings[] := $lastTimings;
 optionKeys = Association[Map[(SymbolName[#] -> #)&, Keys[$defaultConfiguration]]];

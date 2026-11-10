@@ -21,7 +21,7 @@ int main(int argc,char** argv) {
     const auto order=artifacts::detail::integer(resources.at("ordinary_order"));
     if(bits<64 || order<8 || order>1000)throw std::invalid_argument("replay numerical resource budget");
     B::set_precision(bits);AdjointOptions options;options.taylor_order=order;options.conditioning_stats=&stats;
-    if(mode=="baseline"){options.centered_input=false;options.max_conditioning_halvings=0;}
+    if(mode=="baseline"){options.centered_input=false;options.max_conditioning_halvings=0;options.max_truncation_halvings=0;}
     auto initial=side=="lower"?stage.lower_endpoint:stage.upper_endpoint;
     auto vertices=side=="lower"?stage.lower_path:stage.upper_path;
     const auto& forcing=side=="lower"?stage.lower_forcing:stage.upper_forcing;

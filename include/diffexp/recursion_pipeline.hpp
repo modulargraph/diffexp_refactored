@@ -168,7 +168,10 @@ inline void validate_numerical_options(const NumericalOptions& options) {
 // precision and approximation scores are deliberately absent from the payload.
 namespace basis_persistence {
 namespace json=boost::json;
-inline constexpr const char* revision="physical-basis-demand-selection-v3";
+// v4: a choice is installed by exact pullback of the original endpoint
+// functionals and ranked by that plan's own demand; undecided discoveries
+// (wall-clock cut, error) are no longer stored as "original retained".
+inline constexpr const char* revision="physical-basis-demand-selection-v4";
 inline constexpr const char* verifier="physical-basis-two-inverses-and-gauge-v1";
 inline constexpr const char* scope="exact_physical_basis_change";
 inline std::filesystem::path directory(const NumericalOptions& options) {
@@ -192,7 +195,7 @@ inline artifacts::Identity identity(const Graph& graph,std::size_t depth,
   id.scientific_inputs["original_connection_sha256"]=hash(cached_level::detail::matrix_json(node.closure.matrix));
   id.scientific_inputs["observable_rows_sha256"]=hash(cached_level::detail::matrix_json(node.observable_rows));
   id.scientific_inputs["epsilon_variable"]=graph.field.variables()[ei];
-  id.scientific_inputs["selection_policy"]="component demand first; expression cost second; exact endpoint and contour recheck";
+  id.scientific_inputs["selection_policy"]="component demand first; expression cost second; exact pullback of the original endpoint functionals";
   // Scan runtime is intentionally NOT an identity axis: restart must reuse the
   // completed choice despite a different machine or wall-clock allowance.
   id.scientific_inputs["scan_revision"]=revision;

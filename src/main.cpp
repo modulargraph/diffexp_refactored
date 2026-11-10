@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis;
       std::filesystem::path fire_prime;
-      auto ibp_provider=configuration.ibp_provider;auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
+      auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
@@ -84,6 +84,7 @@ int main(int argc, char** argv) {
         const char* option_value=argv[++i];
         if(option=="--fire"){options.reduction.provider.executable=option_value;fire_given=true;}
         else if(option=="--ibp-provider")ibp_provider=option_value;
+        else if(option=="--ibp-validation"){ibp_validation=option_value;if(ibp_validation!="anchored"&&ibp_validation!="strict")throw std::invalid_argument("IBP validation must be anchored or strict");}
         else if(option=="--ibp-dots"||option=="--ibp-numerators"){
           const std::string value=option_value;unsigned n=0;auto parsed=std::from_chars(value.data(),value.data()+value.size(),n);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
@@ -183,6 +184,12 @@ int main(int argc, char** argv) {
           // the merge parameter. Per-variable degree slices fit that shape with far
           // fewer points than the dense total-degree scan, whose cap they also avoid.
           native.degree_slices=true;native.max_samples_per_prime=1024;
+          // One reconstruction per level instead of one per closure pass, and
+          // held-out validation on the pilot's dependency subset of original
+          // equations with one complete elimination as anchor per attempt.
+          // "strict" eliminates every generated equation at every point.
+          native.closure_parameter=parameter;
+          if(ibp_validation!="strict"){native.selected_source_rows=true;native.complete_validation_anchor=true;}
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {
@@ -192,7 +199,8 @@ int main(int argc, char** argv) {
           fallback=[session](const auto& batch,const auto& limits){return (*session)(batch,limits);};
         }
         auto result=diffexp::cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
-        if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;}
+        if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;
+          ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;}
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
@@ -216,7 +224,8 @@ int main(int argc, char** argv) {
         {"note",reused?"reused level closures were not recomputed: --ibp-provider, --ibp-dots and --ibp-numerators did not apply to them; use a fresh --cache to apply them":"all level closures were built with the reported IBP provider and seeds"}};
       if(reused)std::cerr<<"diffexp: note: "<<reused<<" level system"<<(reused==1?" was":"s were")<<" reused from the verified cache; the IBP provider options (--ibp-provider "
         <<ibp_provider<<", --ibp-dots, --ibp-numerators) did not apply to "<<(reused==1?"it":"them")<<". Use a fresh --cache to rebuild.\n";
-      report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds}};
+      report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds},
+        {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
@@ -388,7 +397,7 @@ int main(int argc, char** argv) {
     } else if (command == "--help") {
       std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N] [--basis-scan-seconds N] [--no-numerical-cache]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
-      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N.\n";
+      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N. --ibp-validation anchored|strict (default anchored: held-out points eliminate the pilot's dependency subset of original equations, with one complete elimination per attempt; strict eliminates every equation at every point).\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
       std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor|ultraspherical (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint).\n";
       std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";

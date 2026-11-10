@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- Feynman-trick charts (`rational_line`, the adjoint executors) estimate their
+  Taylor tail and halve a step whose polynomial has not converged at the
+  designed rate; `max_truncation_halvings` bounds it. Adjoint checkpoint
+  identities advance, so earlier numerical checkpoints are not reused.
+- The physical-basis scan is skipped when the child loss is already zero or the
+  child is the scalar leaf, a chosen basis is installed by exact pullback
+  instead of rebuilding endpoint series, and the adjoint path requests the
+  per-column structural child window. `epsilon_low` can rise where a leading
+  order was an exact structural zero. Basis cache revision v4.
+- Endpoint constants and divergent-mode constraints fail with a clear error
+  when the endpoint x order does not reach the fixed sector, instead of being
+  silently truncated.
+- A stored endpoint-series column rejected by the verifier is discarded and
+  recomputed by default; fail-closed remains selectable.
+- Built-in IBP preparation plans the derivative closure first, validates
+  held-out points on the pilot's dependency subset of original equations with
+  one complete elimination per attempt (`--ibp-validation strict` restores a
+  complete elimination at every point), skips and records exceptional sample
+  points, and continues primal-only when a trace exceeds its budget.
+- Spectral FT transport no longer subdivides on inherited input uncertainty,
+  retries an exhausted coupled-block level by subdivision, honours
+  `matrix_bits`, and pivots in the ultraspherical factorization. The two FT
+  spectral backends share one driver.
+- Generic transport accumulates omitted-tail estimates beside the balls for
+  systems with epsilon-zero feedback. Mathematica `ToPiecewise` evaluates saved
+  Taylor segments on undeformed paths instead of replaying the transport.
+- CLI: numerical options are validated before IBP preparation, `--ft-transport
+  ultraspherical` is accepted, ignored `--fire` paths and reused level closures
+  are reported, and the JSON report gains per-phase timings, `ibp_cache` and
+  `basis_selection`.
+
 - Generic transport reuses a chart's Taylor coefficients when an accuracy
   refinement shortens its step, predicts the shorter step from the truncation
   estimate, and no longer charges a missed truncation target to the finite-lag

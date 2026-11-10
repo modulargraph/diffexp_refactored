@@ -62,6 +62,8 @@ int main(){try{
          leafward.basis_selections().at(0).reason.find("leaf")!=std::string::npos,
          "basis discovery ran above the closed-form leaf");
  }
- check(recursion::basis_persistence::revision==std::string("physical-basis-demand-selection-v3"),"screen revision did not invalidate v2 decisions");
- std::cout<<"Cheap endpoint screens, bounded full validation, upper-cut identity and v3 revision passed\n";
+ // v3 decisions include "original retained" entries written after a time-cut
+ // or failed discovery; the pullback policy must not inherit them.
+ check(recursion::basis_persistence::revision==std::string("physical-basis-demand-selection-v4"),"selection revision did not invalidate v3 decisions");
+ std::cout<<"Cheap endpoint screens, exact pullback installation, upper-cut identity and v4 revision passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

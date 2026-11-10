@@ -24,6 +24,17 @@ int main(){try {
   const auto endpoint_cache=std::filesystem::temp_directory_path()/("de3-pipeline-endpoints-"+std::to_string(::getpid()));
   struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code error;std::filesystem::remove_all(path,error);}} cleanup{endpoint_cache};
   require(recursion::NumericalOptions{}.observable_adjoint,"shared-source adjoint recursion must be the default");
+  {
+    // The option contract is checkable without a graph, i.e. before the exact
+    // preparation a front end would otherwise run first.
+    recursion::validate_numerical_options(recursion::NumericalOptions{});
+    recursion::NumericalOptions invalid;invalid.working_bits=32;
+    fails([&]{recursion::validate_numerical_options(invalid);},"working precision");
+    invalid=recursion::NumericalOptions{};invalid.ordinary_order=4;
+    fails([&]{recursion::validate_numerical_options(invalid);},"ordinary order");
+    invalid=recursion::NumericalOptions{};invalid.overlap=Rational("3/4");
+    fails([&]{recursion::validate_numerical_options(invalid);},"overlap");
+  }
   auto bubble=recursion::prepare(feynman::example_family("bubble"),{{1,1},{2,1},{1,0},{0,1},{-1,1},{0,0}});
   recursion::Evaluator bubble_solver(bubble);auto b=bubble_solver.evaluate(4);
   require(b.taylor_tail_certified && b.values.size()==6,"bubble graph must execute all scalar-leaf typed requests with certificates");

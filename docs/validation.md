@@ -52,7 +52,7 @@ separately in `validation/publication-2.1.1.json`.
 | Box-triangle; planar double-box | epsilon -4..0 | Numerical reference comparisons and lower-pole checks |
 | Kite | finite part | Independent quadrature with an estimated error; tolerance 5e-7 |
 | Henn canonical component 1 | epsilon 0..4 | Numerical reconstruction against the published boundary |
-| Henn all 108 components | Not accepted | Experimental; frozen by the user on 2026-09-05 |
+| Henn all 108 components | Not accepted | Experimental. Exact recursion prepares (7 levels, about 5 minutes); the numerical recursion has not been run to completion |
 | Original DiffExp examples | Nine registered groups | Transport/reference tests, including both unequal-banana routes |
 
 For the equal-mass four-loop banana, the recorded finite part is

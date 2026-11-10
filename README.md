@@ -199,10 +199,12 @@ container with the built-in IBP solver. They use generic family JSON and
 `--no-numerical-cache` to avoid large checkpoint files.
 
 The numerical checks include both four-loop banana examples and all nine
-original DiffExp example groups. The full 108-component Henn Feynman-trick
-boundary reconstruction is **experimental and frozen**; it is not a completed
-example. Transport from the published Henn boundary and reconstruction of its
-first canonical component have passed separately.
+original DiffExp example groups. The two-loop double-pentagon family
+(`henn_double_pentagon_x0`) is **experimental**: its exact recursion (seven
+levels, 69 masters at the top) now prepares in about five minutes with the
+built-in IBP solver, but the numerical recursion runs for hours and has not
+been completed or accepted. Transport from the published Henn boundary and
+reconstruction of its first canonical component have passed separately.
 
 See [timings](docs/timings.md) for measured runtimes and
 [validation and limitations](docs/validation.md) for the tested families,

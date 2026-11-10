@@ -94,8 +94,12 @@ regions require an explicit `causal` object:
 There must be one nonzero sign per merge level. A prescription is mathematical
 input; the parser does not establish that an arbitrary supplied contour is the
 correct physical continuation. Unknown fields and inconsistent dimensions are
-rejected. The experimental full Henn reconstruction remains frozen; including
-its configuration does not claim a completed all-component calculation. The
+rejected. A requested anchor that turns out to be singular in the master basis
+the reduction selected is moved to the simplest regular rational within 3/20
+that no other real singular point of the level separates from it; the progress
+output names the replacement. The full Henn reconstruction remains
+experimental; including its configuration does not claim a completed
+all-component calculation. The
 optional `--henn-basis` importer applies the published Henn canonical projection
 only after verifying the actual X0 geometry and denominator order; changing a
 label cannot authorize that projection for another integral family.

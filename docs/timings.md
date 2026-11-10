@@ -27,6 +27,12 @@ The `banana4_unequal` run shared the machine with two other jobs. Its finite
 part and that of `banana4` reproduce the stored acceptance references
 (28.647167500233570163... and 39.655526834297652529...).
 
+`henn_double_pentagon_x0` (two loops, eight propagators, experimental): the
+exact preparation of all seven levels takes 299 s cold with the settings in
+its family file (level 1: 69 masters, 153 s; before, it did not get past
+level 1). The numerical recursion completed levels 7 to 3 in 24 minutes on
+four threads; levels 2 and 1 run for hours and were not waited for.
+
 Nonzero coefficients of the nine examples that ran before agree between the
 two versions to 1e-33 relative or better. The JSON report splits the
 numerical time into `endpoint_series_seconds`, `endpoint_operator_seconds`,
@@ -89,9 +95,9 @@ The [interface report](validation/interface-2.1.1.json) preserves the initial
 basis mismatch and the earlier incomplete trials, including a 30-minute timeout.
 
 The four-loop timings are preserved acceptance measurements. Those expensive
-calculations were not repeated for this interface release. Full Henn FT
-reconstruction remains frozen and is separate from the passing Henn boundary
-transport above.
+calculations were not repeated for this interface release. The full Henn FT
+reconstruction is separate from the passing Henn boundary transport above;
+see "Current code" for how far it runs now.
 
 The native FT JSON reports `preparation_seconds`, `numerical_seconds` and
 `total_seconds`. Mathematica's `DiffExpLastTimings[]` additionally reports total

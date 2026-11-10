@@ -141,9 +141,9 @@ inline json::value describe(const feynman::ExampleFamily& f) {
   if(f.name=="henn_double_pentagon_x0") {
     json::array anchors,signs;for(const auto& q:causal::henn_anchors())anchors.emplace_back(q.str());
     for(unsigned i=0;i<7;++i)signs.push_back(i==0?1:-1);
-    out["preparation"]=json::object{{"anchors",std::move(anchors)}};
+    out["preparation"]=json::object{{"fire_seconds",900},{"level_seconds",1800},{"total_seconds",7200},{"anchors",std::move(anchors)}};
     out["causal"]=json::object{{"f_rim",-1},{"level_signs",std::move(signs)},
-      {"provenance","Published original ordered ladder; experimental full reconstruction is frozen."}};
+      {"provenance","Published original ordered ladder; the full numerical reconstruction is experimental and unaccepted."}};
   }
   return out;
 }

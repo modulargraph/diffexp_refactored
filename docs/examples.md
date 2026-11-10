@@ -21,6 +21,11 @@ path (or with `-` in its place) the built-in IBP solver prepares the levels,
 with the settings of `diffexp ft`. The four-loop bananas take minutes and none
 of these runs automatically.
 
+`examples/feynman/henn_double_pentagon_x0.json` is experimental and has no
+acceptance reference. `diffexp prepare` completes its exact recursion in about
+five minutes; `diffexp ft` then runs for hours (it reports the position of each
+long transport once a minute, and resumes from the checkpoints under `--cache`).
+
 ## Original DiffExp examples
 
 The three download scripts fetch upstream matrices and verify their SHA-256

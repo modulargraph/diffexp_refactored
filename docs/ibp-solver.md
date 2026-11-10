@@ -39,12 +39,13 @@ A relation proved using a subset of original IBP equations also belongs to the f
 
 ### Defaults of the command-line provider
 
-`prepare` and `ft` enable four things on top of the library defaults:
+`prepare` and `ft` set five things on top of the library defaults:
 
 - **Coordinate degree slices.** Coefficients are fitted in a per-variable degree box (cap `max_variable_degree`, 64) found from univariate slices, rather than in the dense total-degree hull (cap `max_degree`, 16). The sample count follows the box.
 - **Closure planning** (`closure_parameter`): one reconstruction per level instead of one per closure pass. A plan that does not stabilize is used as an unsaved hint.
 - **Anchored validation** (`selected_source_rows` with `complete_validation_anchor`). Per reconstruction two eliminations are complete: the pilot and the first held-out point of each validation attempt, at a fresh prime and point. All other points eliminate the pilot's dependency subset of original equations. At all six held-out points the reconstruction is still compared with a fresh primal elimination of original IBP rows, so every reconstructed row is certified as an IBP identity exactly as before. What is checked at two independent points instead of ten is that the terminal integrals are free columns of the complete system (basis minimality); a miss there leaves valid identities over a non-minimal basis. `--ibp-validation strict` eliminates every generated equation at every point.
 - **Batched sample records** (`sample_checkpoint_interval` 32); held-out samples are always retained.
+- **Budgets.** `--fire-seconds` (default 60) bounds one finite-field elimination, `--level-seconds` (180) one recursion level and `--total-seconds` (600) the whole preparation; a family file can set them as `preparation.fire_seconds`, `level_seconds` and `total_seconds`. Rational coefficients are reconstructed from up to 32 of the 64 available primes.
 
 An exceptional sample point (a pole of an input coefficient, or a point whose terminal set differs from the reference set) is skipped, at most `max_skipped_samples` (4) times per reconstruction, and recorded as `skipped_samples` so a resumed run uses the same points. A trace that exceeds its node, fill or time budget is disabled for that prime (`traces_disabled` in `ibp_statistics`) and sampling continues by primal elimination. `ibp_statistics` reports complete (`full_solves`) and subset (`subset_solves`) eliminations separately.
 

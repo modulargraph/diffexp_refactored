@@ -16,8 +16,11 @@
   uses the built-in IBP solver when no FIRE path is given.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the
   master basis the reduction selected moves to the simplest regular rational
-  within 3/20 of it, and the progress output says so; it used to abort. The
-  family-name anchor table is gone: ladders live in the family file.
+  within 3/20 of it that has no other real singular point of the level in
+  between, so a supplied causal prescription keeps its meaning; the progress
+  output says so. It used to abort. The family-name anchor table is gone:
+  ladders live in the family file, and the double-pentagon file carries the
+  preparation budgets it needs.
 - The built-in IBP solver reconstructs rational coefficients with up to 32
   primes (was 8). A preparation that runs out of time names the three budgets
   in force and how to raise them.

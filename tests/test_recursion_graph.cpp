@@ -16,6 +16,12 @@ int main(int argc,char** argv){try {
     require(recursion::select_regular_anchor(matrix,{},0,1,Rational("1/3"),{Rational("1/3"),Rational("1/2")})==Rational("1/4"),
       "a singular requested anchor moves to the simplest regular neighbour");
     require(recursion::select_regular_anchor(matrix,{},0,1,Rational("2/5"),{Rational("2/5")})==Rational("2/5"),"a regular requested anchor is kept");
+    // A second real pole at 7/24 separates 1/3 from 1/4: the replacement must
+    // stay on the request's side of it.
+    std::vector<std::vector<Exact>> fenced{{Exact(field,"eps/(x-1/3+eps)"),Exact(field,"1/(24*x-7)")}};
+    const auto kept=recursion::select_regular_anchor(fenced,{},0,1,Rational("1/3"),{Rational("1/3"),Rational("1/2")});
+    require(kept>Rational("7/24")&&kept!=Rational("1/3")&&recursion::regular_anchor(fenced,0,1,kept),
+      "a replacement anchor does not cross another real singular point");
   }
   recursion::Options options;
   auto bubble=recursion::prepare(feynman::example_family("bubble"),{},options);

@@ -184,6 +184,9 @@
     "method": "adjoint"
   },
   "preparation": {
+    "fire_seconds": 900,
+    "level_seconds": 1800,
+    "total_seconds": 7200,
     "anchors": [
       "1/5",
       "3/10",

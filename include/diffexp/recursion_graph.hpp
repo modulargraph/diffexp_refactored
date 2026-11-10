@@ -2,7 +2,9 @@
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/merge_pullback.hpp"
+#include "diffexp/geometry.hpp"
 #include <algorithm>
+#include <map>
 #include <numeric>
 #include <limits>
 
@@ -60,18 +62,57 @@ inline bool regular_anchor(const std::vector<std::vector<Exact>>& matrix,
   return true;
 }
 
-// A requested anchor that meets a pole of the closed system is moved to a
-// regular point within 3/20 of it: which points are singular depends on the
-// master basis the reduction selected, which the request cannot know in
-// advance. Small denominators come first, because the anchor enters the
-// kinematics of every deeper level and its height multiplies through their
-// reductions; the other requested anchors are left to their own levels.
+// Real singular points of the epsilon-leading denominators, as isolating balls.
+inline std::vector<kernel::ComplexBall> real_singular_points(const std::vector<std::vector<Exact>>& matrix,
+    std::size_t parameter,std::size_t epsilon) {
+  std::map<std::string,Exact> polynomials;
+  for(const auto& row:matrix)for(const auto& coefficient:row)if(!coefficient.is_zero()) {
+    auto denominator=coefficient.denominator();
+    auto valuation=std::numeric_limits<unsigned long>::max();
+    for(const auto& term:denominator.numerator_terms())valuation=std::min(valuation,static_cast<unsigned long>(term.powers.at(epsilon)));
+    if(valuation)denominator=denominator/denominator.variable(epsilon).pow(valuation);
+    std::vector<Exact> point;for(std::size_t k=0;k<coefficient.variable_count();++k)point.push_back(coefficient.variable(k));
+    point.at(epsilon)=coefficient.constant(0);
+    auto leading=denominator.substitute(point);
+    if(!leading.is_rational())polynomials.emplace(leading.str(),std::move(leading));
+  }
+  std::vector<kernel::ComplexBall> out;
+  for(const auto& [text,polynomial]:polynomials)
+    for(auto& root:polynomial_roots(polynomial,static_cast<unsigned>(parameter)))
+      if(arb_contains_zero(acb_imagref(root.raw())))out.push_back(std::move(root));
+  return out;
+}
+
+// A requested anchor that meets a pole of the closed system is moved: which
+// points are singular depends on the master basis the reduction selected,
+// which the request cannot know in advance. The replacement is a regular
+// rational within 3/20 with no other real singular point of the system
+// between it and the request, so the child family stays in the same real
+// cell of the parameter and a supplied causal prescription keeps its meaning.
+// Small denominators come first, because the anchor enters the kinematics of
+// every deeper level and its height multiplies through their reductions; the
+// other requested anchors are left to their own levels.
 inline Rational select_regular_anchor(const std::vector<std::vector<Exact>>& connection,
     const std::vector<std::vector<Exact>>& observables,std::size_t parameter,std::size_t epsilon,
     const Rational& preferred,const std::vector<Rational>& requested={}) {
   const auto regular=[&](const Rational& at){return regular_anchor(connection,parameter,epsilon,at)&&regular_anchor(observables,parameter,epsilon,at);};
   if(regular(preferred))return preferred;
   if(!requested.empty()) {
+    auto singular=real_singular_points(connection,parameter,epsilon);
+    for(auto& root:real_singular_points(observables,parameter,epsilon))singular.push_back(std::move(root));
+    const auto bits=kernel::ComplexBall::precision();
+    const auto same_cell=[&](const Rational& candidate) {
+      struct Real {arb_t value;Real(){arb_init(value);}~Real(){arb_clear(value);}} low,high,at;
+      arb_set_fmpq(low.value,(candidate<preferred?candidate:preferred).raw(),bits);
+      arb_set_fmpq(high.value,(candidate<preferred?preferred:candidate).raw(),bits);
+      arb_set_fmpq(at.value,preferred.raw(),bits);
+      for(const auto& root:singular) {
+        const auto* real=acb_realref(root.raw());
+        if(arb_overlaps(real,at.value))continue; // the pole at the request itself
+        if(!arb_lt(real,low.value)&&!arb_gt(real,high.value))return false;
+      }
+      return true;
+    };
     const Rational reach("3/20");
     for(unsigned denominator=2;denominator<=20;++denominator) {
       std::vector<std::pair<Rational,Rational>> row;
@@ -83,9 +124,9 @@ inline Rational select_regular_anchor(const std::vector<std::vector<Exact>>& con
         row.emplace_back(distance,candidate);
       }
       std::sort(row.begin(),row.end(),[](const auto& a,const auto& b){return a.first<b.first;});
-      for(const auto& [distance,candidate]:row)if(regular(candidate))return candidate;
+      for(const auto& [distance,candidate]:row)if(regular(candidate)&&same_cell(candidate))return candidate;
     }
-    throw std::domain_error("requested recursive anchor "+preferred.str()+" and the simple rationals within 3/20 of it are singular in a connection or observable epsilon coefficient");
+    throw std::domain_error("requested recursive anchor "+preferred.str()+" is singular in a connection or observable epsilon coefficient, and no simple regular rational within 3/20 shares its real cell");
   }
   unsigned attempts=0;
   for(unsigned denominator=2;attempts<64;++denominator)for(unsigned numerator=1;numerator<denominator&&attempts<64;++numerator) {

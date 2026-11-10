@@ -12,7 +12,9 @@ using Matrix=Series::Matrix;
 struct VerificationLimits {
   std::size_t max_polynomial_terms=1000000, max_shared_terms=4000000, max_total_column_terms=4000000,
               max_term_products=2000000000;
-  bool dense_epsilon_polynomials=false;
+  // Residuals over dense Q[eps] coefficients per x order; false keeps them as
+  // sparse bivariate polynomials. Same checks, about half the work.
+  bool dense_epsilon_polynomials=true;
   // Cumulative conservative monomial-product estimate, not elapsed CPU work.
   std::function<void(unsigned,unsigned,std::size_t)> column_progress;
   // Stored columns that contradict the exact verifier are never used. By

@@ -308,8 +308,12 @@ class EpsilonRational {
   std::vector<Rational> regular_taylor(unsigned length)const{
     struct Series{fmpq_poly_t value;Series(){fmpq_poly_init(value);}~Series(){fmpq_poly_clear(value);}
       Series(const Series&)=delete;Series& operator=(const Series&)=delete;}n,d,quotient;
-    fmpq_poly_set_fmpz_poly(n.value,numerator_.value);fmpq_poly_shift_right(n.value,n.value,numerator_low_);
-    fmpq_poly_set_fmpz_poly(d.value,denominator_.value);fmpq_poly_shift_right(d.value,d.value,denominator_low_);
+    // Only the first `length` coefficients above the valuation can matter;
+    // the full numerator of a late x order is far longer than that.
+    const auto leading=[&](fmpq_poly_t out,const fmpz_poly_t p,slong low){
+      for(slong k=std::min<slong>(fmpz_poly_length(p)-low,length);k-->0;)fmpq_poly_set_coeff_fmpz(out,k,fmpz_poly_get_coeff_ptr(p,low+k));
+    };
+    leading(n.value,numerator_.value,numerator_low_);leading(d.value,denominator_.value,denominator_low_);
     fmpq_poly_div_series(quotient.value,n.value,d.value,length);
     fmpq_t coefficient;fmpq_init(coefficient);std::vector<Rational> out;out.reserve(length);
     for(unsigned k=0;k<length;++k){fmpq_poly_get_coeff_fmpq(coefficient,quotient.value,k);out.push_back(Rational::from_fmpq(coefficient));}

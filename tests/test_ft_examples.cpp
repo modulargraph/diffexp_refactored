@@ -47,22 +47,22 @@ int main(int argc,char** argv) {
     numerical.adjoint.conditioning_stats=&conditioning;
     exact.reduction.batch_cache_directory=cache/"fire-batches";
     exact.reduction.pending_cache_directory=cache/"fire-pending";
-    numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";
+    numerical.basis_cache_directory=cache/"physical-bases";numerical.ordinary_cache_directory=cache/"ordinary-transport";
     if(argc>3 && std::string(argv[3])!="-")exact.reduction.provider.executable=argv[3];
     if(argc>4)numerical.endpoint_order=number(argv[4]);
     if(argc>5)numerical.ordinary_order=number(argv[5]);
     if(argc>6)numerical.working_bits=number(argv[6]);
     if(argc>7)exact.total_timeout_seconds=number(argv[7]);
     const std::string method=argc>8?argv[8]:"adjoint";
-    if(method!="values" && method!="adjoint" && method!="factored" && method!="auto")
-      throw std::invalid_argument("METHOD must be adjoint, factored, auto or values");
-    numerical.observable_adjoint=method!="values";report["method"]=method;
+    if(method!="adjoint" && method!="factored" && method!="auto")
+      throw std::invalid_argument("METHOD must be adjoint, factored or auto");
+    report["method"]=method;
     numerical.linear_method=method=="factored"?recursion::LinearMethod::factored:
       method=="auto"?recursion::LinearMethod::automatic:recursion::LinearMethod::adjoint;
     if(numerical.endpoint_order>1000 || numerical.ordinary_order>1000 || numerical.working_bits<64 || numerical.working_bits>1000000 || exact.total_timeout_seconds>86400)
       throw std::invalid_argument("resource argument outside bounded acceptance limits");
     report["resources"]={{"endpoint_order",numerical.endpoint_order},{"ordinary_order",numerical.ordinary_order},{"working_bits",numerical.working_bits},{"leaf_digits",numerical.leaf_digits},{"graph_timeout_seconds",exact.total_timeout_seconds},{"max_refinements",numerical.max_refinements}};
-    report["algorithms"]={{"shared_leaf_sources",numerical.observable_adjoint},{"frobenius_finite_lag",numerical.endpoint.finite_lag_recurrence},{"numeric_operator_convolution",numerical.matching.numeric_operator_convolution},{"polynomial_adjoint",numerical.adjoint.polynomial_recurrence},{"adjoint_conditioning_guard",true},{"verified_endpoint_cache",!numerical.endpoint_cache_directory.empty()}};
+    report["algorithms"]={{"shared_leaf_sources",true},{"frobenius_finite_lag",numerical.endpoint.finite_lag_recurrence},{"numeric_operator_convolution",numerical.matching.numeric_operator_convolution},{"adjoint_conditioning_guard",true}};
     report["algorithms"].as_object()["linear_transport"]=method;
     report["algorithms"].as_object()["centered_chart_action"]=numerical.adjoint.centered_input;
     report["resources"].as_object()["max_conditioning_halvings"]=numerical.adjoint.max_conditioning_halvings;
@@ -87,17 +87,16 @@ int main(int argc,char** argv) {
     numerical.progress=[&](std::size_t depth,const std::string& text,int high){std::cerr<<seconds(start)<<"s numerical level "<<depth<<": "<<text<<", epsilon through "<<high<<'\n';};
     recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(requested_top);
     report["numerical_seconds"]=seconds(t);
-    const auto& stats=evaluator.statistics();report["numerical_statistics"]={{"exact_plans",stats.exact_plans},{"leaf_evaluations",stats.leaf_evaluations},{"numeric_evaluations",stats.numeric_evaluations},{"refinements",stats.refinements},{"cache_hits",stats.cache_hits},{"endpoint_series_built",stats.endpoint_series_built},{"endpoint_series_reused",stats.endpoint_series_reused}};
+    const auto& stats=evaluator.statistics();report["numerical_statistics"]={{"exact_plans",stats.exact_plans},{"leaf_evaluations",stats.leaf_evaluations},{"numeric_evaluations",stats.numeric_evaluations},{"refinements",stats.refinements},{"cache_hits",stats.cache_hits},{"endpoint_series_built",stats.endpoint_series_built}};
     report["numerical_statistics"].as_object()["adjoint_selections"]=stats.adjoint_selections;
     report["numerical_statistics"].as_object()["factored_selections"]=stats.factored_selections;
     report["numerical_statistics"].as_object()["demand_preflights"]=stats.demand_preflights;
     report["numerical_statistics"].as_object()["local_operator_reuses"]=stats.local_operator_reuses;
     report["numerical_statistics"].as_object()["conditioning_method_fallbacks"]=stats.conditioning_method_fallbacks;
     report["ordinary_checkpoints"]={{"loaded",stats.ordinary_checkpoints.loaded},{"saved",stats.ordinary_checkpoints.saved},{"completed_reused",stats.ordinary_checkpoints.completed_reused},{"omitted_tail_certified",false}};
-    report["adjoint_conditioning"]={{"polynomial_charts",conditioning.polynomial_charts},{"rational_cross_checks",conditioning.rational_cross_checks},{"rational_compilations",conditioning.rational_compilations},
-      {"centered_charts",conditioning.centered_charts},{"homogeneous_chart_maps",conditioning.homogeneous_chart_maps},
-      {"centered_budget_skips",conditioning.centered_budget_skips},{"conditioning_subdivisions",conditioning.conditioning_subdivisions},
-      {"polynomial_homogeneous_columns",conditioning.polynomial_homogeneous_columns},{"rational_homogeneous_columns",conditioning.rational_homogeneous_columns}};
+    report["adjoint_conditioning"]={{"charts",conditioning.charts},{"tail_limited_charts",conditioning.tail_limited_charts},
+      {"centered_charts",conditioning.centered_charts},{"conditioning_subdivisions",conditioning.conditioning_subdivisions},
+      {"recurrences",conditioning.recurrences}};
     report["ft_taylor_tail_certified"]=result.taylor_tail_certified;
     report["reported_ft_radii_include_omitted_tails"]=result.taylor_tail_certified;
     if(result.values.size()!=1 || result.high()<static_cast<int>(requested_top))throw std::runtime_error("unexpected scalar FT output shape/window");

@@ -11,6 +11,9 @@ struct Configuration {
   recursion::Options preparation;
   recursion::NumericalOptions numerical;
   unsigned epsilon_order=0,ibp_dots=1,ibp_numerators=2;
+  // The document itself named epsilon_order. A bare example name carries the
+  // template's value, which is a default and not a request.
+  bool epsilon_order_given=false;
   std::string ibp_provider="auto";
 };
 inline bool same_geometry(const feynman::ExampleFamily& a,const feynman::ExampleFamily& b) {
@@ -65,10 +68,14 @@ inline Configuration parse(const json::value& value) {
   if(auto p=o.if_contains("integrals"))for(const auto& row:p->as_array()) {
     ibp::Integral indices;for(const auto& v:row.as_array())indices.push_back(integer(v,-100,100,"integral power"));
     if(indices.size()<f.physical_count || indices.size()>slots)throw std::invalid_argument("integral indices must cover physical slots and fit the scalar-product basis");
+    // Slots beyond the physical denominators are numerators (irreducible scalar
+    // products): a positive power there would name a propagator the family lacks.
+    for(std::size_t k=f.physical_count;k<indices.size();++k)if(indices[k]>0)
+      throw std::invalid_argument("integral power "+std::to_string(indices[k])+" in auxiliary slot "+std::to_string(k)+" must be zero or negative (a numerator)");
     indices.resize(slots,0);c.integrals.push_back(std::move(indices));
   }
   if(c.integrals.size()>5000)throw std::invalid_argument("integral request count exceeds 5000");
-  if(auto p=o.if_contains("epsilon_order"))c.epsilon_order=integer(*p,0,100,"epsilon order");
+  if(auto p=o.if_contains("epsilon_order")){c.epsilon_order=integer(*p,0,100,"epsilon order");c.epsilon_order_given=true;}
   if(auto p=o.if_contains("preparation")) {
     const auto& a=p->as_object();known_keys(a,{"anchors","merges","total_seconds","level_seconds","fire_seconds","max_sources_per_level","ibp_provider","ibp_dots","ibp_numerators"},"preparation");
     if(auto v=a.if_contains("ibp_provider")){c.ibp_provider=std::string(v->as_string());if(c.ibp_provider!="auto"&&c.ibp_provider!="ibp-solver"&&c.ibp_provider!="fire"&&c.ibp_provider!="fire-modular")throw std::invalid_argument("unknown IBP provider");}
@@ -93,16 +100,21 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("leaf_digits"))c.numerical.leaf_digits=integer(*v,1,100000,"leaf digits");
     if(auto v=a.if_contains("contour_height"))c.numerical.contour_height=rational(*v);
     if(auto v=a.if_contains("overlap"))c.numerical.overlap=rational(*v);
+    // Taylor charts are the only ordinary transport. "auto" and "taylor" from
+    // earlier templates still mean exactly that; the removed backends and
+    // their accuracy knob are named in the error instead of being ignored.
     if(auto v=a.if_contains("transport")) {
-      const auto method=v->as_string();if(method!="auto" && method!="spectral" && method!="taylor" && method!="ultraspherical")throw std::invalid_argument("unknown FT ordinary transport");
-      c.numerical.ordinary_method=method=="ultraspherical"?recursion::OrdinaryMethod::ultraspherical:
-        method=="auto"?recursion::OrdinaryMethod::automatic:method=="spectral"?recursion::OrdinaryMethod::spectral:recursion::OrdinaryMethod::taylor;
+      const auto method=v->as_string();
+      if(method!="auto" && method!="taylor")throw std::invalid_argument("numerical transport \""+std::string(method)+
+        "\" was removed: Taylor transport is the only ordinary method (drop the key or use \"taylor\")");
     }
-    if(auto v=a.if_contains("transport_digits"))c.numerical.spectral.accuracy_goal=integer(*v,1,100000,"FT transport digits");
+    if(a.if_contains("transport_digits"))throw std::invalid_argument(
+      "numerical transport_digits was removed with the spectral backends: Taylor transport is the only ordinary method");
     if(auto v=a.if_contains("method")) {
       const auto method=v->as_string();
-      if(method!="adjoint" && method!="factored" && method!="auto" && method!="values")throw std::invalid_argument("unknown numerical method");
-      c.numerical.observable_adjoint=method!="values";
+      if(method=="values")throw std::invalid_argument(
+        "numerical method \"values\" was removed: use \"adjoint\" (default), \"factored\" or \"auto\"");
+      if(method!="adjoint" && method!="factored" && method!="auto")throw std::invalid_argument("unknown numerical method");
       c.numerical.linear_method=method=="factored"?recursion::LinearMethod::factored:method=="auto"?recursion::LinearMethod::automatic:recursion::LinearMethod::adjoint;
     }
   }
@@ -125,7 +137,7 @@ inline json::value describe(const feynman::ExampleFamily& f) {
   json::object out{{"schema","DiffExp.FeynmanFamily/v1"},{"name",f.name},{"loops",f.momenta.loops},
     {"external_gram",std::move(gram)},{"propagators",std::move(lines)},{"physical_count",f.physical_count},
     {"dimension_at_epsilon_zero",f.dimension_at_epsilon_zero},{"epsilon_order",f.name=="bubble"?4:f.name=="pentagon_massive"?2:0},
-    {"numerical",json::object{{"endpoint_order",32},{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"},{"transport","auto"}}}};
+    {"numerical",json::object{{"endpoint_order",32},{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"}}}};
   if(f.name=="henn_double_pentagon_x0") {
     json::array anchors,signs;for(const auto& q:causal::henn_anchors())anchors.emplace_back(q.str());
     for(unsigned i=0;i<7;++i)signs.push_back(i==0?1:-1);
@@ -139,7 +151,7 @@ inline Configuration load(const std::string& path) {
   if(path!="-" && !std::filesystem::exists(path)) {
     if(path.find('/')!=std::string::npos || path.ends_with(".json"))throw std::runtime_error("cannot open family configuration: "+path);
     // Kept for command-line convenience; the generic parser never dispatches by name.
-    return parse(describe(feynman::example_family(path)));
+    auto built_in=parse(describe(feynman::example_family(path)));built_in.epsilon_order_given=false;return built_in;
   }
   std::ifstream file;if(path!="-"){file.open(path);if(!file)throw std::runtime_error("cannot open family configuration");}
   auto& input=path=="-"?std::cin:file;std::string text;char block[4096];

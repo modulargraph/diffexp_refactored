@@ -1,5 +1,43 @@
 # Timings
 
+## Current code
+
+Wall times of the current code on a 4-core x86-64 Linux container (GCC 13,
+FLINT 3.4.0, Release build), single observations. Feynman-trick runs use the
+built-in IBP solver, a cold cache and `--no-numerical-cache`; "before" is the
+same machine at the start of the transport and recursion rework (commit
+`d68d2dd`).
+
+| Feynman-trick example | Before | Now | Preparation / numerical now |
+| --- | ---: | ---: | --- |
+| `sunrise` | 1.46 s | 0.29 s | 0.05 / 0.24 s |
+| `box` | 0.52 s | 0.16 s | 0.05 / 0.11 s |
+| `pentagon` | 3.71 s | 1.24 s | 0.16 / 1.07 s |
+| `box_bubble` | 3.02 s | 0.73 s | 0.65 / 0.08 s |
+| `pentagon_massive` | 25.1 s | 3.20 s | 0.58 / 2.61 s |
+| `box_triangle` | 17.2 s | 3.20 s | 1.88 / 1.31 s |
+| `banana` | 30.1 s | 4.24 s | 0.48 / 3.74 s |
+| `banana_unequal` | 50.7 s | 6.25 s | 0.63 / 5.59 s |
+| `kite` | failed | 13.7 s | 1.00 / 12.6 s |
+
+Nonzero coefficients of the nine examples that ran before agree between the
+two versions to 1e-33 relative or better. The JSON report splits the
+numerical time into `endpoint_series_seconds`, `endpoint_operator_seconds`,
+`basis_selection_seconds`, `leaf_seconds` and `ordinary_seconds`; for `kite`
+the ordinary transport is now about three quarters of it.
+
+| Generic transport request | Before | Now | Check |
+| --- | ---: | ---: | --- |
+| `tools/performance/planar-one-loop-request.json.gz` (13 canonical integrals, epsilon 0-4, order 40, AccuracyGoal 15) | 24.3 s | 3.9 s | versions agree to 7e-26 |
+| Original equal-mass banana system, t=-1 to 20 on a complex path, order 50, 384 bits, AccuracyGoal 30 | 13.4 s | 1.8 s | published reference to 6e-28 |
+| Same, order 120, 768 bits, AccuracyGoal 60 | 82.5 s | 4.0 s | published reference to 6e-28 |
+
+The remaining sections record earlier measurements on other hardware and
+earlier code; they are kept for reference and are not comparable with the
+table above.
+
+## Earlier measurements
+
 These are observed wall times on an Apple M4, macOS ARM64, with a Release
 build and FLINT 3.4.0. Other compilation and numerical checks sometimes ran
 concurrently. These are development measurements, not isolated hardware

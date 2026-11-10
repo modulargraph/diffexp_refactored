@@ -64,8 +64,9 @@ has bounded seed and reconstruction budgets; see [scope and controls](ibp-solver
 verified preparation can be reused from the selected cache.
 
 For runs that do not need numerical restart files, add `--no-numerical-cache`.
-This avoids writing endpoint-series and ordinary-transport checkpoints while
-retaining the exact reductions under `--cache`. In-memory sharing remains active.
+This avoids writing the internal-basis choice and ordinary-transport
+checkpoints while retaining the exact reductions under `--cache`. Endpoint
+series are never cached. In-memory sharing remains active.
 The response reports `persistent_numerical_cache: false`; numerical stages are
 recomputed on a later invocation. This is useful when disk space is limited.
 See [the laptop examples](ft-laptop-examples.md) for cold runs with this option.
@@ -120,8 +121,8 @@ result["timings"]
 A JSON filename can be passed in place of the Association. Editing a label
 alone does not change the integral; editing the geometry does.
 
-Ordinary transport inside adjoint/factored FT recursion defaults to automatic
-spectral selection. Set `numerical.transport` to `"auto"`, `"spectral"` or
-`"taylor"`, and optionally `numerical.transport_digits` for the local spectral
-convergence target. These fields pass through `DiffExpFeynmanTrick` unchanged.
-See [FT spectral transport](ft-spectral.md) for selection, fallback and timings.
+Ordinary transport inside the FT recursion uses Taylor charts. The former
+`numerical.transport` values `"spectral"` and `"ultraspherical"`, the key
+`numerical.transport_digits` and `numerical.method: "values"` were removed and
+are rejected with that message; `"transport": "taylor"` (or the old default
+`"auto"`) is still accepted.

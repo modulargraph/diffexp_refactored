@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
       auto& progress=json_mode?std::cerr:std::cout;
       if(argc<3)throw std::invalid_argument(command+" requires a family configuration JSON file");
       auto configuration=diffexp::family_config::load(argv[2]);
+      bool epsilon_order_given=configuration.epsilon_order_given;
       auto options=configuration.preparation;
       auto numerical=configuration.numerical;
       const auto preparation_start=std::chrono::steady_clock::now();
@@ -56,25 +57,28 @@ int main(int argc, char** argv) {
       numerical.adjoint.conditioning_stats=&conditioning;
       unsigned epsilon_order=configuration.epsilon_order;
       bool numerical_cache=true;
-      bool epsilon_order_given=std::string(argv[2])=="-" || std::filesystem::exists(argv[2]);
+      bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis;
       std::filesystem::path fire_prime;
-      auto ibp_provider=configuration.ibp_provider;auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
+      auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
         if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;continue;}
+        if(option=="--ft-transport" || option=="--ft-transport-digits")
+          throw std::invalid_argument(option+" was removed: Taylor transport is the only ordinary method");
         if(i+1>=argc)throw std::invalid_argument("missing "+command+" option value");
         const char* option_value=argv[++i];
-        if(option=="--fire")options.reduction.provider.executable=option_value;
+        if(option=="--fire"){options.reduction.provider.executable=option_value;fire_given=true;}
         else if(option=="--ibp-provider")ibp_provider=option_value;
+        else if(option=="--ibp-validation"){ibp_validation=option_value;if(ibp_validation!="anchored"&&ibp_validation!="strict")throw std::invalid_argument("IBP validation must be anchored or strict");}
         else if(option=="--ibp-dots"||option=="--ibp-numerators"){
           const std::string value=option_value;unsigned n=0;auto parsed=std::from_chars(value.data(),value.data()+value.size(),n);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
           (option=="--ibp-dots"?ibp_dots:ibp_numerators)=n;
         }
-        else if(option=="--fire-prime")fire_prime=option_value;
+        else if(option=="--fire-prime"){fire_prime=option_value;fire_prime_given=true;}
         else if(option=="--cache")cache=option_value;
         else if(option=="--henn-basis")henn_basis=option_value;
         else if(option=="--fire-seconds" || option=="--level-seconds" || option=="--total-seconds" ||
@@ -90,16 +94,11 @@ int main(int argc, char** argv) {
           else if(option=="--fire-simplifier-threads")options.reduction.provider.simplifier_threads=number;
           else options.reduction.provider.memory_bytes=static_cast<std::size_t>(number)*1024*1024;
         }
-        else if(command=="ft" && option=="--ft-transport") {
-          const std::string method=option_value;
-          if(method!="auto" && method!="spectral" && method!="taylor")throw std::invalid_argument("FT transport must be auto, spectral or taylor");
-          numerical.ordinary_method=method=="auto"?diffexp::recursion::OrdinaryMethod::automatic:method=="spectral"?diffexp::recursion::OrdinaryMethod::spectral:diffexp::recursion::OrdinaryMethod::taylor;
-        }
         else if(command=="ft" && option=="--method") {
           const std::string method=option_value;
-          if(method!="adjoint" && method!="values" && method!="factored" && method!="auto")
-            throw std::invalid_argument("FT method must be adjoint, factored, auto or values");
-          numerical.observable_adjoint=method!="values";
+          if(method=="values")throw std::invalid_argument("--method values was removed: use adjoint (default), factored or auto");
+          if(method!="adjoint" && method!="factored" && method!="auto")
+            throw std::invalid_argument("FT method must be adjoint, factored or auto");
           numerical.linear_method=method=="factored"?diffexp::recursion::LinearMethod::factored:
             method=="auto"?diffexp::recursion::LinearMethod::automatic:diffexp::recursion::LinearMethod::adjoint;
         }
@@ -111,12 +110,12 @@ int main(int argc, char** argv) {
             if(number>100)throw std::invalid_argument("epsilon order must be in 0..100");
             epsilon_order=number;epsilon_order_given=true;
           }
-          else if(option=="--endpoint-order")numerical.endpoint_order=number;
-          else if(option=="--ordinary-order")numerical.ordinary_order=number;
-          else if(option=="--precision-bits")numerical.working_bits=number;
-          else if(option=="--leaf-digits")numerical.leaf_digits=number;
+          // Same ranges as the "numerical" block of a configuration file.
+          else if(option=="--endpoint-order"){if(number<1 || number>1000)throw std::invalid_argument("endpoint order must be in 1..1000");numerical.endpoint_order=number;}
+          else if(option=="--ordinary-order"){if(number<8 || number>1000)throw std::invalid_argument("ordinary order must be in 8..1000");numerical.ordinary_order=number;}
+          else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;}
+          else if(option=="--leaf-digits"){if(number<1 || number>100000)throw std::invalid_argument("leaf digits must be in 1..100000");numerical.leaf_digits=number;}
           else if(option=="--basis-scan-seconds"){if(number>60)throw std::invalid_argument("basis scan seconds must be in 0..60");numerical.automatic_basis_scan=number!=0;if(number)numerical.basis_scan_seconds=number;}
-          else if(option=="--ft-transport-digits"){if(!number || number>100000)throw std::invalid_argument("FT transport digits must be in 1..100000");numerical.spectral.accuracy_goal=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
         } else throw std::invalid_argument("unknown prepare option: "+option);
       }
@@ -124,9 +123,16 @@ int main(int argc, char** argv) {
       if(ibp_provider!="ibp-solver"&&ibp_provider!="fire"&&ibp_provider!="fire-modular")throw std::invalid_argument("IBP provider must be auto, ibp-solver, fire or fire-modular");
       if(ibp_provider=="fire-modular"&&fire_prime.empty())throw std::invalid_argument("fire-modular requires --fire-prime PATH");
       if(ibp_provider=="fire"&&options.reduction.provider.executable.empty())throw std::invalid_argument("fire provider requires --fire PATH");
+      // An executable that the selected provider never runs is almost always a
+      // mistake about which provider the configuration pins.
+      if(fire_given && ibp_provider!="fire")
+        std::cerr<<"diffexp: warning: --fire is ignored because the IBP provider is "<<ibp_provider
+          <<(configuration.ibp_provider==ibp_provider?" (pinned by the configuration)":"")<<"; pass --ibp-provider fire to use it\n";
+      if(fire_prime_given && ibp_provider!="fire-modular")
+        std::cerr<<"diffexp: warning: --fire-prime is ignored because the IBP provider is "<<ibp_provider<<"; pass --ibp-provider fire-modular to use it\n";
       options.reduction.batch_cache_directory=cache/"fire-batches";
       options.reduction.pending_cache_directory=cache/"fire-pending";
-      if(numerical_cache){numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
+      if(numerical_cache){numerical.basis_cache_directory=cache/"physical-bases";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
       auto requested=configuration.integrals;
       std::optional<diffexp::henn::CanonicalBasis> canonical_basis;
       if(!henn_basis.empty()) {
@@ -136,6 +142,18 @@ int main(int argc, char** argv) {
         requested=canonical_basis->scalar_targets;
         if(!epsilon_order_given)epsilon_order=4;
       }
+      if(command=="ft") {
+        // Everything the numerical phase would reject is rejected here, before
+        // the exact IBP preparation, which can take minutes to hours.
+        diffexp::recursion::validate_numerical_options(numerical);
+        if(canonical_basis && (numerical.working_bits<64 || numerical.working_bits>4096))
+          throw std::invalid_argument("--henn-basis projects at 64..4096 working bits; --precision-bits "+std::to_string(numerical.working_bits)+" is outside that range");
+        if(canonical_basis) {
+          const auto needed=diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order);
+          if(needed>static_cast<int>(numerical.max_epsilon))
+            throw std::invalid_argument("--henn-basis at epsilon order "+std::to_string(epsilon_order)+" needs scalar order "+std::to_string(needed)+", beyond the epsilon budget "+std::to_string(numerical.max_epsilon));
+        }
+      }
       diffexp::artifacts::Store store(cache);unsigned reused=0,built=0;
       diffexp::ibp_solver::Statistics ibp_statistics;
       auto provider=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget) {
@@ -143,6 +161,16 @@ int main(int argc, char** argv) {
         std::shared_ptr<diffexp::ibp_solver::Session> native_session;
         if(ibp_provider=="ibp-solver"){
           diffexp::ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.dots=ibp_dots;native.numerators=ibp_numerators;
+          // Coefficients are typically of low degree in epsilon and high degree in
+          // the merge parameter. Per-variable degree slices fit that shape with far
+          // fewer points than the dense total-degree scan, whose cap they also avoid.
+          native.degree_slices=true;native.max_samples_per_prime=1024;
+          // One reconstruction per level instead of one per closure pass, and
+          // held-out validation on the pilot's dependency subset of original
+          // equations with one complete elimination as anchor per attempt.
+          // "strict" eliminates every generated equation at every point.
+          native.closure_parameter=parameter;
+          if(ibp_validation!="strict"){native.selected_source_rows=true;native.complete_validation_anchor=true;}
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {
@@ -152,7 +180,8 @@ int main(int argc, char** argv) {
           fallback=[session](const auto& batch,const auto& limits){return (*session)(batch,limits);};
         }
         auto result=diffexp::cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
-        if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;}
+        if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;
+          ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;}
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
@@ -169,7 +198,15 @@ int main(int argc, char** argv) {
         {"status",command=="prepare"?"prepared":"completed"},{"levels",graph.nodes.size()},
         {"systems_built",built},{"systems_reused",reused}};
       report["ibp_provider"]=ibp_provider;
-      report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds}};
+      // Verified level closures are exact and provider independent, and their
+      // cache key deliberately omits the provider. A reused closure therefore
+      // keeps the master basis of whichever provider and seeds first built it.
+      report["ibp_cache"]=boost::json::object{{"systems_reused",reused},{"systems_built",built},{"provider_options_ignored",reused>0},
+        {"note",reused?"reused level closures were not recomputed: --ibp-provider, --ibp-dots and --ibp-numerators did not apply to them; use a fresh --cache to apply them":"all level closures were built with the reported IBP provider and seeds"}};
+      if(reused)std::cerr<<"diffexp: note: "<<reused<<" level system"<<(reused==1?" was":"s were")<<" reused from the verified cache; the IBP provider options (--ibp-provider "
+        <<ibp_provider<<", --ibp-dots, --ibp-numerators) did not apply to "<<(reused==1?"it":"them")<<". Use a fresh --cache to rebuild.\n";
+      report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds},
+        {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
@@ -208,15 +245,27 @@ int main(int argc, char** argv) {
           }
         }
         const auto& stats=evaluator.statistics();
-        boost::json::array rejected;for(const auto& reason:stats.spectral_rejections)rejected.emplace_back(reason);
-        report["ft_transport"]=boost::json::object{{"direct_endpoints",stats.direct_endpoints},{"spectral_attempts",stats.spectral_attempts},{"spectral_accepted",stats.spectral_accepted},{"spectral_legs",stats.spectral_legs},{"spectral_reused",stats.spectral_reused},{"rejections",rejected}};
+        report["ft_transport"]=boost::json::object{{"method","taylor"},{"direct_endpoints",stats.direct_endpoints}};
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
-        report["timings"].as_object()["spectral_seconds"]=stats.spectral_seconds;
-        progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; verified series reused "<<stats.endpoint_series_reused<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
+        // Phases of numerical_seconds that precede transport. Disjoint from each
+        // other and from ordinary_seconds.
+        report["timings"].as_object()["endpoint_series_seconds"]=stats.endpoint_series_seconds;
+        report["timings"].as_object()["endpoint_operator_seconds"]=stats.endpoint_operator_seconds;
+        report["timings"].as_object()["basis_selection_seconds"]=stats.basis_selection_seconds;
+        report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
+        report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
+          {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
+          {"child_window_preflights",stats.demand_preflights},
+          {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
+          {"structural_zero_conflicts",stats.structural_zero_conflicts}};
+        progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
           <<"Ordinary continuation: "<<stats.ordinary_checkpoints.loaded<<" saved arms resumed, "<<stats.ordinary_checkpoints.completed_reused
-          <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved.\n"
+          <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
           <<"Child-window preflights "<<stats.demand_preflights<<"; local operator reuses "<<stats.local_operator_reuses<<".\n"
+          <<"Basis scans "<<stats.basis_scans<<"; selections "<<stats.basis_selections<<".\n"
+          <<"Seconds: endpoint series "<<stats.endpoint_series_seconds<<", endpoint operators "<<stats.endpoint_operator_seconds
+          <<", basis selection "<<stats.basis_selection_seconds<<", leaf "<<stats.leaf_seconds<<", ordinary transport "<<stats.ordinary_seconds<<".\n"
           <<"Centered chart actions "<<conditioning.centered_charts<<"; conditioning subdivisions "<<conditioning.conditioning_subdivisions<<".\n"
           <<(result.taylor_tail_certified?"Certified scalar-leaf coefficient enclosures.\n":"Numerical recursive series result; omitted endpoint and transport tails are not certified.\n");
         if(canonical_basis) {
@@ -325,11 +374,15 @@ int main(int argc, char** argv) {
       throw std::invalid_argument("prepared-input compatibility runtime is not enabled in this build");
 #endif
     } else if (command == "--help") {
-      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N]\n";
+      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N] [--basis-scan-seconds N] [--no-numerical-cache]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
-      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N.\n";
+      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N. --ibp-validation anchored|strict (default anchored: held-out points eliminate the pilot's dependency subset of original equations, with one complete elimination per attempt; strict eliminates every equation at every point).\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
-      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint); --no-numerical-cache disables numerical checkpoint files while retaining exact reductions.\n";
+      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto (default adjoint). Ordinary transport is by Taylor charts; --ft-transport, --ft-transport-digits and --method values were removed.\n";
+      std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";
+      std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds, per level, the search for an internal master basis with a smaller exact connection (cheaper transport) that does not widen the child epsilon window; 0 disables it.\n";
+      std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the persisted internal-basis choice (physical-bases) and the ordinary-transport checkpoints (ordinary-transport). Endpoint series are never cached: recomputing them is faster than verifying a stored copy.\n";
+      std::cout << "IBP cache: verified level closures under --cache are reused whatever --ibp-provider/--ibp-dots/--ibp-numerators say; such reuse is reported on stderr and in the JSON field ibp_cache.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";
       std::cout << "Original equal banana: --route real|contour (default real; local +i0 singular matching); --to ENDPOINT (default 20; real route supports endpoints >=20, including historical 32).\n";
       std::cout << "Original unequal banana: --route momentum-first|mass-first (default momentum-first).\n";

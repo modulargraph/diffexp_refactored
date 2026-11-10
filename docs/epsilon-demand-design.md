@@ -1,8 +1,9 @@
 # Epsilon scheduling and physical-basis search
 
-DiffExp 2.1 now schedules factored Feynman-trick transport by component demand.
-The aim is to reduce unnecessary coefficients while preserving the requested
-physical outputs and their uncertainty. This does not guarantee that every recursion level can use the same
+DiffExp 2.1 schedules Feynman-trick transport by component demand, in both
+linear methods (adjoint and factored). The aim is to reduce unnecessary
+coefficients while preserving the requested physical outputs and their
+uncertainty. This does not guarantee that every recursion level can use the same
 epsilon order as the final requested output.
 
 ## Demand propagation
@@ -29,37 +30,41 @@ into epsilon-scaled coordinates for the existing transport backend, which retain
 its uncertainty propagation and chart checks. Counters report the actual packed
 storage, including accumulator tails, rather than just logical output widths.
 
-The recursive child evaluator still accepts a common maximum order. Its
-per-component ledger is available, but a fully unequal-width interface through
-all recursion levels is not yet implemented. This is one remaining source of work.
+The recursive child evaluator accepts a common maximum order: the largest of
+the per-component windows. The adjoint method uses the same bound. Its local
+operator is first assembled with one common low order (a column shift declares
+it for all columns); coefficients below a column's structural window are then
+replaced by exact zeros, provided the computed ball contains zero, and the
+empty leading orders are dropped. A ball that excludes zero is kept, and the
+refinement loop then requests the wider window. A fully unequal-width interface
+through all recursion levels is not implemented.
 
-## Basis search
+## Basis selection
 
-Candidates include cached dotted/numerator reductions, epsilon prefactors,
-sparse combinations and bounded compositions of changes. Every proposed
-coordinate system must pass exact inverse and differential-gauge identities.
-The search is a bounded beam, not an exhaustive proof of optimality.
+The structural child windows are invariant under every diagonal epsilon
+rescaling of the internal basis, and in the examples no candidate basis ever
+lowered them. What a different basis does change is the size of the exact
+connection, and with it the cost of transport. Selection therefore looks for
+the smallest connection that does not widen the child window.
 
-The production score prioritizes maximum child lookahead, then the sum of
-positive component lookaheads, then connection expression size. A larger matrix
-can therefore win if it needs fewer coefficients. This is a per-level proxy;
-there is not yet a joint optimizer of the full recursion or adjacent-level bases.
+Candidates are cached dotted/numerator reductions, sparse row combinations
+(with epsilon weights) and bounded compositions of two changes; pure epsilon
+rescalings are not tried. Each candidate is a rank-one update of its base and
+is screened only for new parameter poles; it is ranked by the size of its
+connection, with no endpoint data. The search is a bounded beam (256 trials,
+`basis_scan_seconds`, default 30 s per level), not a proof of optimality.
 
-Most candidates reuse the original prepared endpoint maps. If `Y = D_old U_old`
-and `Y = D_new U_new`, their ordinary-cut maps are pulled back by
-`V = D_old^{-1} D_new`. The lower cut uses `V(h)` and the upper cut uses
-`V(1-h)`. Required epsilon lookahead is supplied before composition. At most
-eight improving candidates receive full endpoint reconstruction and contour
-validation, stopping at the first certified improvement. Final validation has
-a separate cooperative allowance capped at 30 s, so the next expensive rebuild
-is not started after that allowance. No trial numerical transport is needed
-to rank a basis.
+The best candidate is verified in full (both inverse products and the exact
+gauge identity) and installed by pullback: if `Y = D_old U_old = D_new U_new`,
+the endpoint functionals at the ordinary cuts are `E_old V` with the exact
+`V = D_old^{-1} D_new`, at `V(h)` for the lower and `V(1-h)` for the upper cut.
+No endpoint series is rebuilt. It is accepted only if the child window of the
+resulting plan is not wider and its gauged connection is smaller.
 
-When automatic scanning is enabled, its default discovery allowance is 30 s.
-This is a cooperative allowance: an in-progress exact operation can exceed it,
-and final candidate validation is additional work. Selected coordinates remain
-pinned on restart and are revalidated. Selection revision v3 separates these
-choices from earlier expression-first and full-rebuild search decisions.
+The chosen coordinates are stored under `basis_cache_directory` (CLI:
+`physical-bases` in the cache) and pinned on restart, so checkpoints match. A
+search cut by its time budget, or ended by an error, stores nothing.
+Selection revision v5 separates these choices from earlier revisions.
 
 ## Whole-functional cancellation
 
@@ -99,7 +104,7 @@ Tests cover weighted dependency cycles, negative Laurent orders, unequal
 per-row demands, unknown-tail rejection, uncertain input preservation, and
 agreement with the existing complete sunrise evaluator. Exact synthetic tests
 check counterterm and realization identities, rejection of merely truncated
-endpoint primitives, persisted-basis pinning and upper-cut coordinate screening.
+endpoint primitives, persisted-basis pinning and the upper-cut pullback.
 
 A smaller matrix or narrower coefficient window is not by itself a speedup
 measurement. The implementation reports actual packed slots and recurrence

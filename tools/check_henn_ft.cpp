@@ -46,13 +46,12 @@ int main(int argc,char** argv) {
     const bool all=std::string(argv[1])=="all",cache_only=std::string(argv[3])=="-";
     const bool native_ibp=std::string(argv[3])=="ibp-solver";
     json::object settings;if(argc>9)settings=json::parse(fire::read_text(argv[9])).as_object();
-    const std::set<std::string> allowed{"compact_centered_only","circuit_grouped_dot","compact_centered_recovery","rational_circuit_recurrence","endpoint_order","ordinary_order","centered_map_working_bits","centered_before_rational","working_bits","leaf_digits","canonical_high","specialize_exact_point","ordinary_method","prepare_only","ibp_numerators","ibp_dots","ibp_max_degree","dense_endpoint_verification","univariate_endpoint_projection","cleared_endpoint_projection","finite_lag_endpoint_projection","preflight_depth","evaluate_depth","evaluate_high","direct_endpoint_functionals","spectral_endpoint_clustering","spectral_max_block_size","spectral_max_nodes","spectral_max_block_nodes","spectral_seconds_budget","spectral_max_subdivisions","transport_capture_directory","transport_capture_stop_after"};
+    const std::set<std::string> allowed{"endpoint_order","ordinary_order","working_bits","leaf_digits","canonical_high","specialize_exact_point","prepare_only","ibp_numerators","ibp_dots","ibp_max_degree","preflight_depth","evaluate_depth","evaluate_high","direct_endpoint_functionals","transport_capture_directory","transport_capture_stop_after"};
     for(const auto& item:settings)if(!allowed.contains(std::string(item.key())) &&
-        item.key()!="basis_scan_artifacts" && item.key()!="epsilon_demand_depths" && item.key()!="centered_map_workers" &&
-        item.key()!="endpoint_power_scan_directory" && item.key()!="automatic_basis_scan" &&
+        item.key()!="basis_scan_artifacts" && item.key()!="epsilon_demand_depths" &&
+        item.key()!="automatic_basis_scan" &&
         item.key()!="basis_scan_seconds" && item.key()!="ordinary_cache_directory" && item.key()!="component_epsilon_demands" &&
-        item.key()!="component_stage_directory" &&
-        item.key()!="certify_operator_principal_part" && item.key()!="principal_part_endpoint_milliseconds")
+        item.key()!="component_stage_directory" && item.key()!="certify_operator_principal_part")
       throw std::invalid_argument("unknown acceptance setting: "+std::string(item.key()));
     auto number=[&](const char* key,unsigned fallback,unsigned low,unsigned high){auto value=settings.contains(key)?settings.at(key).to_number<unsigned>():fallback;if(value<low||value>high)throw std::invalid_argument(std::string("invalid acceptance setting: ")+key);return value;};
     const bool prepare_only=settings.contains("prepare_only")&&settings.at("prepare_only").as_bool();
@@ -112,29 +111,8 @@ int main(int argc,char** argv) {
     };
     numerical.endpoint_order=number("endpoint_order",32,4,128);
     numerical.direct_endpoint_functionals=settings.contains("direct_endpoint_functionals")&&settings.at("direct_endpoint_functionals").as_bool();
-    numerical.spectral.endpoint_clustering=settings.contains("spectral_endpoint_clustering")&&settings.at("spectral_endpoint_clustering").as_bool();
-    numerical.spectral.max_block_size=number("spectral_max_block_size",4,1,32);
-    numerical.spectral.max_nodes=number("spectral_max_nodes",128,16,128);
-    numerical.spectral.max_block_nodes=number("spectral_max_block_nodes",256,16,2048);
-    numerical.spectral.seconds_budget=number("spectral_seconds_budget",15,1,1200);
-    numerical.spectral.max_subdivisions=number("spectral_max_subdivisions",0,0,256);
-    numerical.ordinary_progress=[&](const auto& text){std::cerr<<elapsed(start)<<"s "<<text<<'\n';};
     numerical.ordinary_order=number("ordinary_order",80,8,1000);
-    numerical.adjoint.rational_circuit_recurrence=!settings.contains("rational_circuit_recurrence") || settings.at("rational_circuit_recurrence").as_bool();
-    numerical.adjoint.compact_centered_only=!settings.contains("compact_centered_only") || settings.at("compact_centered_only").as_bool();
-    numerical.adjoint.circuit_grouped_dot=!settings.contains("circuit_grouped_dot") || settings.at("circuit_grouped_dot").as_bool();
-    numerical.adjoint.compact_centered_recovery=!settings.contains("compact_centered_recovery") || settings.at("compact_centered_recovery").as_bool();
-    // Captures must record effective execution policy even when defaults were used.
-    settings["rational_circuit_recurrence"]=numerical.adjoint.rational_circuit_recurrence;
-    settings["compact_centered_recovery"]=numerical.adjoint.compact_centered_recovery;
-    settings["compact_centered_only"]=numerical.adjoint.compact_centered_only;
-    settings["circuit_grouped_dot"]=numerical.adjoint.circuit_grouped_dot;
     report["settings"]=settings;
-    numerical.adjoint.centered_before_rational=settings.contains("centered_before_rational")&&settings.at("centered_before_rational").as_bool();
-    numerical.adjoint.centered_map_working_bits=number("centered_map_working_bits",0,0,4096);
-    numerical.adjoint.centered_map_workers=number("centered_map_workers",1,1,4);
-    if(numerical.adjoint.centered_map_working_bits && numerical.adjoint.centered_map_working_bits<64)
-      throw std::invalid_argument("centered_map_working_bits must be zero or at least64");
     numerical.working_bits=number("working_bits",384,128,4096);
     std::size_t captured_problems=0;
     if(settings.contains("transport_capture_directory")) {
@@ -156,13 +134,6 @@ int main(int argc,char** argv) {
     numerical.leaf_digits=number("leaf_digits",28,20,500);
     numerical.matching.specialize_exact_point=settings.contains("specialize_exact_point")&&settings.at("specialize_exact_point").as_bool();
     numerical.matching.certify_operator_principal_part=settings.contains("certify_operator_principal_part")&&settings.at("certify_operator_principal_part").as_bool();
-    numerical.principal_part_endpoint_milliseconds=number("principal_part_endpoint_milliseconds",5000,0,60000);
-    if(settings.contains("ordinary_method")){
-      auto ordinary=std::string(settings.at("ordinary_method").as_string());
-      if(ordinary!="auto"&&ordinary!="spectral"&&ordinary!="taylor"&&ordinary!="ultraspherical")throw std::invalid_argument("ordinary method");
-      numerical.ordinary_method=ordinary=="ultraspherical"?recursion::OrdinaryMethod::ultraspherical:
-        ordinary=="spectral"?recursion::OrdinaryMethod::spectral:ordinary=="taylor"?recursion::OrdinaryMethod::taylor:recursion::OrdinaryMethod::automatic;
-    }
     exact.anchors=causal::henn_anchors();
     numerical.causal_prescription=causal::current_example("henn_double_pentagon_x0",7,exact.anchors,true);
     if(regular_anchor_trial) {
@@ -182,21 +153,12 @@ int main(int argc,char** argv) {
     if(!cache_only&&!native_ibp)exact.reduction.provider.executable=argv[3];
     exact.reduction.batch_cache_directory=cache/"fire-batches";
     exact.reduction.pending_cache_directory=cache/"fire-pending";
-    numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";numerical.adjoint.conditioning_stats=&conditioning;
+    numerical.basis_cache_directory=cache/"physical-bases";numerical.ordinary_cache_directory=cache/"ordinary-transport";numerical.adjoint.conditioning_stats=&conditioning;
     if(settings.contains("ordinary_cache_directory"))
       numerical.ordinary_cache_directory=artifacts::detail::string(settings.at("ordinary_cache_directory"));
-    numerical.endpoint.univariate_epsilon_recurrence=true;
-    numerical.endpoint.finite_lag_projection=settings.contains("finite_lag_endpoint_projection")&&settings.at("finite_lag_endpoint_projection").as_bool();
-    numerical.endpoint.cleared_epsilon_projection=settings.contains("cleared_endpoint_projection")&&settings.at("cleared_endpoint_projection").as_bool();
-    numerical.endpoint.univariate_epsilon_projection=settings.contains("univariate_endpoint_projection")&&settings.at("univariate_endpoint_projection").as_bool();
-    // The 69-column N32 endpoint exceeds the generic two-billion-product
-    // receiving cap. This finite resource budget keeps every exact check.
-    numerical.endpoint_cache_verification.dense_epsilon_polynomials=settings.contains("dense_endpoint_verification")&&settings.at("dense_endpoint_verification").as_bool();
-    numerical.endpoint_cache_verification.max_term_products=20000000000ULL;
     report["resources"]=json::object{{"endpoint_order",numerical.endpoint_order},{"ordinary_order",numerical.ordinary_order},
       {"working_bits",numerical.working_bits},{"leaf_digits",numerical.leaf_digits},
-      {"endpoint_coefficient_domain","exact univariate rational epsilon"},{"endpoint_cache_layout","incremental columns v1; legacy read compatibility"},
-      {"endpoint_verification_product_budget",numerical.endpoint_cache_verification.max_term_products},
+      {"endpoint_coefficient_domain","exact univariate rational epsilon"},
       {"physical_endpoint_constraint_tolerance",numerical.endpoint_constraint_tolerance.str()},
       {"endpoint_projection_product_budget",numerical.endpoint.max_projection_products},
       {"endpoint_limit_projection","fixed nonpositive-power sectors; full configured-order series retained for integration"},
@@ -218,7 +180,7 @@ int main(int argc,char** argv) {
       else if(native_ibp){
         ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.degree_slices=true;native.probe_timeout_seconds=options.provider.timeout_seconds;native.sample_checkpoint_interval=32;
         native.closure_parameter=p;native.selected_source_rows=true;native.target_sector_seeds=true;
-        native.numerators=number("ibp_numerators",1,0,8);native.dots=number("ibp_dots",1,0,8);native.max_degree=number("ibp_max_degree",64,1,64);
+        native.numerators=number("ibp_numerators",1,0,8);native.dots=number("ibp_dots",1,0,8);native.max_degree=number("ibp_max_degree",64,1,64);native.max_variable_degree=std::max(native.max_variable_degree,native.max_degree);
         native.progress=[&](const auto& text){std::cerr<<elapsed(start)<<"s "<<text<<'\n';};
         auto session=std::make_shared<ibp_solver::Session>(b,d,f,native);
         fallback=[session,&modular_seconds,&modular_batches](const auto& batch,const auto& limits){const auto began=Clock::now();auto result=(*session)(batch,limits);modular_seconds+=elapsed(began);++modular_batches;return result;};
@@ -298,7 +260,7 @@ int main(int argc,char** argv) {
       if(settings.contains("preflight_depth") || settings.contains("evaluate_depth"))
         throw std::invalid_argument("epsilon demand inspection cannot be combined with another diagnostic mode");
       phase="epsilon demand inspection";json::array profiles;std::set<unsigned> seen;
-      int new_total=raw_high,old_total=raw_high;
+      int new_total=raw_high;
       for(const auto& item:settings.at("epsilon_demand_depths").as_array()) {
         const auto depth=item.to_number<unsigned>();
         if(!seen.insert(depth).second)throw std::invalid_argument("duplicate epsilon inspection depth");
@@ -307,11 +269,11 @@ int main(int argc,char** argv) {
           {"lower_endpoint_low",p.lower_endpoint_low},{"upper_endpoint_low",p.upper_endpoint_low},
           {"beta_low",p.beta_low},{"anchor_inverse_pole_loss",p.anchor_inverse_pole_loss},
           {"adjoint_child_loss",p.adjoint_child_loss},{"factored_child_loss",p.factored_child_loss},
-          {"old_common_high_child_loss",p.common_high_child_loss},{"seconds",elapsed(profile_start)}};
+          {"seconds",elapsed(profile_start)}};
         json::array component_losses;for(const auto& loss:p.child_component_loss)
           if(loss)component_losses.emplace_back(*loss);else component_losses.emplace_back(nullptr);
         profile["child_component_loss"]=std::move(component_losses);
-        new_total+=p.factored_child_loss;old_total+=p.common_high_child_loss;
+        new_total+=p.factored_child_loss;
         std::cerr<<"HENN_EPSILON_DEMAND "<<json::serialize(profile)<<'\n';profiles.push_back(std::move(profile));
         if(settings.contains("component_stage_directory")) {
           const auto directory=std::filesystem::path(artifacts::detail::string(settings.at("component_stage_directory")));
@@ -328,43 +290,13 @@ int main(int argc,char** argv) {
           std::ofstream stream(destination);stream<<json::serialize(fixture)<<'\n';stream.close();
           if(!stream)throw std::runtime_error("component fixture write failed");
         }
-        if(settings.contains("endpoint_power_scan_directory")) {
-          auto proposal=evaluator.optimize_endpoint_epsilon_basis(depth);
-          json::array ids,names,shifts;
-          for(const auto& integral:graph.nodes[depth].closure.ordered_basis) {
-            json::array row;for(auto power:integral)row.emplace_back(power);ids.push_back(std::move(row));
-          }
-          for(const auto& name:graph.dimension.variables())names.emplace_back(name);
-          for(auto shift:proposal.additional_shifts)shifts.emplace_back(shift);
-          json::object artifact{{"schema","DiffExp.FTEpsilonBasisScan/v1"},{"variables",names},
-            {"original_ordered_basis",ids},{"original_connection",stage_probe::exact_matrix(proposal.basis.original_connection)},
-            {"S",stage_probe::exact_matrix(proposal.basis.to_basis)},{"S_inverse",stage_probe::exact_matrix(proposal.basis.from_basis)},
-            {"new_connection",stage_probe::exact_matrix(proposal.basis.connection)},
-            {"additional_epsilon_shifts",shifts},{"original_child_loss",proposal.original_child_loss},
-            {"estimated_child_loss",proposal.estimated_child_loss},{"exact_identities_verified",true},
-            {"method","integer difference constraints using endpoint, integrand and anchor maps"},
-            {"production_adoption_authorized_by_this_artifact",false}};
-          const auto directory=std::filesystem::path(artifacts::detail::string(settings.at("endpoint_power_scan_directory")));
-          std::filesystem::create_directories(directory);const auto destination=directory/("level-"+std::to_string(depth+1)+".json");
-          if(std::filesystem::exists(destination))throw std::runtime_error("endpoint epsilon scan refuses to overwrite an artifact");
-          std::ofstream stream(destination);stream<<json::serialize(artifact)<<'\n';stream.close();
-          if(!stream)throw std::runtime_error("endpoint epsilon scan artifact write failed");
-          std::cerr<<"HENN_ENDPOINT_POWER_SCAN "<<json::serialize(json::object{{"depth",depth},
-            {"original_child_loss",proposal.original_child_loss},{"estimated_child_loss",proposal.estimated_child_loss},
-            {"additional_epsilon_shifts",shifts},{"file",destination.string()}})<<'\n';
-        }
       }
       report["epsilon_demand_profiles"]=std::move(profiles);
       report["complete_chain_profile"]=seen.size()+1==graph.nodes.size();
       if(seen.size()+1==graph.nodes.size()) {
-        report["predicted_factored_leaf_high"]=new_total;
-        report["previous_common_high_leaf_high"]=old_total;
+        report["predicted_leaf_high"]=new_total;
       }
       report["status"]="epsilon_demand_inspected";report["exact_events"]=events;
-      const auto& stats=evaluator.statistics();
-      report["principal_part_certificates"]=json::object{{"attempts",stats.principal_part_attempts},
-        {"certified",stats.principal_part_certificates},{"reused",stats.principal_part_reused},
-        {"zero_coefficients",stats.principal_part_zero_coefficients},{"full_formal_tail_certificate",false}};
       report["total_seconds"]=elapsed(start);output<<json::serialize(report)<<'\n';return 0;
     }
     if(settings.contains("preflight_depth")){auto depth=number("preflight_depth",0,0,5);phase="endpoint operator preflight";auto stage=evaluator.prepare_adjoint_stage(depth,0);report["status"]="preflight_completed";report["preflight_depth"]=depth;report["full_evaluator_end_to_end"]=false;report["total_seconds"]=elapsed(start);output<<json::serialize(report)<<'\n';return 0;}
@@ -383,24 +315,15 @@ int main(int argc,char** argv) {
       report["subtree_coefficients"]=std::move(values);
       const auto& s=evaluator.statistics();
       report["numerical_statistics"]=json::object{{"leaf_evaluations",s.leaf_evaluations},{"direct_endpoints",s.direct_endpoints},
-        {"ordinary_seconds",s.ordinary_seconds},{"spectral_seconds",s.spectral_seconds},
-        {"spectral_attempts",s.spectral_attempts},{"spectral_accepted",s.spectral_accepted},
+        {"ordinary_seconds",s.ordinary_seconds},
         {"conditioning_method_fallbacks",s.conditioning_method_fallbacks},
         {"completed_checkpoints_reused",s.ordinary_checkpoints.completed_reused}};
-      report["conditioning"]=json::object{{"centered_charts",conditioning.centered_charts},
-      {"circuit_charts",conditioning.circuit_charts},{"circuit_homogeneous_columns",conditioning.circuit_homogeneous_columns},
-      {"circuit_preparations",conditioning.circuit_preparations},{"circuit_addmul_operations",conditioning.circuit_addmul_operations},
-      {"circuit_scalar_operations",conditioning.circuit_scalar_operations},{"circuit_dot_products",conditioning.circuit_dot_products},
-      {"centered_only_charts",conditioning.centered_only_charts},{"centered_only_fallbacks",conditioning.centered_only_fallbacks},{"exact_input_map_columns_skipped",conditioning.exact_input_map_columns_skipped},{"circuit_peak_live_cells",conditioning.circuit_peak_live_cells},
+      report["conditioning"]=json::object{{"charts",conditioning.charts},{"tail_limited_charts",conditioning.tail_limited_charts},
+      {"centered_charts",conditioning.centered_charts},{"conditioning_subdivisions",conditioning.conditioning_subdivisions},
+      {"circuit_batch_reductions",conditioning.circuit_batch_reductions},{"circuit_preparations",conditioning.circuit_preparations},
+      {"recurrences",conditioning.recurrences},{"circuit_terms",conditioning.circuit_terms},
       {"compilation_seconds",conditioning.compilation_seconds},{"preparation_seconds",conditioning.preparation_seconds},
-      {"source_seconds",conditioning.source_seconds},{"homogeneous_seconds",conditioning.homogeneous_seconds},
-      {"reference_seconds",conditioning.reference_seconds},
-      {"reduced_precision_homogeneous_maps",conditioning.reduced_precision_homogeneous_maps},
-      {"full_precision_map_retries",conditioning.full_precision_map_retries},
-      {"centered_before_rational_charts",conditioning.centered_before_rational_charts},
-      {"centered_first_fallbacks",conditioning.centered_first_fallbacks},
-        {"conditioning_subdivisions",conditioning.conditioning_subdivisions},
-        {"rational_cross_checks",conditioning.rational_cross_checks}};
+      {"recurrence_seconds",conditioning.recurrence_seconds}};
       report["exact_events"]=events;report["exact_systems_built"]=built;report["exact_systems_reused"]=reused;
       report["total_seconds"]=elapsed(start);output<<json::serialize(report)<<'\n';return 0;
     }
@@ -436,54 +359,30 @@ int main(int argc,char** argv) {
       {"functional_reduction_attempts",s.functional_reduction_attempts},
       {"functional_reduction_certificates",s.functional_reduction_certificates},
       {"basis_scans",s.basis_scans},{"basis_selections",s.basis_selections},{"basis_cache_hits",s.basis_cache_hits},{"basis_cache_writes",s.basis_cache_writes},
-      {"principal_part_attempts",s.principal_part_attempts},{"principal_part_certificates",s.principal_part_certificates},
-      {"principal_part_reused",s.principal_part_reused},{"principal_part_zero_coefficients",s.principal_part_zero_coefficients},
       {"leaf_evaluations",s.leaf_evaluations},{"direct_endpoints",s.direct_endpoints},{"refinements",s.refinements},{"endpoint_series_built",s.endpoint_series_built},
-      {"endpoint_series_reused",s.endpoint_series_reused},{"demand_preflights",s.demand_preflights},{"local_operator_reuses",s.local_operator_reuses},
+{"demand_preflights",s.demand_preflights},{"local_operator_reuses",s.local_operator_reuses},
       {"adjoint_selections",s.adjoint_selections},{"factored_selections",s.factored_selections},
       {"conditioning_method_fallbacks",s.conditioning_method_fallbacks},
       {"endpoint_constraint_rows",s.endpoint_constraint_rows},{"endpoint_constraint_coefficients",s.endpoint_constraint_coefficients},
       {"maximum_endpoint_constraint_residual",s.maximum_endpoint_constraint_residual}};
-    report["numerical_statistics"].as_object()["spectral_attempts"]=s.spectral_attempts;
-    report["numerical_statistics"].as_object()["spectral_accepted"]=s.spectral_accepted;
-    report["numerical_statistics"].as_object()["spectral_reused"]=s.spectral_reused;
-    report["numerical_statistics"].as_object()["spectral_subdivisions"]=s.spectral_subdivisions;
-    report["numerical_statistics"].as_object()["spectral_accepted_subsegments"]=s.spectral_accepted_subsegments;
-    report["numerical_statistics"].as_object()["spectral_seconds"]=s.spectral_seconds;
     report["numerical_statistics"].as_object()["ordinary_seconds"]=s.ordinary_seconds;
-    json::array rejections;for(const auto& reason:s.spectral_rejections)rejections.emplace_back(reason);report["spectral_rejections"]=std::move(rejections);
     report["ordinary_checkpoints"]=json::object{{"loaded",s.ordinary_checkpoints.loaded},{"saved",s.ordinary_checkpoints.saved},{"completed_reused",s.ordinary_checkpoints.completed_reused},{"omitted_tail_certified",false}};
-    report["conditioning"]=json::object{{"centered_charts",conditioning.centered_charts},
-      {"circuit_charts",conditioning.circuit_charts},{"circuit_homogeneous_columns",conditioning.circuit_homogeneous_columns},
-      {"circuit_preparations",conditioning.circuit_preparations},{"circuit_addmul_operations",conditioning.circuit_addmul_operations},
-      {"circuit_scalar_operations",conditioning.circuit_scalar_operations},{"circuit_dot_products",conditioning.circuit_dot_products},
-      {"centered_only_charts",conditioning.centered_only_charts},{"centered_only_fallbacks",conditioning.centered_only_fallbacks},{"exact_input_map_columns_skipped",conditioning.exact_input_map_columns_skipped},{"circuit_peak_live_cells",conditioning.circuit_peak_live_cells},
+    report["conditioning"]=json::object{{"charts",conditioning.charts},{"tail_limited_charts",conditioning.tail_limited_charts},
+      {"centered_charts",conditioning.centered_charts},{"conditioning_subdivisions",conditioning.conditioning_subdivisions},
+      {"circuit_batch_reductions",conditioning.circuit_batch_reductions},{"circuit_preparations",conditioning.circuit_preparations},
+      {"recurrences",conditioning.recurrences},{"circuit_terms",conditioning.circuit_terms},
       {"compilation_seconds",conditioning.compilation_seconds},{"preparation_seconds",conditioning.preparation_seconds},
-      {"source_seconds",conditioning.source_seconds},{"homogeneous_seconds",conditioning.homogeneous_seconds},
-      {"reference_seconds",conditioning.reference_seconds},
-      {"reduced_precision_homogeneous_maps",conditioning.reduced_precision_homogeneous_maps},
-      {"full_precision_map_retries",conditioning.full_precision_map_retries},
-      {"centered_before_rational_charts",conditioning.centered_before_rational_charts},
-      {"centered_first_fallbacks",conditioning.centered_first_fallbacks},
-      {"conditioning_subdivisions",conditioning.conditioning_subdivisions},{"rational_cross_checks",conditioning.rational_cross_checks}};
+      {"recurrence_seconds",conditioning.recurrence_seconds}};
     report["status"]=pass?"pass":"fail";
   } catch(const std::exception& error) {
     report["phase"]=phase;report["error"]=error.what();std::cerr<<phase<<": "<<error.what()<<'\n';
   }
   // Preserve phase costs on failures as well as completed calculations.
-  report["transport_work"]=json::object{
-    {"circuit_charts",conditioning.circuit_charts},{"circuit_homogeneous_columns",conditioning.circuit_homogeneous_columns},
-    {"circuit_preparations",conditioning.circuit_preparations},{"circuit_addmul_operations",conditioning.circuit_addmul_operations},
-    {"circuit_scalar_operations",conditioning.circuit_scalar_operations},{"circuit_dot_products",conditioning.circuit_dot_products},
-      {"centered_only_charts",conditioning.centered_only_charts},{"centered_only_fallbacks",conditioning.centered_only_fallbacks},{"exact_input_map_columns_skipped",conditioning.exact_input_map_columns_skipped},{"circuit_peak_live_cells",conditioning.circuit_peak_live_cells},
+  report["transport_work"]=json::object{{"charts",conditioning.charts},{"centered_charts",conditioning.centered_charts},
+    {"conditioning_subdivisions",conditioning.conditioning_subdivisions},{"circuit_preparations",conditioning.circuit_preparations},
+    {"recurrences",conditioning.recurrences},{"circuit_terms",conditioning.circuit_terms},
     {"compilation_seconds",conditioning.compilation_seconds},{"preparation_seconds",conditioning.preparation_seconds},
-    {"source_seconds",conditioning.source_seconds},{"homogeneous_seconds",conditioning.homogeneous_seconds},
-    {"reference_seconds",conditioning.reference_seconds},{"rational_cross_checks",conditioning.rational_cross_checks},
-    {"rational_homogeneous_columns",conditioning.rational_homogeneous_columns},
-    {"rational_midpoint_charts",conditioning.rational_midpoint_charts},
-    {"reduced_precision_homogeneous_maps",conditioning.reduced_precision_homogeneous_maps},
-    {"full_precision_map_retries",conditioning.full_precision_map_retries},
-    {"conditioning_subdivisions",conditioning.conditioning_subdivisions}};
+    {"recurrence_seconds",conditioning.recurrence_seconds}};
   report["exact_events"]=std::move(events);report["exact_systems_built"]=built;report["exact_systems_reused"]=reused;
   report["total_seconds"]=elapsed(start);output<<json::serialize(report)<<'\n';
   return report.at("status")=="pass"?0:1;

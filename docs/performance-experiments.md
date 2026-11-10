@@ -60,6 +60,10 @@ The initial experiment applied the patch to a generated shadow include tree. Fiv
 
 A direct shadow-chart probe checks that the guarded chart equals the dot result bitwise when the unchanged predicate accepts it, and equals the old scalar result bitwise when the predicate rejects it. Sparse and dense ordinary inputs are accepted, despite the previously recorded radius differences. A dense boundary with an added real radius of `2^-190` in each observable coefficient is rejected; the exact constant source stays unchanged. In all three repetitions, the fallback result matches all 246 scalar output balls bitwise. This broad-input case demonstrates that the guard declines the dot candidate; it does not claim the fallback itself restores already-lost input precision. The surrounding transport retains its existing final acceptance/subdivision logic.
 
+Historical: `run_guarded_tests.py` compiled a test of the removed
+`polynomial_transport.hpp` and was deleted with it; the remaining probe
+commands are kept as a record of how the numbers were obtained.
+
 Reproduce the shadow tests and guarded probe with:
 
 ```sh

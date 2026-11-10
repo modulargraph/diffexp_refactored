@@ -79,14 +79,11 @@ for accuracy checks, timings and applicability. In the complete RL1/RL2
 40-digit examples, Mathematica `TransportTo` now takes 0.65 s / 1.20 s on the
 test laptop, versus 2.88 s / 3.62 s previously (single observations).
 
-**Feynman-trick recursion now also has automatic spectral acceleration.**
-`DiffExpFeynmanTrick` uses the same generic family configuration and selects the
-new backend from the equation structure. You can compare it with
-`"--ft-transport", "taylor"` in the wrapper argument list. See
-[FT algorithms, Mathematica usage and matched timings](docs/ft-spectral.md).
-For the massive-pentagon FT example, matched runs show **2.9–3.6× faster
-ordinary transport and about 1.5× faster complete calculations**. Other tested
-families retain local recurrence where the spectral approach does not help.
+**Feynman-trick recursion uses Taylor charts for its ordinary transport.**
+`DiffExpFeynmanTrick` takes the same generic family configuration. The
+experimental spectral and ultraspherical FT backends were removed: on every
+measured leg of the examples the Taylor charts were as fast or faster. The
+generic transport above keeps its spectral mode.
 
 **The built-in IBP Solver also works through Mathematica.**
 Use `DiffExpFeynmanTrick[family, {"--ibp-provider", "ibp-solver",
@@ -170,12 +167,17 @@ alone are not certified bounds for the full integral.
 
 Use `prepare family.json` to prepare the exact recursion without numerical evaluation.
 Use `--fire-prime /path/to/FIRE7p` for native modular reconstruction. Completed
-exact reductions and endpoint columns are stored under `--cache` and verified
-on reuse. Persistent numerical continuation also retains completed arms.
+exact reductions are stored under `--cache` and verified on reuse. The same
+directory holds the chosen internal master basis of each level and the
+ordinary-transport checkpoints, so an interrupted run resumes its completed
+arms; `--no-numerical-cache` disables these two. Endpoint series are never
+cached: recomputing them is faster than verifying a stored copy.
 
-`--method adjoint|factored|auto|values` selects the transport method; the default
-is `adjoint`. `--ft-transport auto|spectral|taylor` selects ordinary transport
-inside the adjoint/factored calculation, with `auto` as the default. Numerical defaults are endpoint order 32, ordinary order 80,
+`--method adjoint|factored|auto` selects the linear method; the default is
+`adjoint`. `--basis-scan-seconds N` bounds the per-level search for an internal
+master basis with a smaller exact connection (0 disables it). The options
+`--method values`, `--ft-transport` and `--ft-transport-digits` were removed and
+are rejected with that message. Numerical defaults are endpoint order 32, ordinary order 80,
 384 working bits and 28 leaf digits. Preparation has finite budgets, adjustable
 with `--fire-seconds`, `--level-seconds` and `--total-seconds`. These bound exact
 preparation, not the duration of the full numerical calculation.

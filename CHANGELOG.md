@@ -2,6 +2,75 @@
 
 ## Unreleased
 
+- Feynman-trick pipeline cleanup. Removed: the FT spectral and ultraspherical
+  transport backends (`ft_spectral*.hpp`, `ft_ultraspherical*.hpp`,
+  `diagonal_log_gauge.hpp`; Taylor charts were as fast or faster on every
+  measured leg), the legacy "values" method, the on-disk endpoint-series cache
+  (`cached_affine.hpp`; recomputing is faster than verifying a stored series),
+  the endpoint principal-part plumbing and the tools-only epsilon-basis
+  optimiser of the evaluator, and four no-op endpoint options
+  (`univariate_epsilon_recurrence`, `univariate_epsilon_projection`,
+  `cleared_epsilon_projection`, `finite_lag_projection`).
+- CLI and configuration: `--ft-transport`, `--ft-transport-digits` and
+  `--method values` (config: `numerical.transport` other than
+  `"taylor"`/`"auto"`, `numerical.transport_digits`, `numerical.method:
+  "values"`) are rejected with a "removed" message. JSON: `ft_transport` is now
+  `{method, direct_endpoints}`; `timings.spectral_seconds`,
+  `basis_selection.scans_skipped` and `basis_selection.endpoint_series_reused`
+  are gone. The cache directory holds `physical-bases` (was
+  `affine-series/physical-bases-v1`) and `ordinary-transport`;
+  `--no-numerical-cache` disables these two.
+- The physical-basis scan runs at every level (the two skip rules are gone: a
+  smaller connection pays for the scan there as well), no longer tries pure
+  epsilon rescalings, and builds candidates by rank-one updates.
+- Removed tools: `profile_accepted_chart`, `import_centered_checkpoint`,
+  `benchmark_circuit_source`, `benchmark_adjoint_dot`, `benchmark_affine_domain`,
+  `verify_affine_cache`, `diagnose_endpoint_sectors`, and the
+  `tools/performance` experiments built on removed kernels. The series
+  verifier of the former cache is kept as a test oracle
+  (`tests/affine_series_verifier.hpp`).
+- Feynman-trick charts (`rational_line`, the adjoint executors) estimate their
+  Taylor tail and halve a step whose polynomial has not converged at the
+  designed rate. Adjoint checkpoint
+  identities advance, so earlier numerical checkpoints are not reused.
+- The physical-basis scan ranks candidates by the size of their exact
+  connection (the child window may not widen), a chosen basis is installed by
+  exact pullback instead of rebuilding endpoint series, endpoint operators are
+  prepared once per level and extended in epsilon, and the adjoint path
+  requests the per-column structural child window. `epsilon_low` can rise
+  where a leading order was an exact structural zero. Basis cache revision v5.
+- Endpoint constants and divergent-mode constraints fail with a clear error
+  when the endpoint x order does not reach the fixed sector, instead of being
+  silently truncated.
+- Built-in IBP preparation plans the derivative closure first, validates
+  held-out points on the pilot's dependency subset of original equations with
+  one complete elimination per attempt (`--ibp-validation strict` restores a
+  complete elimination at every point), skips and records exceptional sample
+  points, and continues primal-only when a trace exceeds its budget.
+- Generic transport accumulates omitted-tail estimates beside the balls for
+  systems with epsilon-zero feedback. Mathematica `ToPiecewise` evaluates saved
+  Taylor segments on undeformed paths instead of replaying the transport.
+- CLI: numerical options are validated before IBP preparation, ignored
+  `--fire` paths and reused level closures are reported, and the JSON report gains per-phase timings, `ibp_cache` and
+  `basis_selection`.
+
+- Generic transport reuses a chart's Taylor coefficients when an accuracy
+  refinement shortens its step, predicts the shorter step from the truncation
+  estimate, and no longer charges a missed truncation target to the finite-lag
+  recurrence.
+- Rational physical-basis entries use an O(N deg) product recurrence, and the
+  uncertainty map of a centered chart uses a short mantissa.
+- A pole on the transport path or at its endpoint is reported at once, with
+  its path parameter.
+- Fix the kite example with the built-in IBP solver: per-variable degree boxes
+  have their own cap and are no longer cut by a total degree; the CLI enables
+  coordinate slices; budget errors name the exhausted limit.
+- Fix "recursive local operator lookahead invariant failed" after exact-zero
+  padding was trimmed from a child value but not from its stored map.
+- Reject scalar-leaf power divergences that epsilon does not regulate, fix the
+  spectral coupled-block node budget, and repair the stale batched expectation
+  in the conditioned-adjoint test.
+
 - Retry deficient reduced-precision uncertainty maps with the compact recurrence
   at full precision before invoking legacy reference columns.
 - Avoid unnecessary epsilon refinements caused by exact-zero padding while

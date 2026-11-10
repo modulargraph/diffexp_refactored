@@ -49,6 +49,14 @@ The subsequent production integration validates a complete smaller-family path a
 
 ## Reproduce
 
+Historical: the standalone sources under `tools/performance/algebraic_zzz`
+built on `polynomial_transport.hpp`; both were removed when the adjoint
+executors were replaced by one circuit executor. The commands below document
+how the recorded numbers were obtained and no longer run. The exported
+transport request itself is kept as
+`tools/performance/zzz-high-request.json.gz` and runs with
+`gunzip -c tools/performance/zzz-high-request.json.gz | build/diffexp transport -`.
+
 The standalone sources and compressed exported scientific input are in [tools/performance/algebraic_zzz](../tools/performance/algebraic_zzz). No Mathematica session is required. From the repository root:
 
 ```sh

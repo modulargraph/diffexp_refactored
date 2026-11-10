@@ -21,29 +21,10 @@ target_include_directories(diffexp_core INTERFACE
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(diffexp_core INTERFACE PkgConfig::FLINT Boost::json Threads::Threads)
 
-option(DIFFEXP_BUILD_KERNEL_RUNTIME "Build the extracted prepared-input compatibility runtime" OFF)
 set(diffexp_install_targets diffexp_core diffexp)
-if(DIFFEXP_BUILD_KERNEL_RUNTIME)
-add_library(diffexp_kernel STATIC
-  src/kernel/checkpoint.cpp
-  src/kernel/json_codec_backend_info.cpp
-  src/kernel/json_codec.cpp
-  src/kernel/json_codec_recurrence.cpp
-  src/kernel/json_codec_scc.cpp
-  src/kernel/json_codec_support.cpp)
-add_library(DiffExp::kernel ALIAS diffexp_kernel)
-set_target_properties(diffexp_kernel PROPERTIES EXPORT_NAME kernel
-  POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(diffexp_kernel PUBLIC DiffExp::core)
-list(APPEND diffexp_install_targets diffexp_kernel)
-endif()
 
 add_executable(diffexp src/main.cpp)
 target_link_libraries(diffexp PRIVATE DiffExp::core)
-if(DIFFEXP_BUILD_KERNEL_RUNTIME)
-  target_link_libraries(diffexp PRIVATE DiffExp::kernel)
-  target_compile_definitions(diffexp PRIVATE DIFFEXP_WITH_KERNEL_RUNTIME=1)
-endif()
 
 if(BUILD_TESTING)
   set(native_tests transport spectral_transport finite_lag_transport frontend data_geometry tadpole_bubble ibp sunrise_ibp
@@ -144,20 +125,6 @@ if(BUILD_TESTING)
     if(UNIX)
       add_test(NAME henn_boundary.ancillary COMMAND diffexp_test_henn_boundary "${DIFFEXP_HENN_BASIS_FILE}")
     endif()
-  endif()
-  if(DIFFEXP_BUILD_KERNEL_RUNTIME)
-  file(GLOB kernel_tests CONFIGURE_DEPENDS tests/kernel/test_*.cpp)
-  foreach(source IN LISTS kernel_tests)
-    get_filename_component(name ${source} NAME_WE)
-    add_executable(diffexp_${name} ${source})
-    target_link_libraries(diffexp_${name} PRIVATE DiffExp::kernel)
-    # Several inherited regressions use assert(); keep them active in Release.
-    target_compile_options(diffexp_${name} PRIVATE
-      $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
-      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
-    add_test(NAME kernel.${name} COMMAND diffexp_${name})
-    set_tests_properties(kernel.${name} PROPERTIES TIMEOUT 120)
-  endforeach()
   endif()
 endif()
 

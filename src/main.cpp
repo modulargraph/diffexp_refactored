@@ -1,4 +1,3 @@
-#include "diffexp/kernel/json_codec.hpp"
 #include "diffexp/canonical.hpp"
 #include "diffexp/cli.hpp"
 #include "diffexp/transport.hpp"
@@ -346,12 +345,7 @@ int main(int argc, char** argv) {
       }
       return diffexp::run_henn_nonplanar(argv[2],order);
     } else if (command == "backend-info") {
-#ifdef DIFFEXP_WITH_KERNEL_RUNTIME
-      auto information=boost::json::parse(diffexp::kernel::backend_info_json()).as_object();
-      information["compatibility_runtime"]=true;
-#else
-      boost::json::object information{{"standalone_cpp",true},{"librarylink",false},{"compatibility_runtime",false}};
-#endif
+      boost::json::object information{{"standalone_cpp",true},{"librarylink",false}};
       information["package_version"]="2.1.1";information["native_transport"]=true;
       information["feynman_configuration_schema"]="DiffExp.FeynmanFamily/v1";
 #if defined(__unix__) || defined(__APPLE__)
@@ -361,20 +355,8 @@ int main(int argc, char** argv) {
 #endif
       information["transport_schema"]="DiffExp.Transport/v1";
       std::cout<<boost::json::serialize(information)<<'\n';
-    } else if (command == "kernel") {
-#ifdef DIFFEXP_WITH_KERNEL_RUNTIME
-      // One request/response per line; persistent handles live until EOF.
-      std::string request;
-      while (std::getline(std::cin, request)) {
-        if (!request.empty())
-          std::cout << diffexp::kernel::run_recurrence_json(request) << std::endl;
-      }
-      diffexp::kernel::reset_solver_sessions();
-#else
-      throw std::invalid_argument("prepared-input compatibility runtime is not enabled in this build");
-#endif
     } else if (command == "--help") {
-      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | kernel | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N] [--basis-scan-seconds N] [--no-numerical-cache]\n";
+      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N] [--basis-scan-seconds N] [--no-numerical-cache]\n";
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
       std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N. --ibp-validation anchored|strict (default anchored: held-out points eliminate the pilot's dependency subset of original equations, with one complete elimination per attempt; strict eliminates every equation at every point).\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";

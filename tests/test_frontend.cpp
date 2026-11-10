@@ -47,6 +47,15 @@ void recurrence_tests() {
   RationalSystem rational_epsilon({{Exact(f,"1/(1+eps)")}},0,1);
   auto exp=regular_series(rational_epsilon,Rational(0),3,0,3,{{Rational(1),Rational(0),Rational(0),Rational(0)}});
   check(exp.at(2,0,2)==Rational("3/2"),"rational epsilon denominator");
+  // Coupled system, epsilon in a denominator, Laurent window, shifted centre.
+  // The first Taylor coefficient is A(1/3,eps) y(1/3) expanded by hand:
+  //   A00=3eps/2, A01=-3/8, A10=1/6+17eps/36-17eps^2/216+17eps^3/1296, A11=9eps^2/16.
+  RationalSystem coupled({{Exact(f,"eps/(1-x)"),Exact(f,"1/(x-3)")},{Exact(f,"(x+eps)/(2+x*eps)"),Exact(f,"eps^2/(1+x)^2")}},0,1);
+  auto laurent=regular_series(coupled,Rational("1/3"),4,-1,2,
+    {{Rational(1),Rational(0),Rational("2/3"),Rational(0)},{Rational("1/2"),Rational(-1),Rational(0),Rational(5)}});
+  const char* first[2][4]={{"-3/16","15/8","0","-7/8"},{"1/6","17/36","271/864","-19/81"}};
+  for(unsigned i=0;i<2;++i)for(int e=-1;e<=2;++e)
+    check(laurent.at(1,i,e)==Rational(first[i][e+1]),"top of a Laurent window with an epsilon-dependent denominator");
 }
 
 void h48_test() {

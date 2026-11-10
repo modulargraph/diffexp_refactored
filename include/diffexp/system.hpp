@@ -1,6 +1,5 @@
 #pragma once
 #include "diffexp/exact.hpp"
-#include "diffexp/kernel/recurrence.hpp"
 #include <map>
 
 namespace diffexp {
@@ -25,8 +24,13 @@ class RationalSystem {
   const Exact& denominator() const { return q_; }
   const Matrix& cleared_matrix() const { return cleared_; }
 
-  kernel::RecurrenceProblem<Rational> regular_problem(
-      const Rational& center,unsigned order,int low,int high,
+  // Exact Taylor coefficients about a regular centre. With Q the cleared
+  // denominator and P=Q*A, both polynomial in x and epsilon, Q y' = P y gives
+  //   q00 (n+1) y[n+1][e] = sum P[a][e1] y[n-a][e-e1]
+  //                         - sum_{(a,e1)!=(0,0)} q[a][e1] (n+1-a) y[n+1-a][e-e1],
+  // which is causal in both the Taylor order and the epsilon power, so the
+  // window low..high is exact for every retained coefficient.
+  std::vector<Rational> regular_coefficients(const Rational& center,unsigned order,int low,int high,
       const std::vector<std::vector<Rational>>& boundary) const {
     if (high<low || boundary.size()!=dimension() || order>1000000 ||
         static_cast<std::int64_t>(high)-low+1>1000000)
@@ -36,50 +40,44 @@ class RationalSystem {
       if (row.size()!=width) throw std::invalid_argument("boundary epsilon width mismatch");
     auto substitutions=identity_substitution();
     substitutions[x_]=substitutions[x_]+q_.constant(center);
-    auto q=q_.substitute(substitutions);
+    const auto q=q_.substitute(substitutions);
     auto origin=identity_substitution();
     origin[x_]=q_.constant(0); origin[eps_]=q_.constant(0);
     const auto leading=q.substitute(origin);
     if (!leading.is_rational()) throw std::invalid_argument("system has unspecialized parameters");
     if (leading.is_zero())
       throw std::domain_error("chart is singular or not epsilon regular; a Frobenius compiler is required");
-    kernel::RecurrenceProblem<Rational> p;
-    p.dimension=dimension(); p.nmax=order; p.frame_base=low; p.frame_width=width;
-    p.log_max=0; p.a_target=Rational(0); p.b_target=Rational(0); p.a_shift_min=0;
-    auto qs=coefficients(q);
-    for (const auto& [powers,c]:qs) {
-      auto [n,e]=powers;
-      if (p.d_lags.size()<=n) p.d_lags.resize(n+1);
-      p.d_lags[n].push_back({e,c});
-    }
-    std::map<unsigned,std::map<int,std::vector<kernel::MatrixEntry<Rational>>>> lags;
+    const auto q00=leading.rational();
+    const auto denominator=coefficients(q);
+    struct Entry {unsigned row,column;Coefficients terms;};
+    std::vector<Entry> entries;
     for (unsigned i=0;i<dimension();++i)
-      for (unsigned j=0;j<dimension();++j)
-        for (const auto& [powers,c]:coefficients(cleared_[i][j].substitute(substitutions))) {
-          auto [n,e]=powers;
-          lags[n+1][e].push_back({i,j,c}); // theta=t d/dt, so Nhat=t P.
-        }
-    p.nhat_lags.resize(lags.empty()?1:lags.rbegin()->first+1);
-    for (auto& lag:p.nhat_lags) lag.valuations.assign(dimension()*dimension(),kernel::kCompleteInfinity);
-    for (const auto& [n,shifts]:lags)
-      for (const auto& [e,entries]:shifts) {
-        p.nhat_lags[n].polynomial.push_back({e,entries});
-        for (const auto& entry:entries) {
-          auto& v=p.nhat_lags[n].valuations[entry.row*dimension()+entry.col]; v=std::min(v,e);
-        }
+      for (unsigned j=0;j<dimension();++j) {
+        auto terms=coefficients(cleared_[i][j].substitute(substitutions));
+        if (!terms.empty()) entries.push_back({i,j,std::move(terms)});
       }
-    if (p.d_lags[0].size()==1 && p.d_lags[0][0].shift==0)
-      p.d0_inverse_scalar=Rational(1)/p.d_lags[0][0].value;
-    for (unsigned i=0;i<dimension();++i) p.blocks.push_back({{i}});
-    p.schedule.resize(order+1);
-    for (unsigned n=0;n<=order;++n) {
-      p.a_shifts.emplace_back(n);
-      for (unsigned i=0;i<dimension();++i)
-        p.schedule[n].push_back({n?kernel::StepCase::Taylor:kernel::StepCase::Resonant,Rational(n),Rational(0)});
-    }
-    for (const auto& row:boundary) p.initial.insert(p.initial.end(),row.begin(),row.end());
-    p.initial_validity.assign(dimension(),high);
-    return p;
+    const unsigned d=dimension();
+    std::vector<Rational> y(static_cast<std::size_t>(order+1)*d*width,Rational(0));
+    const auto at=[&](unsigned n,unsigned i,unsigned e)->Rational& {return y[(static_cast<std::size_t>(n)*d+i)*width+e];};
+    for (unsigned i=0;i<d;++i) for (unsigned e=0;e<width;++e) at(0,i,e)=boundary[i][e];
+    for (unsigned n=0;n<order;++n)
+      for (unsigned e=0;e<width;++e) {
+        std::vector<Rational> next(d,Rational(0));
+        for (const auto& entry:entries)
+          for (const auto& [powers,c]:entry.terms) {
+            const auto [a,shift]=powers;
+            if (a<=n && static_cast<unsigned>(shift)<=e) next[entry.row]+=c*at(n-a,entry.column,e-shift);
+          }
+        for (const auto& [powers,c]:denominator) {
+          const auto [a,shift]=powers;
+          if ((a==0 && shift==0) || a>n+1 || static_cast<unsigned>(shift)>e) continue;
+          const auto weight=c*Rational(static_cast<long>(n+1-a));
+          for (unsigned i=0;i<d;++i) next[i]-=weight*at(n+1-a,i,e-shift);
+        }
+        const auto pivot=q00*Rational(static_cast<long>(n+1));
+        for (unsigned i=0;i<d;++i) at(n+1,i,e)=next[i]/pivot;
+      }
+    return y;
   }
  private:
   Matrix matrix_,cleared_;
@@ -131,14 +129,7 @@ struct TaylorSeries {
 
 inline TaylorSeries regular_series(const RationalSystem& system,const Rational& center,
     unsigned order,int low,int high,const std::vector<std::vector<Rational>>& boundary) {
-  auto p=system.regular_problem(center,order,low,high,boundary);
-  auto r=kernel::RecurrenceSolver<Rational>(p).run();
-  if (r.top_valid<high) throw std::runtime_error("recurrence returned incomplete requested window");
-  TaylorSeries out{order,p.dimension,low,high,{}};
-  const auto logs=p.log_max+2;
-  for (unsigned n=0;n<=order;++n) for (unsigned i=0;i<p.dimension;++i)
-    for (unsigned e=0;e<p.frame_width;++e)
-      out.coefficients.push_back(r.u.at(((static_cast<std::size_t>(n)*logs)*p.dimension+i)*p.frame_width+e));
-  return out;
+  return {order,static_cast<unsigned>(system.dimension()),low,high,
+    system.regular_coefficients(center,order,low,high,boundary)};
 }
 }  // namespace diffexp

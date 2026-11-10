@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Removed the inherited prepared-input compatibility runtime (`src/kernel`,
+  `tests/kernel`, the `kernel` command and `DIFFEXP_BUILD_KERNEL_RUNTIME`).
+  The exact `series` command now uses a direct recurrence; it also corrects
+  the highest retained epsilon coefficient of a Laurent window when the
+  cleared denominator depends on epsilon.
 - Feynman-trick pipeline cleanup. Removed: the FT spectral and ultraspherical
   transport backends (`ft_spectral*.hpp`, `ft_ultraspherical*.hpp`,
   `diagonal_log_gauge.hpp`; Taylor charts were as fast or faster on every

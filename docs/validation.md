@@ -3,9 +3,15 @@
 The C++ mathematical backend, command-line interface and Mathematica wrapper
 are validated separately, with numerical accuracy and runtime recorded explicitly.
 
-Version 2.1.1 passes **88/88 native and external-reduction regressions**, plus
-**52/52 optional compatibility-runtime tests** and both Mathematica smoke and
-compatibility tests. Focused transport, configuration and CLI checks also pass
+The current tree passes its 80 native regressions on Linux (GCC 13, FLINT
+3.4.0); see [timings](timings.md) for the ten Feynman-trick examples run with
+the built-in IBP solver. The inherited prepared-input compatibility runtime
+and its 52 tests were removed; nothing in the native core or the Mathematica
+wrapper used it. The statements below record the 2.1.1 release checks, made
+on macOS before that rework and including the Mathematica smoke and
+compatibility tests, which have not been repeated since.
+
+Version 2.1.1 passed **88/88 native and external-reduction regressions**. Focused transport, configuration and CLI checks also pass
 after the final recurrence refinements. All nine standard original example
 groups pass through the Mathematica process wrapper, including the full
 polylogarithm workflow, all four planar families, supplied-boundary Henn
@@ -96,6 +102,3 @@ import checks. `DIFFEXP_WOLFRAMSCRIPT` enables the real Mathematica process-wrap
 test; an explicit `DIFFEXP_WOLFRAM_KERNEL` can select the licensed installation.
 None of these optional dependencies is needed for the default native build.
 
-The optional inherited C++ compatibility runtime can be tested separately with
-`-DDIFFEXP_BUILD_KERNEL_RUNTIME=ON` and `ctest -R '^kernel\.'`. It is not used by
-the Mathematica wrapper.

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "diffexp/jet.hpp"
-#include "diffexp/kernel/local_solution.hpp"
+#include "diffexp/kernel/magnitude.hpp"
 #include <limits>
 
 namespace diffexp {

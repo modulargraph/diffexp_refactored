@@ -206,10 +206,6 @@ See [timings](docs/timings.md) for measured runtimes and
 precision scope and Banana4 reference comparisons. The [example guide](docs/examples.md)
 describes the original-data downloads and the opt-in FT acceptance runner.
 
-The default build uses the new native core. The extracted prepared-input
-compatibility runtime is available with `-DDIFFEXP_BUILD_KERNEL_RUNTIME=ON`
-for inherited regression tests; the Mathematica wrapper does not use it.
-
 DiffExp 2.1 replaces the previous application at the repository root. Earlier
 versions remain available in Git history.
 

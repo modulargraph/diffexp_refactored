@@ -41,10 +41,8 @@ See [endpoint domains](endpoint-domain-constraints.md),
 [native IBP](native-ibp.md), and [validation](validation.md).
 
 The C++ core is independent of Wolfram. Data imports from historical `.m` files
-parse a restricted data grammar without evaluating Wolfram code. The optional
-prepared-input compatibility runtime contains inherited C++ regression
-machinery and is disabled by default. Neither the public wrapper nor the
-native recursion pipeline needs a LibraryLink interface.
+parse a restricted data grammar without evaluating Wolfram code. Neither the
+public wrapper nor the native recursion pipeline needs a LibraryLink interface.
 
 
 ## Public input interfaces

@@ -35,7 +35,7 @@ int main(){try {
     options.chart_observer=[&](unsigned leg,double from,double to,const LaurentRows&){resumed_sequence.emplace_back(leg,from,to);};
     equal(continuous,transport_adjoint_rows(a,initial,forcing,path,options));
     require(resumed_sequence==std::vector<Chart>(sequence.begin()+stop+1,sequence.end()),"continuation changed original future chart parameters");
-    if(stop+1==snapshots.size())require(work.polynomial_charts==0 && work.rational_compilations==0,"completed continuation repeated recurrence work");
+    if(stop+1==snapshots.size())require(work.charts==0 && work.recurrences==0,"completed continuation repeated recurrence work");
   }
   const auto invalid=[&](auto change) {
     auto state=snapshots.front();change(state);AdjointOptions opt;opt.continuation=std::make_shared<const AdjointContinuation>(state);
@@ -57,9 +57,9 @@ int main(){try {
   LaurentRows wide{0,0,{{{first},{second}},{{second},{first}}}};
   const auto large=one.constant(1000);
   const ExactEpsilonMatrix nilpotent{{-large,-large},{large,large}},unforced{{zero,zero},{zero,zero}};
-  for(bool polynomial:{true,false}) {
+  {
     AdjointContinuation restart;AdjointConditioningStats work;unsigned count=0;
-    options=AdjointOptions{};options.polynomial_recurrence=polynomial;options.max_rows_per_batch=1;
+    options=AdjointOptions{};options.max_rows_per_batch=1;
     options.conditioning_stats=&work;
     options.continuation_observer=[&](const AdjointContinuation& state){if(++count==1)restart=state;};
     const auto expected=transport_adjoint_rows(nilpotent,wide,unforced,path,options);
@@ -74,19 +74,20 @@ int main(){try {
   const auto key=cp::identity(a,initial,forcing,path,options);const auto file=directory/(key+".json");
   auto different=initial;different.coefficients[0][0][0]+=B(1);
   require(key!=cp::identity(a,different,forcing,path,options),"cache identity omitted original input balls");
-  for(unsigned flag=0;flag<3;++flag) {
+  for(unsigned flag=0;flag<6;++flag) {
     auto variant=options;
-    if(flag==0)variant.circuit_grouped_dot=!variant.circuit_grouped_dot;
-    if(flag==1)variant.compact_centered_only=!variant.compact_centered_only;
-    if(flag==2)variant.compact_centered_recovery=!variant.compact_centered_recovery;
-    require(key!=cp::identity(a,initial,forcing,path,variant),"cache identity omitted compact execution policy");
+    if(flag==0)variant.centered_input=!variant.centered_input;
+    if(flag==1)variant.truncation_bits=120;
+    if(flag==2)variant.max_conditioning_halvings=3;
+    if(flag==3)variant.max_rows_per_batch=1;
+    if(flag==4)variant.max_circuit_terms=1000;
+    if(flag==5)variant.max_circuit_operations=1000000;
+    require(key!=cp::identity(a,initial,forcing,path,variant),"cache identity omitted an execution policy or budget");
   }
   auto alternate=options;alternate.taylor_order=81;
   require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted order");
-  alternate=options;alternate.centered_map_working_bits=128;
-  require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted homogeneous map precision");
-  alternate=options;alternate.centered_before_rational=true;
-  require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted centered routing");
+  alternate=options;alternate.max_taylor_cells=1000000;
+  require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted the Taylor workspace budget");
   alternate=options;alternate.max_charts_per_leg=19999;
   require(key!=cp::identity(a,initial,forcing,path,alternate),"cache identity omitted finite chart budget");
   require(key!=cp::identity({{two/(x+two)}},initial,forcing,path,options),"cache identity omitted connection");
@@ -105,6 +106,25 @@ int main(){try {
   const auto saved_count=stats.saved;options.chart_observer=[](unsigned,double,double,const LaurentRows&){throw std::runtime_error("completed arm unexpectedly ran");};
   equal(continuous,cp::transport(a,initial,forcing,path,options,storage));
   require(stats.saved==saved_count && stats.completed_reused==1,"completed arm was recomputed or rewritten");
+  {
+    // A state larger than the file budget is not persisted, but the transport
+    // it belongs to must still complete with the same retained balls.
+    const auto small=directory/"oversize";cp::Statistics tiny_stats;cp::Options tiny{small,64,&tiny_stats};
+    options=AdjointOptions{};equal(continuous,cp::transport(a,initial,forcing,path,options,tiny));
+    require(tiny_stats.skipped_oversize==1 && tiny_stats.saved==0 && !std::filesystem::exists(small/(key+".json")),
+      "oversize checkpoint aborted the transport or was written");
+    // Intermediate saves are throttled; the first accepted chart and the
+    // completed arm are always persisted and remain reusable.
+    const auto slow=directory/"throttled";cp::Statistics slow_stats;cp::Options throttled{slow,64*1024*1024,&slow_stats,3600};
+    equal(continuous,cp::transport(a,initial,forcing,path,options,throttled));
+    require(slow_stats.saved==2,"throttled checkpoints did not keep exactly the first chart and the completed arm");
+    options.chart_observer=[](unsigned,double,double,const LaurentRows&){throw std::runtime_error("completed arm unexpectedly ran");};
+    equal(continuous,cp::transport(a,initial,forcing,path,options,throttled));
+    require(slow_stats.completed_reused==1,"throttled completed arm was not reusable");
+    cp::Statistics eager_stats;cp::Options eager{directory/"eager",64*1024*1024,&eager_stats,0};
+    options=AdjointOptions{};equal(continuous,cp::transport(a,initial,forcing,path,options,eager));
+    require(eager_stats.saved==snapshots.size(),"zero save interval did not persist every accepted chart");
+  }
   auto corrupt=saved_envelope;corrupt.as_object().at("payload").as_object()["leg"]=42;
   cp::detail::publish(file,boost::json::serialize(corrupt));
   rejects([&]{cp::transport(a,initial,forcing,path,options,storage);},"corrupt matching checkpoint silently restarted");

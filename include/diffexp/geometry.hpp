@@ -58,60 +58,90 @@ inline Exact polynomial_norm(const Exact& polynomial,unsigned variable,const Exa
   return reduce_square(polynomial*polynomial.substitute(vars),variable,square);
 }
 
-// Isolate all complex roots of a real rational polynomial, stripping repeated
-// factors first. Only a full-degree Acb isolation result is accepted.
-inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial,unsigned variable,slong bits=256) {
-  using B=kernel::ComplexBall;
+// Isolated complex roots of an exact real polynomial with their exact
+// multiplicities, from its squarefree factorization. Only a full-degree Acb
+// isolation result is accepted.
+struct IsolatedRoot {kernel::ComplexBall value;unsigned multiplicity;};
+inline std::vector<IsolatedRoot> isolated_roots(const fmpq_poly_t polynomial,slong bits) {
   struct Polys {
-    fmpq_poly_t q;fmpz_poly_t z;fmpz_poly_factor_t factors;acb_poly_t a;
-    Polys(){fmpq_poly_init(q);fmpz_poly_init(z);fmpz_poly_factor_init(factors);acb_poly_init(a);}
-    ~Polys(){acb_poly_clear(a);fmpz_poly_factor_clear(factors);fmpz_poly_clear(z);fmpq_poly_clear(q);}
+    fmpz_poly_t z;fmpz_poly_factor_t factors;acb_poly_t a;
+    Polys(){fmpz_poly_init(z);fmpz_poly_factor_init(factors);acb_poly_init(a);}
+    ~Polys(){acb_poly_clear(a);fmpz_poly_factor_clear(factors);fmpz_poly_clear(z);}
   } p;
+  struct Roots {
+    acb_ptr values;slong size;
+    explicit Roots(slong n):values(_acb_vec_init(n)),size(n){}
+    ~Roots(){_acb_vec_clear(values,size);}
+    Roots(const Roots&)=delete;
+  };
+  if(fmpq_poly_is_zero(polynomial))throw std::domain_error("identically zero singularity polynomial");
+  fmpq_poly_get_numerator(p.z,polynomial);fmpz_poly_factor_squarefree(p.factors,p.z);
+  std::vector<IsolatedRoot> out;
+  for(slong i=0;i<p.factors->num;++i) {
+    auto degree=fmpz_poly_degree(p.factors->p+i);
+    if(degree<1)continue;
+    Roots roots(degree);
+    // The factor is exact and squarefree, so its roots are simple: failure to
+    // isolate them is a precision shortfall of this attempt, not of the input.
+    slong working=bits,found=0;
+    for(unsigned attempt=0;;++attempt) {
+      acb_poly_set_fmpz_poly(p.a,p.factors->p+i,working);
+      found=acb_poly_find_roots(roots.values,p.a,nullptr,1000,working);
+      if(found==degree || attempt==4)break;
+      working*=2;
+    }
+    if(found!=degree)throw std::runtime_error("complex root isolation incomplete");
+    for(slong j=0;j<degree;++j) {
+      IsolatedRoot root{{},static_cast<unsigned>(p.factors->exp[i])};acb_set(root.value.raw(),roots.values+j);
+      out.push_back(std::move(root));
+    }
+  }
+  return out;
+}
+// Isolate all complex roots of a real rational polynomial, stripping repeated
+// factors first.
+inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial,unsigned variable,slong bits=256) {
+  struct Poly {fmpq_poly_t q;Poly(){fmpq_poly_init(q);}~Poly(){fmpq_poly_clear(q);}} p;
   if(polynomial.is_zero())throw std::domain_error("identically zero singularity polynomial");
   auto denominator=polynomial.denominator().rational();
   for(const auto& term:polynomial.numerator_terms()) {
     for(unsigned i=0;i<term.powers.size();++i)
       if(i!=variable && term.powers[i])throw std::invalid_argument("singularity polynomial not univariate");
     if(term.powers[variable]>10000)throw std::invalid_argument("root isolation degree limit");
-    fmpq_t q;fmpq_init(q);fmpq_set_str(q,(term.coefficient/denominator).str().c_str(),10);fmpq_canonicalise(q);
-    fmpq_poly_set_coeff_fmpq(p.q,term.powers[variable],q);fmpq_clear(q);
+    const auto coefficient=term.coefficient/denominator;
+    fmpq_poly_set_coeff_fmpq(p.q,term.powers[variable],coefficient.raw());
   }
-  fmpq_poly_get_numerator(p.z,p.q);fmpz_poly_factor_squarefree(p.factors,p.z);
-  std::vector<B> out;
-  for(slong i=0;i<p.factors->num;++i) {
-    auto degree=fmpz_poly_degree(p.factors->p+i);
-    if(degree<1)continue;
-    acb_poly_set_fmpz_poly(p.a,p.factors->p+i,bits);
-    acb_ptr roots=_acb_vec_init(degree);
-    auto found=acb_poly_find_roots(roots,p.a,nullptr,1000,bits);
-    if(found!=degree) {_acb_vec_clear(roots,degree);throw std::runtime_error("complex root isolation incomplete");}
-    for(slong j=0;j<degree;++j){B b;acb_set(b.raw(),roots+j);out.push_back(std::move(b));}
-    _acb_vec_clear(roots,degree);
-  }
+  std::vector<kernel::ComplexBall> out;
+  for(auto& root:isolated_roots(p.q,bits))out.push_back(std::move(root.value));
   return out;
 }
 
-// Every step lies inside one quarter of the distance to every isolated
-// singularity. Rounding is toward zero, so doubles only shorten certified steps.
-inline double clearance_endpoint(double center,const std::vector<kernel::ComplexBall>& roots) {
-  double clearance=4;
+// Every step lies inside `fraction` (one quarter unless the caller controls
+// convergence by other means) of the distance to every isolated singularity.
+// Rounding is toward zero, so doubles only shorten certified steps.
+inline double clearance_endpoint(double center,const std::vector<kernel::ComplexBall>& roots,double fraction=0.25) {
+  if(!(fraction>0) || !(fraction<1))throw std::invalid_argument("chart clearance fraction must lie in (0,1)");
+  double clearance=1/fraction;
   kernel::ComplexBall point;acb_set_d(point.raw(),center);
   for(const auto& root:roots) {
     auto delta=point-root;arf_t lower;arf_init(lower);
     acb_get_abs_lbound_arf(lower,delta.raw(),kernel::ComplexBall::precision());
     clearance=std::min(clearance,arf_get_d(lower,ARF_RND_FLOOR));arf_clear(lower);
   }
-  double h=std::min(1-center,clearance/4);
+  double h=std::min(1-center,clearance*fraction);
   if(!(h>0) || center+h==center)throw std::runtime_error("no positive certified chart clearance");
   double endpoint=std::min(1.0,center+h);
   // Certify the endpoint after floating-point addition, not just the proposed
   // step before rounding. Move inward by ulps if the rounded sum overshoots.
+  arf_t scale;arf_init(scale);arf_set_d(scale,fraction);
+  struct Clear {arf_struct* value;~Clear(){arf_clear(value);}} clear_scale{scale};
   for(unsigned attempt=0;attempt<32;++attempt) {
     kernel::ComplexBall end;acb_set_d(end.raw(),endpoint);auto distance=end-point;
-    arf_t used;arf_init(used);acb_get_abs_ubound_arf(used,distance.raw(),kernel::ComplexBall::precision());arf_mul_2exp_si(used,used,2);
+    arf_t used;arf_init(used);acb_get_abs_ubound_arf(used,distance.raw(),kernel::ComplexBall::precision());
     bool safe=true;
     for(const auto& root:roots) {
       auto delta=point-root;arf_t lower;arf_init(lower);acb_get_abs_lbound_arf(lower,delta.raw(),kernel::ComplexBall::precision());
+      arf_mul(lower,lower,scale,kernel::ComplexBall::precision(),ARF_RND_FLOOR);
       safe=safe && arf_cmp(used,lower)<=0;arf_clear(lower);
     }
     arf_clear(used);

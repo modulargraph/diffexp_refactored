@@ -28,7 +28,7 @@ class LinearUncertainty {
     out.offset_.assign(map.size(),Ball(0));
     for (std::size_t i=0;i<map.size();++i)
       for (std::size_t j=0;j<offset_.size();++j)
-        if (!map[i][j].is_zero()) out.offset_[i]+=Ball::from_strings(map[i][j].str())*offset_[j];
+        if (!map[i][j].is_zero()) out.offset_[i]+=ball(map[i][j])*offset_[j];
     for (auto& [id,term]:out.sources_) {
       const auto& old=sources_.at(id).map;
       term.map.assign(map.size(),std::vector<Rational>(old[0].size(),Rational(0)));
@@ -46,12 +46,15 @@ class LinearUncertainty {
         for (std::size_t j=0;j<term.source->values.size();++j)
           if (!term.map[i][j].is_zero()) {
             const auto value=term.map[i][j]==Rational(1) ? term.source->values[j] :
-                Ball::from_strings(term.map[i][j].str())*term.source->values[j];
+                ball(term.map[i][j])*term.source->values[j];
             if (out[i].is_zero()) out[i]=value; else out[i]+=value;
           }
     return out;
   }
  private:
+  static Ball ball(const Rational& value) {
+    Ball out; acb_set_fmpq(out.raw(),value.raw(),Ball::precision()); return out;
+  }
   struct Term { SourceRef source; Matrix map; };
   std::vector<Ball> offset_;
   std::map<std::string,Term> sources_;

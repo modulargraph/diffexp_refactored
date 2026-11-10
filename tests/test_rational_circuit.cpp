@@ -1,5 +1,4 @@
 #include "diffexp/rational_circuit.hpp"
-#include "diffexp/polynomial_transport.hpp"
 #include <iostream>
 using namespace diffexp;
 namespace rc=rational_circuit;
@@ -64,7 +63,12 @@ int main() {
       rc::Statistics stats;
       auto value=rc::chart(prepared,boundary,step,&stats);
       close(value,rational_chart(expanded,boundary,center,step,32));
-      close(value,polynomial_transport::chart(polynomial_transport::compile(entries,3,0,1,4,32),boundary,center,step,32));
+      // The step enters only the final evaluation: one expansion serves
+      // every endpoint, each against the independent convolution reference.
+      const auto series=rc::expand(prepared,boundary);
+      const B shorter=step*B::from_strings("0.375");
+      close(rc::evaluate(series,step),value);
+      close(rc::evaluate(series,shorter),rational_chart(expanded,boundary,center,shorter,32));
       check(stats.live_cells==prepared.data().live_cells,"live cell schedule differs from execution");
       check(stats.addmul_operations+stats.scalar_operations<=prepared.data().operation_upper_bound,"operation prediction is too small");
       check(stats.addmul_operations>0 && stats.scalar_operations>0,"work not counted");
@@ -137,6 +141,36 @@ int main() {
     rejects<std::length_error>([&]{rc::prepare(rc::compile(entries,3,0,1,4,32,options),center,32);},"storage budget ignored");
     options=rc::Options{};options.max_operations=10;
     rejects<std::length_error>([&]{rc::prepare(rc::compile(entries,3,0,1,4,32,options),center,32);},"operation budget ignored");
+    check(rc::operation_upper_bound(rc::compile(entries,3,0,1,4,32).data(),32,5)==rc::prepare(rc::compile(entries,3,0,1,4,32),center,32).data().operation_upper_bound,
+          "operation estimate differs from preparation");
+    rejects<std::length_error>([&]{rc::operation_upper_bound(rc::compile(entries,3,0,1,4,32,options).data(),32,5);},"operation estimate ignored budget");
+    {
+      // y0'=y1/(1-x)^3 with a constant, slightly uncertain y1. The retained
+      // polynomial is sum_{m=1..80} (m+1)/2 h^m * y1 exactly. An interval
+      // recurrence for the quotient y1/(1-x)^3 would inflate the radius by
+      // about (h/(2^(1/3)-1))^80 at h=0.6; the majorized quotient must not.
+      B source(1);arb_add_error_2exp_si(acb_realref(source.raw()),-200);
+      const B h=B::from_strings("0.6");B oracle(0),power(1);
+      for(unsigned m=1;m<=80;++m){power*=h;oracle+=B(m+1)/B(2)*power;}
+      const auto got=rc::chart(rc::compile({{0,1,0,e("1/(1-x)^3")}},2,0,1,0,80),{{B(0)},{source}},B(0),h,80);
+      check(acb_contains(got[0][0].raw(),(oracle*source).raw()) || acb_overlaps(got[0][0].raw(),(oracle*source).raw()),
+            "triple-pole quotient excluded the exact retained polynomial");
+      mag_t radius,bound;mag_init(radius);mag_init(bound);
+      mag_hypot(radius,arb_radref(acb_realref(got[0][0].raw())),arb_radref(acb_imagref(got[0][0].raw())));
+      mag_set_ui_2exp_si(bound,1,-180);
+      const bool tight=mag_cmp(radius,bound)<0;mag_clear(radius);mag_clear(bound);
+      check(tight,"triple-pole quotient wrapped its input uncertainty");
+      check(rc::compile({{0,1,0,e("1/(1-x)^3")}},2,0,1,0,80).data().denominators.at(0).poles.size()==1 &&
+            rc::compile({{0,1,0,e("1/(1-x)^3")}},2,0,1,0,80).data().denominators.at(0).poles[0].multiplicity==3,
+            "denominator root multiplicity");
+    }
+    // The retained tail of a pole-free but stiff chart contradicts the
+    // quarter-radius step; a converged chart does not.
+    rc::Statistics stiff,calm;
+    (void)rc::chart(rc::compile({{0,0,0,e("40")}},1,0,1,0,80),{{B(1)}},B(0),B(1),80,&stiff);
+    (void)rc::chart(rc::compile({{0,0,0,e("2")}},1,0,1,0,80),{{B(1)}},B(0),B(1),80,&calm);
+    check(!taylor_tail_consistent(stiff.truncation_log2,80,B::precision()) && taylor_tail_consistent(calm.truncation_log2,80,B::precision()),
+          "rational circuit Taylor tail estimate");
     std::cout << "Rational circuit reference, epsilon, complex, ring, alias, independent RHS, budgets and domain checks passed\n";
   } catch (const std::exception &error) {std::cerr<<error.what()<<'\n';return 1;}
 }

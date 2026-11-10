@@ -80,7 +80,7 @@ int main(int argc,char** argv) {
     output["result_arithmetic"]=quality(result);output["result_rows"]=exact_rows(result);
     output["status"]="completed_diagnostic";
   }catch(const std::exception& error){output["error"]=error.what();code=1;}
-  output["conditioning"]={{"polynomial_charts",stats.polynomial_charts},{"rational_cross_checks",stats.rational_cross_checks},{"centered_charts",stats.centered_charts},{"homogeneous_maps",stats.homogeneous_chart_maps},{"subdivisions",stats.conditioning_subdivisions},{"polynomial_homogeneous_columns",stats.polynomial_homogeneous_columns},{"rational_homogeneous_columns",stats.rational_homogeneous_columns}};
+  output["conditioning"]={{"charts",stats.charts},{"tail_limited_charts",stats.tail_limited_charts},{"centered_charts",stats.centered_charts},{"conditioning_subdivisions",stats.conditioning_subdivisions},{"recurrences",stats.recurrences}};
   output["native_elapsed_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
   output["process_cpu_seconds"]=static_cast<double>(std::clock()-cpu)/CLOCKS_PER_SEC;
   std::cout<<json::serialize(output)<<'\n';return code;

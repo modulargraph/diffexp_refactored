@@ -4,11 +4,17 @@
 
 namespace diffexp::adjoint_checkpoint {
 namespace json=boost::json;namespace fs=std::filesystem;
-struct Statistics {std::size_t loaded=0,saved=0,completed_reused=0;};
+// skipped_oversize counts transports whose state no longer fits max_bytes:
+// they continue without further checkpoints instead of being aborted.
+struct Statistics {std::size_t loaded=0,saved=0,completed_reused=0,skipped_oversize=0;};
 struct Options {
   fs::path directory;
   std::size_t max_bytes=64*1024*1024;
   Statistics* statistics=nullptr;
+  // Intermediate charts are persisted at most this often. The first accepted
+  // chart of a run and the end of the path are always saved, so interruption
+  // loses at most this much work and completed arms stay reusable.
+  double min_save_interval_seconds=1;
 };
 // The algorithm revision must change when retained arithmetic or chart
 // selection changes. Observers and counters are deliberately not scientific
@@ -25,27 +31,22 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
   for(const auto* m:{&matrix,&forcing})for(const auto& row:*m)for(const auto& entry:row)check_field(entry);
   for(const auto& row:initial.coefficients)for(const auto& series:row)for(const auto& b:series)
     if(!b.is_finite())throw std::invalid_argument("checkpoint initial ball is nonfinite");
-  const bool compact=options.polynomial_recurrence && options.rational_circuit_recurrence;
-  json::object payload{{"algorithm",compact?"DiffExp.AdjointOriginalPath/v9-circuit-precision-retry":
-      "DiffExp.AdjointOriginalPath/v5"},
+  json::object payload{{"algorithm","DiffExp.AdjointOriginalPath/v11-tail-selected-steps"},
     {"flint_version",FLINT_VERSION},{"precision_bits",Jet::Ball::precision()},
     {"field_symbols",symbols},{"connection",numerical_rows_io::exact_matrix(matrix)},
     {"forcing",numerical_rows_io::exact_matrix(forcing)},{"initial",numerical_rows_io::exact_rows(initial)},
-    {"path",path},{"taylor_order",options.taylor_order},{"max_charts_per_leg",options.max_charts_per_leg},
-    {"max_taylor_cells",options.max_taylor_cells},{"polynomial_recurrence",options.polynomial_recurrence},
-    {"centered_input",options.centered_input},{"centered_before_rational",options.centered_before_rational},{"centered_map_working_bits",options.centered_map_working_bits},{"max_centered_map_cells",options.max_centered_map_cells},
-    {"max_conditioning_halvings",options.max_conditioning_halvings},{"max_rows_per_batch",options.max_rows_per_batch}};
-  if(compact) {
-    payload.emplace("circuit_grouped_dot",options.circuit_grouped_dot);
-    payload.emplace("compact_centered_only",options.compact_centered_only);
-    payload.emplace("compact_centered_recovery",options.compact_centered_recovery);
-  }
+    {"path",path},{"taylor_order",options.taylor_order},{"truncation_bits",options.truncation_bits},
+    {"max_charts_per_leg",options.max_charts_per_leg},{"max_taylor_cells",options.max_taylor_cells},
+    {"max_circuit_terms",options.max_circuit_terms},{"max_circuit_operations",options.max_circuit_operations},
+    {"max_rows_per_batch",options.max_rows_per_batch},{"centered_input",options.centered_input},
+    {"max_conditioning_halvings",options.max_conditioning_halvings}};
   return artifacts::detail::sha256(artifacts::detail::canonical(payload));
 }
 namespace detail {
 inline void limits(const Options& options) {
-  if(!options.max_bytes || options.max_bytes>1024ULL*1024*1024)
-    throw std::invalid_argument("ordinary checkpoint file budget");
+  if(!options.max_bytes || options.max_bytes>1024ULL*1024*1024 ||
+      !(options.min_save_interval_seconds>=0) || options.min_save_interval_seconds>86400)
+    throw std::invalid_argument("ordinary checkpoint file budget or save interval");
 }
 inline void publish(const fs::path& target,const std::string& bytes) {
   fs::create_directories(target.parent_path());
@@ -114,13 +115,29 @@ inline LaurentRows transport(const ExactEpsilonMatrix& matrix,LaurentRows initia
     options.continuation=std::make_shared<const AdjointContinuation>(std::move(saved));
   }
   const auto observer=options.continuation_observer;
+  // The last nondegenerate leg: its endpoint is the completed arm.
+  std::size_t last_leg=0;
+  for(std::size_t leg=0;leg+1<vertices.size();++leg)if(!(vertices[leg]==vertices[leg+1]))last_leg=leg;
+  using Clock=std::chrono::steady_clock;
+  std::optional<Clock::time_point> last_save;bool oversize=false;
   options.continuation_observer=[&](const AdjointContinuation& saved) {
-    const auto payload=detail::encode(saved,key);
-    const auto bytes=artifacts::detail::canonical(json::object{{"payload",payload},
-      {"sha256",artifacts::detail::sha256(artifacts::detail::canonical(payload))}});
-    if(bytes.size()>storage.max_bytes)throw std::length_error("ordinary checkpoint exceeds file budget");
-    detail::publish(file,bytes);
-    if(storage.statistics)++storage.statistics->saved;
+    const bool complete=saved.leg==last_leg && saved.parameter==1;
+    const bool due=!last_save || complete ||
+      std::chrono::duration<double>(Clock::now()-*last_save).count()>=storage.min_save_interval_seconds;
+    if(due && !oversize) {
+      const auto payload=detail::encode(saved,key);
+      const auto bytes=artifacts::detail::canonical(json::object{{"payload",payload},
+        {"sha256",artifacts::detail::sha256(artifacts::detail::canonical(payload))}});
+      // Persistence is optional: a state that outgrew the file budget must
+      // not discard the transport already computed. The serialized size is
+      // fixed by the problem shape and precision, so do not retry.
+      if(bytes.size()>storage.max_bytes) {
+        oversize=true;if(storage.statistics)++storage.statistics->skipped_oversize;
+      } else {
+        detail::publish(file,bytes);last_save=Clock::now();
+        if(storage.statistics)++storage.statistics->saved;
+      }
+    }
     if(observer)observer(saved);
   };
   auto result=transport_adjoint_rows(matrix,std::move(initial),forcing,vertices,options);

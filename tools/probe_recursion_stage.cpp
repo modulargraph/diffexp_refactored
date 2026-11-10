@@ -32,7 +32,7 @@ int main(int argc,char** argv) {
     json::array requested;
     for(const auto& integral:graph.nodes[depth].requested){json::array indices;for(auto power:integral)indices.emplace_back(power);requested.push_back(std::move(indices));}
     report["requested_basis"]=std::move(requested);report["dimension"]=graph.dimension.str();
-    recursion::NumericalOptions options;options.endpoint_cache_directory=cache/"affine-series";options.ordinary_cache_directory=cache/"ordinary-transport";
+    recursion::NumericalOptions options;options.basis_cache_directory=cache/"physical-bases";options.ordinary_cache_directory=cache/"ordinary-transport";
     options.linear_method=method=="factored"?recursion::LinearMethod::factored:method=="auto"?recursion::LinearMethod::automatic:recursion::LinearMethod::adjoint;
     options.adjoint.conditioning_stats=&conditioning;
     options.progress=[&](auto d,const auto& phase,int order){std::cerr<<elapsed()<<"s depth="<<d<<" "<<phase<<" high="<<order<<'\n'<<std::flush;};
@@ -65,7 +65,7 @@ int main(int argc,char** argv) {
     report["status"]="completed_diagnostic";
   }catch(const std::exception& error){report["error"]=error.what();code=1;}
   report["observations"]=std::move(observations);
-  report["conditioning"]={{"polynomial_charts",conditioning.polynomial_charts},{"rational_cross_checks",conditioning.rational_cross_checks},{"centered_charts",conditioning.centered_charts},{"homogeneous_maps",conditioning.homogeneous_chart_maps},{"subdivisions",conditioning.conditioning_subdivisions},{"polynomial_homogeneous_columns",conditioning.polynomial_homogeneous_columns},{"rational_homogeneous_columns",conditioning.rational_homogeneous_columns}};
+  report["conditioning"]={{"charts",conditioning.charts},{"tail_limited_charts",conditioning.tail_limited_charts},{"centered_charts",conditioning.centered_charts},{"conditioning_subdivisions",conditioning.conditioning_subdivisions},{"recurrences",conditioning.recurrences}};
   report["native_elapsed_seconds"]=elapsed();report["process_cpu_seconds"]=static_cast<double>(std::clock()-cpu)/CLOCKS_PER_SEC;
   std::cout<<json::serialize(report)<<'\n';return code;
 }

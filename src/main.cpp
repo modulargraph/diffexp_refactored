@@ -25,8 +25,16 @@
 #include <charconv>
 #include <optional>
 #include <chrono>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 int main(int argc, char** argv) {
+#ifdef _OPENMP
+  // Fewer threads on a machine that is busy with other work: an oversubscribed
+  // chart expansion waits a scheduler slice at every barrier.
+  omp_set_dynamic(1);
+#endif
   bool json_mode=false;
   try {
     const std::string command = argc > 1 ? argv[1] : "--help";

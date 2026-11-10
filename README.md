@@ -100,6 +100,8 @@ same package.
 ## Build
 
 Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and pkg-config.
+OpenMP is used when the compiler provides it (`-DDIFFEXP_OPENMP=OFF` disables it): large
+Taylor charts and endpoint series then run on several threads, with identical results.
 The tested platform is macOS; the recursive FIRE process provider uses POSIX
 facilities. Mathematica is optional. A pinned core of the separate
 [IBP Solver](https://github.com/modulargraph/ibp-solver) package is included for

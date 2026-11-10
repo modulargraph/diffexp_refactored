@@ -20,6 +20,17 @@ target_include_directories(diffexp_core INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/ibp-solver/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(diffexp_core INTERFACE PkgConfig::FLINT Boost::json Threads::Threads)
+# OpenMP is optional: it expands large Taylor charts on several threads. The
+# results are identical with and without it.
+option(DIFFEXP_OPENMP "Use OpenMP threads for large Taylor charts" ON)
+set(DIFFEXP_HAS_OPENMP OFF)
+if(DIFFEXP_OPENMP)
+  find_package(OpenMP COMPONENTS CXX)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(diffexp_core INTERFACE OpenMP::OpenMP_CXX)
+    set(DIFFEXP_HAS_OPENMP ON)
+  endif()
+endif()
 
 set(diffexp_install_targets diffexp_core diffexp)
 

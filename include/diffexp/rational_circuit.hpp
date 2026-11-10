@@ -70,6 +70,12 @@ class Compiled {
  private:
   std::shared_ptr<const PlanData> data_;
 };
+// Charts with at least this many multiply-adds per Taylor order are expanded
+// on the OpenMP threads, when the build enables OpenMP. Below it the two
+// barriers of an order cost more than the threads save, above all on a
+// machine that is also busy with other work (the CLI therefore lets OpenMP
+// lower the thread count under load).
+inline constexpr std::size_t parallel_work=5000;
 struct Statistics {
   // addmul_operations counts the nonzero terms of the pooled dot products.
   std::size_t addmul_operations = 0, scalar_operations = 0, dot_products = 0;
@@ -545,29 +551,6 @@ inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistic
   std::vector<B> w(stats.auxiliary_cells);
   stats.live_cells=y.size()+w.size()+std::size_t(d)*width+p.coefficient_cells+p.inverse_pivots.size()+2+
     2*p.dot_capacity+1;
-  // These are non-owning copies of read-only FLINT structs. Never clear them:
-  // their limb pointers belong to the prepared coefficients and Y/W arrays.
-  // acb_dot reads these views and writes only the distinct accumulator below.
-  std::vector<acb_struct> dot_left(p.dot_capacity),dot_right(p.dot_capacity);
-  B dot_result;
-  std::size_t dot_count=0;
-  // midpoint=true enters only the exact midpoint of b (its radius is
-  // accounted for separately by the caller).
-  auto collect=[&](const B& a,const B& b,bool midpoint=false) {
-    if(dot_count>=p.dot_capacity)throw std::logic_error("rational circuit dot schedule exceeded");
-    dot_left[dot_count]=*a.raw();dot_right[dot_count]=*b.raw();
-    if(midpoint) {
-      auto* view=&dot_right[dot_count];
-      for(auto* radius:{arb_radref(acb_realref(view)),arb_radref(acb_imagref(view))}){MAG_EXP(radius)=0;MAG_MAN(radius)=0;}
-    }
-    ++dot_count;
-  };
-  auto flush=[&](B& value,bool subtract) {
-    if(!dot_count)return;
-    acb_dot(dot_result.raw(),value.raw(),subtract,dot_left.data(),1,dot_right.data(),1,
-            static_cast<slong>(dot_count),p.precision);
-    acb_swap(value.raw(),dot_result.raw());++stats.dot_products;stats.addmul_operations+=dot_count;dot_count=0;
-  };
   auto yat=[&](unsigned n,unsigned i,unsigned k)->B& {
     return y[(std::size_t(n)*queue.size()+row_index[i])*width+k];
   };
@@ -586,67 +569,114 @@ inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistic
   for (unsigned id=0;id<plan.streams.size();++id)
     if (active_stream[id] && p.ring_lengths[id] && plan.denominators[plan.streams[id].denominator].majorized)
       chains[id]=detail::Magnitudes(p.inverse_distances[plan.streams[id].denominator].size()*width);
-  detail::Magnitudes scratch(2);
-  for (unsigned n=0;n<order;++n) {
-    // QW=Y is triangular in (Taylor degree, epsilon storage index).
-    for (unsigned id=0;id<plan.streams.size();++id) {
-      if (!active_stream[id] || !p.ring_lengths[id]) continue;
-      slot[id]=n%p.ring_lengths[id];
-      const auto &stream=plan.streams[id];
-      const auto &denominator=plan.denominators[stream.denominator];
-      const auto &inverse=p.inverse_distances[stream.denominator];
-      for (unsigned k=0;k<width;++k) {
-        auto &value=wat(id,n,0,k);
-        value=yat(n,stream.column,k); // overwrite the expired ring row
-        for (auto b:denominator.blocks) if (b.epsilon<=k) {
-          const auto &q=p.polynomials[b.polynomial];
-          for (unsigned a=0;a<q.size() && a<=n;++a) {
-            if ((!a && !b.epsilon) || q[a].is_zero()) continue;
-            const auto &previous=wat(id,n,a,k-b.epsilon);
-            if (!previous.is_zero()) collect(q[a],previous,denominator.majorized && !b.epsilon);
+  // Within one Taylor order the quotient streams are mutually independent,
+  // and so are the rows of the next order: each is a fixed sequence of
+  // operations on its own cells, so the threads change nothing in the result.
+  // Small charts stay serial; a fork per order would cost more than it saves.
+  const unsigned stream_count=unsigned(plan.streams.size()), row_count=unsigned(queue.size());
+  // Multiply-adds of one saturated Taylor order.
+  std::size_t order_work=0;
+  for(unsigned id=0;id<stream_count;++id)if(active_stream[id]&&p.ring_lengths[id])
+    for(auto b:plan.denominators[plan.streams[id].denominator].blocks)if(b.epsilon<width)
+      order_work+=p.polynomials[b.polynomial].size()*(width-b.epsilon);
+  for(const auto& entry:plan.entries)if(active_stream[entry.stream]&&active[entry.row])
+    for(auto b:entry.numerator)if(b.epsilon<width)
+      order_work+=p.polynomials[b.polynomial].size()*(width-b.epsilon);
+  const bool threaded=order_work>=parallel_work;
+  bool overflow=false;
+  std::size_t dot_products=0,addmul_operations=0,scalar_operations=0;
+#pragma omp parallel if(threaded) reduction(+:dot_products,addmul_operations,scalar_operations) reduction(||:overflow)
+  {
+    // These are non-owning copies of read-only FLINT structs. Never clear them:
+    // their limb pointers belong to the prepared coefficients and Y/W arrays.
+    // acb_dot reads these views and writes only the distinct accumulator below.
+    std::vector<acb_struct> dot_left(p.dot_capacity),dot_right(p.dot_capacity);
+    B dot_result;
+    std::size_t dot_count=0;
+    // midpoint=true enters only the exact midpoint of b (its radius is
+    // accounted for separately by the caller).
+    auto collect=[&](const B& a,const B& b,bool midpoint=false) {
+      if(dot_count>=p.dot_capacity){overflow=true;return;}
+      dot_left[dot_count]=*a.raw();dot_right[dot_count]=*b.raw();
+      if(midpoint) {
+        auto* view=&dot_right[dot_count];
+        for(auto* radius:{arb_radref(acb_realref(view)),arb_radref(acb_imagref(view))}){MAG_EXP(radius)=0;MAG_MAN(radius)=0;}
+      }
+      ++dot_count;
+    };
+    auto flush=[&](B& value,bool subtract) {
+      if(!dot_count)return;
+      acb_dot(dot_result.raw(),value.raw(),subtract,dot_left.data(),1,dot_right.data(),1,
+              static_cast<slong>(dot_count),p.precision);
+      acb_swap(value.raw(),dot_result.raw());++dot_products;addmul_operations+=dot_count;dot_count=0;
+    };
+    detail::Magnitudes scratch(2);
+    for (unsigned n=0;n<order;++n) {
+      // QW=Y is triangular in (Taylor degree, epsilon storage index).
+#pragma omp for schedule(dynamic)
+      for (unsigned id=0;id<stream_count;++id) {
+        if (!active_stream[id] || !p.ring_lengths[id]) continue;
+        slot[id]=n%p.ring_lengths[id];
+        const auto &stream=plan.streams[id];
+        const auto &denominator=plan.denominators[stream.denominator];
+        const auto &inverse=p.inverse_distances[stream.denominator];
+        for (unsigned k=0;k<width;++k) {
+          auto &value=wat(id,n,0,k);
+          value=yat(n,stream.column,k); // overwrite the expired ring row
+          for (auto b:denominator.blocks) if (b.epsilon<=k) {
+            const auto &q=p.polynomials[b.polynomial];
+            for (unsigned a=0;a<q.size() && a<=n;++a) {
+              if ((!a && !b.epsilon) || q[a].is_zero()) continue;
+              const auto &previous=wat(id,n,a,k-b.epsilon);
+              if (!previous.is_zero()) collect(q[a],previous,denominator.majorized && !b.epsilon);
+            }
+          }
+          flush(value,true);
+          ++scalar_operations;
+          acb_mul(value.raw(),value.raw(),p.inverse_pivots[stream.denominator].raw(),p.precision);
+          if (!denominator.majorized) continue;
+          // With Q0 the epsilon-zero block and m the midpoints of earlier
+          // quotients, `value` encloses (z_n - sum_{a>0} q_a m_{n-a})/q_0 for
+          // every admissible right-hand side z, so its radius bounds the defect
+          // d_n of Q0*m = z - q_0*d. Hence w-m = (q_0*d)/Q0, and the Taylor
+          // coefficients of q_0/Q0(center+t) = prod(1-t/root_i)^-1 are bounded
+          // by those of prod(1-t/|root_i|)^-1: a chain of positive first-order
+          // recurrences, free of the cancellation an interval recurrence loses.
+          auto *bound=scratch[0];
+          auto *real=arb_radref(acb_realref(value.raw())), *imaginary=arb_radref(acb_imagref(value.raw()));
+          mag_hypot(bound,real,imaginary);
+          for (std::size_t level=0;level<inverse.size();++level) {
+            auto *previous=chains[id][level*width+k];
+            mag_addmul(bound,previous,inverse[level]);
+            mag_set(previous,bound);
+          }
+          mag_set(real,bound); mag_set(imaginary,bound);
+        }
+      }
+#pragma omp for schedule(dynamic)
+      for(unsigned r=0;r<row_count;++r)for(unsigned k=0;k<width;++k) {
+        const auto row=queue[r];
+        for(auto id:plan.row_entries[row]) {
+          const auto& entry=plan.entries[id];
+          if(!active_stream[entry.stream])continue;
+          for(auto b:entry.numerator)if(b.epsilon<=k) {
+            const auto& numerator=p.polynomials[b.polynomial];
+            for(unsigned a=0;a<numerator.size() && a<=n;++a) {
+              if(numerator[a].is_zero())continue;
+              const auto& source=wat(entry.stream,n,a,k-b.epsilon);
+              if(!source.is_zero())collect(numerator[a],source);
+            }
           }
         }
-        flush(value,true);
-        ++stats.scalar_operations;
-        acb_mul(value.raw(),value.raw(),p.inverse_pivots[stream.denominator].raw(),p.precision);
-        if (!denominator.majorized) continue;
-        // With Q0 the epsilon-zero block and m the midpoints of earlier
-        // quotients, `value` encloses (z_n - sum_{a>0} q_a m_{n-a})/q_0 for
-        // every admissible right-hand side z, so its radius bounds the defect
-        // d_n of Q0*m = z - q_0*d. Hence w-m = (q_0*d)/Q0, and the Taylor
-        // coefficients of q_0/Q0(center+t) = prod(1-t/root_i)^-1 are bounded
-        // by those of prod(1-t/|root_i|)^-1: a chain of positive first-order
-        // recurrences, free of the cancellation an interval recurrence loses.
-        auto *bound=scratch[0];
-        auto *real=arb_radref(acb_realref(value.raw())), *imaginary=arb_radref(acb_imagref(value.raw()));
-        mag_hypot(bound,real,imaginary);
-        for (std::size_t level=0;level<inverse.size();++level) {
-          auto *previous=chains[id][level*width+k];
-          mag_addmul(bound,previous,inverse[level]);
-          mag_set(previous,bound);
-        }
-        mag_set(real,bound); mag_set(imaginary,bound);
+        auto& value=yat(n+1,row,k);
+        flush(value,false);
+        ++scalar_operations;
+        acb_div_ui(value.raw(),value.raw(),n+1,p.precision);
       }
-    }
-    for(auto row:queue)for(unsigned k=0;k<width;++k) {
-      for(auto id:plan.row_entries[row]) {
-        const auto& entry=plan.entries[id];
-        if(!active_stream[entry.stream])continue;
-        for(auto b:entry.numerator)if(b.epsilon<=k) {
-          const auto& numerator=p.polynomials[b.polynomial];
-          for(unsigned a=0;a<numerator.size() && a<=n;++a) {
-            if(numerator[a].is_zero())continue;
-            const auto& source=wat(entry.stream,n,a,k-b.epsilon);
-            if(!source.is_zero())collect(numerator[a],source);
-          }
-        }
-      }
-      auto& value=yat(n+1,row,k);
-      flush(value,false);
-      ++stats.scalar_operations;
-      acb_div_ui(value.raw(),value.raw(),n+1,p.precision);
     }
   }
+  if(overflow)throw std::logic_error("rational circuit dot schedule exceeded");
+  stats.dot_products=dot_products;stats.addmul_operations=addmul_operations;stats.scalar_operations=scalar_operations;
   if (statistics) *statistics=stats;
   return series;
 }

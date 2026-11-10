@@ -6,8 +6,12 @@
   `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.
 - `--fire-seconds` also bounds one elimination of the built-in IBP solver
   (it was fixed at 20 s).
-- Endpoint series solve their independent columns on one thread per hardware
-  thread; the result is identical for any thread count.
+- Threads. Endpoint series solve their independent columns on one thread per
+  hardware thread. With OpenMP (optional, `DIFFEXP_OPENMP`, on by default)
+  the adjoint chart expansion runs the independent streams and rows of each
+  Taylor order in parallel once an order costs 5000 multiply-adds or more;
+  the CLI lets OpenMP lower the thread count on a busy machine. Results are
+  bit-identical for any thread count.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the

@@ -47,10 +47,8 @@ class Sampler {
        basis_.denominators.size()!=basis_.space.size()||basis_.physical_count>basis_.denominators.size())
       throw std::invalid_argument("IBP solver supports at most 4 loops, 16 scalar products and 12 physical denominators; select FIRE for larger systems");
     if(options_.dots>8||options_.numerators>8)throw std::invalid_argument("IBP solver seed powers must be 0..8");
-    for(unsigned i=0;i<basis_.space.loops;++i)for(unsigned v=0;v<basis_.space.loops+basis_.space.externals();++v){
-      contractions_.emplace_back();trace_.push_back(i==v);
-      for(const auto& d:basis_.denominators)contractions_.back().push_back(basis_.rewrite(basis_.space.contraction(d,i,v)));
-    }
+    contractions_=ibp::contractions(basis_);
+    for(unsigned i=0;i<basis_.space.loops;++i)for(unsigned v=0;v<basis_.space.loops+basis_.space.externals();++v)trace_.push_back(i==v);
     zero_sectors_.resize(std::size_t(1)<<basis_.physical_count);
     for(const auto& a:fire::free_loop_sectors(basis_))zero_sectors_[sector(a)]=true;
     input_geometry_.loops=basis_.space.loops;input_geometry_.externals=basis_.space.externals();
@@ -250,7 +248,11 @@ class Session {
         return {demanded.begin(),demanded.end()};
       }
     }
-    throw std::runtime_error("IBP derivative closure planning did not stabilize within its pass budget");
+    // The plan is a hint. One that has not stabilized is still a superset of
+    // the request made of valid demands; it is not saved, and the level
+    // preparer's own closure loop continues from its reconstruction.
+    if(options_.progress)options_.progress("finite-field closure plan did not stabilize within "+std::to_string(options_.max_planning_passes)+" passes; reconstructing the "+std::to_string(demanded.size())+" demands found so far");
+    return {demanded.begin(),demanded.end()};
   }
   static fire_modular::Options configuration(const Options& o,const std::shared_ptr<Sampler>& sampler){
     fire_modular::Options out;out.cache_directory=o.cache_directory;out.max_degree=o.max_degree;out.max_variable_degree=o.max_variable_degree;out.max_primes=o.max_primes;

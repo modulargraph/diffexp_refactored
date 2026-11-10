@@ -38,6 +38,10 @@ int main(){try {
   auto zero=feynman::certified_scalar_functional(geometry,1,2,2,x.constant(0),4);
   require(zero.taylor_tail_certified && zero.coefficients.size()==5,"zero functional must remain exactly certified");
   for(const auto& coefficient:zero.coefficients)require(coefficient.is_zero(),"zero functional acquired numerical error");
+  // With U=F=1 the endpoint power x^-2 carries no epsilon, so nothing
+  // regulates its power divergence. The x^-1 coefficient of (1+x^2)/x^2
+  // vanishes, so the logarithmic test alone would let a finite part through.
+  fails([&]{feynman::certified_scalar_functional({x.constant(1),x.constant(1)},1,2,1,Exact(field,"(1+x^2)/x^2"),2);},"power divergence not regulated");
   auto polynomial=feynman::certified_scalar_functional(geometry,1,2,2,Exact(field,"1+x+x^2"),4);
   auto rational=feynman::certified_scalar_functional(geometry,1,2,2,Exact(field,"1/(2+x+eps)"),4);
   // Exact cancellation must precede joint-analyticity/valuation tests.

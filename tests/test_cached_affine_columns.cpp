@@ -61,6 +61,27 @@ int main(){try{
   tamper([](auto& p){p["column"]=0;},true,"wrong column payload accepted");
   tamper([](auto& p){p.at("terms").as_array().front().as_object()["column"]=0;},false,"wrong column term accepted");
   tamper([](auto& p){p.at("terms").as_array().push_back(p.at("terms").as_array().front());},true,"duplicate column term accepted");
+  // Opt-in recovery from a column checkpoint the verifier rejects. The default
+  // stays fail-closed; with the policy set the stored columns are discarded
+  // and recomputed, and a receiving limit never counts as such a rejection.
+  for(bool resumed:{false,true}) {
+    ar::Store healing(path/(resumed?"heal-resumed":"heal-manifest"));
+    for(unsigned c=0;c<3;++c){auto id=ca::column_identity(base,c);auto record=store.read(id,manifest.parent_content_ids[c]);
+      if(c==1)record.payload.as_object().at("terms").as_array().back().as_object()["coefficient"]="123";healing.put(id,demand,record.payload,record.certificate);}
+    // Without this first call only the column checkpoints exist (resumed path);
+    // with it an unverified manifest binds them (manifest path).
+    if(!resumed)rejects([&]{ca::prepare(a,0,1,n,options,healing);},"rejected column checkpoint accepted by default");
+    unsigned solved=0;auto counting=options;counting.column_progress=[&](unsigned,unsigned){++solved;};
+    ca::VerificationLimits heal;heal.recompute_rejected_checkpoints=true;
+    if(!resumed){auto tight=heal;tight.max_term_products=1;
+      rejects([&]{ca::prepare(a,0,1,n,counting,healing,tight);},"verification work cap bypassed by recovery policy");
+      require(solved==0,"a receiving limit discarded stored columns");}
+    auto healed=ca::prepare(a,0,1,n,counting,healing,heal);
+    require(!healed.cache_hit && healed.columns_rejected==3 && healed.columns_prepared==3 && healed.columns_reused==0,"rejected columns were not recomputed");
+    require(ca::detail::payload(healed.series)==ca::detail::payload(direct),"recomputed series differs from direct recurrence");
+    auto after=ca::prepare(a,0,1,n,options,healing);
+    require(after.cache_hit && after.content_id==healed.content_id && after.columns_rejected==0,"recomputed series did not supersede the rejected checkpoint");
+  }
   auto first_column=ca::column_identity(base,0);auto file=store.path(first_column.key(),manifest.parent_content_ids[0]);
   ar::fs::remove(file);rejects([&]{ca::prepare(a,0,1,n,options,store);},"missing manifest parent accepted");
   // Existing complete v1 artifacts remain compatible and independently checked.

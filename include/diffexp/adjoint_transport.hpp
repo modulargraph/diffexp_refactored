@@ -1029,10 +1029,11 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       break;
       }
       if(options.chart_observer || options.continuation_observer) {
-        LaurentRows snapshot{low,initial.high,std::vector(r,std::vector(d,std::vector<B>()))};
-        for(unsigned i=0;i<r;++i)for(unsigned j=0;j<d;++j)snapshot.coefficients[i][j]=state[i*d+j];
-        if(options.continuation_observer)options.continuation_observer(AdjointContinuation{leg,charts,next,snapshot});
-        if(options.chart_observer)options.chart_observer(leg,center,next,snapshot);
+        // One copy of the accepted rows serves both observers.
+        AdjointContinuation accepted{leg,charts,next,LaurentRows{low,initial.high,std::vector(r,std::vector(d,std::vector<B>()))}};
+        for(unsigned i=0;i<r;++i)for(unsigned j=0;j<d;++j)accepted.rows.coefficients[i][j]=state[i*d+j];
+        if(options.continuation_observer)options.continuation_observer(accepted);
+        if(options.chart_observer)options.chart_observer(leg,center,next,accepted.rows);
       }
       center=next;
     }

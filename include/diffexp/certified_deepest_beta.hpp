@@ -31,7 +31,7 @@ inline LaurentValue certified_deepest_beta(const Symanzik& geometry,unsigned loo
     throw std::invalid_argument("invalid certified deepest precision or proof budget");
   const Rational requested_radius(options.initial_radius);
   if(!(Rational(0)<requested_radius))throw std::invalid_argument("certified deepest radius must be positive");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   auto request=merge_request({static_cast<int>(left),static_cast<int>(right)},0,1);
   const auto& names=geometry.U.variables();auto found=std::find(names.begin(),names.end(),"x");
   if(found==names.end())throw std::invalid_argument("deepest beta needs the path variable x");

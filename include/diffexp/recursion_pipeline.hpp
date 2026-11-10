@@ -141,6 +141,29 @@ struct BasisSelection {
   std::string reason;
 };
 
+// Graph-independent option contract of the recursive evaluator. A caller that
+// prepares the exact graph first (minutes of IBP reduction) checks this BEFORE
+// that work, so a mistyped numerical option is not reported after it.
+inline void validate_numerical_options(const NumericalOptions& options) {
+  if(options.adjoint.continuation)
+    throw std::invalid_argument("a continuation belongs to one adjoint arm; use ordinary_cache_directory for recursive continuation");
+  const auto fail=[](const std::string& what){throw std::invalid_argument("recursive numerical options or finite budgets: "+what);};
+  if(options.working_bits<64 || options.working_bits>1000000)fail("working precision must be 64..1000000 bits");
+  if(options.endpoint_order<1)fail("endpoint order must be positive");
+  if(options.ordinary_order<8 || options.ordinary_order>1000)fail("ordinary order must be 8..1000");
+  if(!options.max_epsilon || options.max_epsilon>100)fail("epsilon budget must be 1..100");
+  if(!options.max_refinements || !options.max_overlap_halvings)fail("refinement and overlap-halving budgets must be positive");
+  if(options.overlap<=Rational(0) || options.overlap>=Rational("1/2"))fail("overlap must lie strictly between 0 and 1/2");
+  if(options.contour_height<=Rational(0))fail("contour height must be positive");
+  if(options.endpoint_constraint_tolerance<=Rational(0))fail("endpoint constraint tolerance must be positive");
+  if(!options.max_endpoint_constraints || options.max_endpoint_constraints>5000)fail("endpoint constraint budget must be 1..5000");
+  if(!std::isfinite(options.basis_scan_seconds) || options.basis_scan_seconds<=0 || options.basis_scan_seconds>60)
+    fail("basis scan seconds must lie in (0,60]");
+  if(options.leaf_digits>100000)fail("leaf digits must not exceed 100000");
+  if(!options.physical_bases.empty() && !options.observable_adjoint)
+    throw std::invalid_argument("general physical bases require the adjoint or factored recursive route");
+}
+
 // Only exact coordinates are durable. Endpoint acceptance, epsilon demands,
 // precision and approximation scores are deliberately absent from the payload.
 namespace basis_persistence {
@@ -299,24 +322,16 @@ class Evaluator {
   struct DirectDemand {int low=0;epsilon_demand::Highs needs;};
   struct Seconds {
     double& total;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    explicit Seconds(double& destination):total(destination){}
+    Seconds(const Seconds&)=delete;Seconds& operator=(const Seconds&)=delete;
     ~Seconds(){total+=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();}
   };
  public:
   explicit Evaluator(const Graph& graph,NumericalOptions options={})
       :graph_(graph),options_(std::move(options)),plans_(graph.nodes.size()),cache_(graph.nodes.size()),expressions_(graph.nodes.size()),direct_demands_(graph.nodes.size()) {
-    if(options_.adjoint.continuation)
-      throw std::invalid_argument("a continuation belongs to one adjoint arm; use ordinary_cache_directory for recursive continuation");
-    if(graph_.nodes.empty() || options_.working_bits<64 || options_.working_bits>1000000 ||
-        options_.endpoint_order<1 || options_.ordinary_order<8 || options_.ordinary_order>1000 ||
-        !options_.max_epsilon || options_.max_epsilon>100 || !options_.max_refinements || !options_.max_overlap_halvings ||
-        options_.overlap<=Rational(0) || options_.overlap>=Rational("1/2") ||
-        options_.contour_height<=Rational(0) || options_.endpoint_constraint_tolerance<=Rational(0) ||
-        !options_.max_endpoint_constraints || options_.max_endpoint_constraints>5000 ||
-        !std::isfinite(options_.basis_scan_seconds) || options_.basis_scan_seconds<=0 || options_.basis_scan_seconds>60)
-      throw std::invalid_argument("recursive numerical options or finite budgets");
+    validate_numerical_options(options_);
+    if(graph_.nodes.empty())throw std::invalid_argument("recursive numerical options or finite budgets: empty recursion graph");
     auto [xi,ei]=path_epsilon_variables(graph_.dimension);xi_=xi;ei_=ei;
-    if(!options_.physical_bases.empty() && !options_.observable_adjoint)
-      throw std::invalid_argument("general physical bases require the adjoint or factored recursive route");
     for(const auto& [depth,basis]:options_.physical_bases)
       if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf)
         throw std::invalid_argument("general physical basis requires a nonleaf depth");
@@ -849,10 +864,12 @@ class Evaluator {
     }
     return result;
   }
-  // Screening only: pull the ORIGINAL plan's ordinary-cut functionals into
-  // proposed coordinates. This does not construct or certify new endpoint
-  // frames, and must never be installed as an execution plan.
-  std::unique_ptr<Plan> screen_basis_plan(Plan& base,const PhysicalBasisTransform& basis) {
+  // The SAME endpoint functionals in other coordinates. Y=D_base U_base=D U
+  // gives U_base=V U with the exact V=D_base^-1 D, hence E=E_base V at the
+  // ordinary cut and beta=beta_base V on the contour. Nothing about the
+  // endpoint frames, their domain constraints or the overlap changes, so no
+  // endpoint series is rebuilt. Returns null if the coordinates coincide.
+  std::unique_ptr<Plan> pullback_basis_plan(Plan& base,const PhysicalBasisTransform& basis) {
     auto candidate=std::make_unique<Plan>();
     candidate->gauge=epsilon_diagonal_gauge(basis.connection,ei_);
     const auto d=candidate->gauge.matrix.size();
@@ -865,36 +882,46 @@ class Evaluator {
           candidate->inverse_diagonal[i][j],ei_,-candidate->gauge.shifts[i]);
     }
     if(candidate->inverse_diagonal==base.inverse_diagonal)return {};
-    // Y = D_base U_base = D_new U_new, hence U_base=V U_new.
-    const auto v=fuchsify::detail::multiply(base.inverse_diagonal,candidate->diagonal);
+    candidate->pullback_map=fuchsify::detail::multiply(base.inverse_diagonal,candidate->diagonal);
     candidate->geometry=base.geometry;
     candidate->lower.functionals.resize(base.lower.functionals.size());
     candidate->upper.functionals.resize(base.upper.functionals.size());
     candidate->constraint_labels=base.constraint_labels;
     candidate->beta_indices=base.beta_indices;
-    if(!base.beta_rows.empty())candidate->beta_rows=fuchsify::detail::multiply(base.beta_rows,v);
+    if(!base.beta_rows.empty())candidate->beta_rows=fuchsify::detail::multiply(base.beta_rows,candidate->pullback_map);
     candidate->has_physical_basis=true;
     for(const auto& row:candidate->inverse_diagonal)for(const auto& entry:row)if(!entry.is_zero())
       candidate->largest_shift=std::max(candidate->largest_shift,-*exact_epsilon_valuation(entry,ei_));
-    auto endpoint_screen=[&](bool upper) {
-      const auto h=graph_.dimension.constant(base.geometry.overlap);
-      const auto at=upper?graph_.dimension.constant(1)-h:h;
-      // Discover V's exact pole depth at the actual cut before requesting E.
-      auto inner=exact_laurent_rows(v,at,0);
-      const auto& outer=cached_endpoint_operator(base,upper,std::max(0,checked(-static_cast<long>(inner.low))));
-      const auto inner_high=std::max(0,checked(-static_cast<long>(outer.low)));
-      if(inner.high<inner_high)inner=exact_laurent_rows(v,at,inner_high);
-      return linear_boundary::compose(outer,inner,0);
-    };
-    candidate->lower_operator=endpoint_screen(false);
-    candidate->upper_operator=endpoint_screen(true);
+    candidate->lower_operator=pulled_back_operator(base,candidate->pullback_map,false,0);
+    candidate->upper_operator=pulled_back_operator(base,candidate->pullback_map,true,0);
     return candidate;
+  }
+  // E_base V at the cut, through epsilon order high. V's exact pole depth at
+  // the cut decides how far the base operator must be known, and the base
+  // operator's low how far V must be expanded.
+  LaurentRows pulled_back_operator(Plan& base,const Matrix& map,bool upper,int high) {
+    const auto h=graph_.dimension.constant(base.geometry.overlap);
+    const auto at=upper?graph_.dimension.constant(1)-h:h;
+    const auto& known=upper?base.upper_operator:base.lower_operator;
+    // An operator's low is structural, so a retained one predicts the V window.
+    auto inner=exact_laurent_rows(map,at,std::max(0,checked(static_cast<long>(high)-(known?known->low:0))));
+    int outer_high=std::max(0,checked(static_cast<long>(high)-inner.low));
+    // Extending a numerical endpoint operator recomputes it. Candidates with
+    // deeper exact poles follow shallower ones, so extend with headroom once.
+    if(known && known->high<outer_high)outer_high=std::max(outer_high,2);
+    const auto& outer=cached_endpoint_operator(base,upper,outer_high);
+    const auto inner_high=std::max(0,checked(static_cast<long>(high)-outer.low));
+    if(inner.high<inner_high)inner=exact_laurent_rows(map,at,inner_high);
+    return linear_boundary::compose(outer,inner,high);
   }
   Plan& plan(std::size_t depth,unsigned desired_top) {
     if(plans_[depth])return *plans_[depth];const auto& node=graph_.nodes[depth];
     const auto explicit_basis=options_.physical_bases.find(depth);
     auto selected=build_plan(depth,desired_top,explicit_basis==options_.physical_bases.end()?nullptr:&explicit_basis->second);
     if(options_.automatic_basis_scan && options_.observable_adjoint && explicit_basis==options_.physical_bases.end()) {
+      // Starts after the original plan's own preflight, which every execution
+      // needs. Operator work done for candidates is selection time.
+      std::optional<Seconds> timer;double operators_before=0;
       BasisSelection selection;selection.depth=depth;selection.masters=selected->gauge.matrix.size();
       const auto characters=[](const Matrix& matrix) {std::size_t size=0;for(const auto& row:matrix)for(const auto& value:row)if(!value.is_zero())size+=value.str().size();return size;};
       selection.original_characters=characters(selected->gauge.matrix);
@@ -908,10 +935,14 @@ class Evaluator {
         cached_basis=basis_persistence::load(*basis_store_,*basis_identity,node.closure.matrix,xi_);
         if(cached_basis){selection.cache_hit=true;++statistics_.basis_cache_hits;}
       }
-      report(depth,cached_basis?"rechecking persisted exact master basis":"scanning simpler master bases",desired_top);
       const auto began=std::chrono::steady_clock::now();
+      // Only a decision that another run would reach again is durable: an
+      // installed choice, or a discovery that ran to its deterministic end.
+      // A wall-clock cut or an error says nothing about the coordinates.
+      bool durable=false;
       try {
         preflight_linear_demands(depth,*selected);
+        timer.emplace(statistics_.basis_selection_seconds);operators_before=statistics_.endpoint_operator_seconds;
         selection.original_child_loss=*selected->factored_child_loss;
         const auto cost=[&](const Plan& value) {
           // The public child coordinates are pinned, so this child lookahead
@@ -932,30 +963,31 @@ class Evaluator {
           return "child="+std::to_string(value.at(0))+", component-sum="+
             std::to_string(value.at(1))+", characters="+std::to_string(value.at(2));
         };
-        const auto accept=[&](const PhysicalBasisTransform& basis,bool persisted=false) -> bool {
+        // Installing a basis costs one exact pullback of the retained endpoint
+        // functionals. Its demand is the plan's own, not a prediction.
+        const auto install=[&](const PhysicalBasisTransform& basis,bool persisted=false) -> bool {
           ++selection.full_candidates_checked;
           if(persisted)++selection.candidates_checked;
           try {
-            auto candidate=build_plan(depth,desired_top,&basis);
-            preflight_linear_demands(depth,*candidate);
+            auto candidate=pullback_basis_plan(*selected,basis);
+            if(!candidate) {
+              // The persisted coordinates are those of the original gauge.
+              if(persisted){selection.accepted=true;selection.candidate_characters=selection.original_characters;
+                selection.candidate_child_loss=selection.original_child_loss;accepted_basis=basis;}
+              return persisted;
+            }
+            preflight_linear_demands(depth,*candidate,false);
             const auto candidate_cost=cost(*candidate);
-            report(depth,"basis full validation "+std::to_string(selection.full_candidates_checked)+
-              ": "+describe_cost(candidate_cost)+", overlap="+candidate->geometry.overlap.str()+
-              "; current "+describe_cost(best_cost)+", overlap="+selected->geometry.overlap.str(),desired_top);
-            if(!persisted && candidate->geometry.overlap<selected->geometry.overlap) {
-              report(depth,"basis candidate rejected: smaller certified overlap",desired_top);return false;
-            }
             if(!persisted && !(candidate_cost<best_cost)) {
-              report(depth,"basis candidate rejected: full cost did not improve",desired_top);return false;
+              report(depth,"basis candidate rejected: "+describe_cost(candidate_cost)+" does not improve "+describe_cost(best_cost),desired_top);return false;
             }
+            selection.candidate_characters=candidate_cost.at(2);
+            selection.candidate_child_loss=*candidate->factored_child_loss;
             accepted_basis=basis;best_cost=candidate_cost;
-            selected=std::move(candidate);selection.accepted=true;
-            selection.candidate_characters=characters(selected->gauge.matrix);
-            selection.candidate_child_loss=*selected->factored_child_loss;
-            selection.reason="lower component epsilon demand or simpler equal-demand matrix; exact endpoint and contour checks passed";
-            report(depth,std::string(persisted?"persisted basis validated: ":"basis candidate certified and accepted: ")+
+            candidate->pullback_base=std::move(selected);selected=std::move(candidate);selection.accepted=true;
+            report(depth,std::string(persisted?"persisted basis installed: ":"basis candidate installed: ")+
               describe_cost(best_cost)+", screened="+std::to_string(selection.candidates_screened)+
-              ", full="+std::to_string(selection.full_candidates_checked),desired_top);
+              "; endpoint functionals pulled back exactly, no endpoint series rebuilt",desired_top);
             return true;
           } catch(const std::exception& error) {
             if(persisted)throw;
@@ -966,9 +998,21 @@ class Evaluator {
         if(cached_basis) {
           // A persisted selected coordinate system is a continuation contract,
           // not a candidate to rank again under today's approximation scores.
-          if(cached_basis->selected)(void)accept(cached_basis->basis,true);
+          report(depth,"rechecking persisted exact master basis",desired_top);
+          if(cached_basis->selected)(void)install(cached_basis->basis,true);
           if(!selection.accepted)selection.reason="persisted original basis retained";
+        } else if(!selection.original_child_loss) {
+          // The scan can only lower the child's epsilon window. With no loss
+          // there is nothing to gain, whatever the connection looks like.
+          ++statistics_.basis_scans_skipped;
+          selection.reason="no child epsilon loss in the original basis; scan skipped";
+        } else if(depth+1<graph_.nodes.size() && graph_.nodes[depth+1].scalar_leaf) {
+          // Extra epsilon orders of the closed-form leaf cost far less than a
+          // discovery over exact rational matrices.
+          ++statistics_.basis_scans_skipped;
+          selection.reason="child is the closed-form scalar leaf; scan skipped";
         } else {
+          report(depth,"scanning simpler master bases",desired_top);
           ++statistics_.basis_scans;
           physical_basis_scan::Options scan_options;
           scan_options.seconds=options_.basis_scan_seconds;scan_options.epsilon_variable=ei_;
@@ -978,9 +1022,9 @@ class Evaluator {
               if(candidate.metadata.provenance=="original")return original_cost;
               ++selection.candidates_screened;++selection.candidates_checked;
               try {
-                auto screen=screen_basis_plan(*selected,candidate.transform);
+                auto screen=pullback_basis_plan(*selected,candidate.transform);
                 if(!screen)return original_cost;
-                preflight_linear_demands(depth,*screen);
+                preflight_linear_demands(depth,*screen,false);
                 return cost(*screen);
               } catch(const std::exception& error) {
                 selection.reason=std::string("candidate screen unresolved: ")+error.what();
@@ -992,36 +1036,29 @@ class Evaluator {
             [](const auto& a,const auto& b){return *a.demand_cost<*b.demand_cost;});
           report(depth,"basis discovery complete: screened="+std::to_string(selection.candidates_screened)+
             ", frontier="+std::to_string(frontier.candidates.size())+", original "+describe_cost(original_cost),desired_top);
-          const auto validation_began=std::chrono::steady_clock::now();
-          const double validation_seconds=std::min(30.0,std::max(1.0,options_.basis_scan_seconds));
-          std::size_t rebuilt=0;
+          // The frontier is ordered by cost; the first installable improvement
+          // is the best one. Its cost is recomputed on the plan itself.
           for(const auto& candidate:frontier.candidates) {
-            if(rebuilt==8)break;
             if(!candidate.demand_cost || !(*candidate.demand_cost<best_cost))continue;
-            // Cooperative bound: do not start another expensive exact rebuild
-            // after the budget. An in-flight exact operation is not interrupted.
-            if(std::chrono::duration<double>(std::chrono::steady_clock::now()-validation_began).count()>=validation_seconds) {
-              report(depth,"basis full-validation budget reached; retaining last certified coordinates",desired_top);break;
-            }
-            ++rebuilt;
-            report(depth,"basis full candidate "+std::to_string(rebuilt)+": predicted "+
-              describe_cost(*candidate.demand_cost)+"; "+candidate.metadata.provenance,desired_top);
-            // The frontier is ordered by predicted cost. Once a fully checked
-            // improvement is found, stop this bounded search and persist it.
-            if(accept(candidate.transform))break;
+            if(selection.full_candidates_checked==8)break;
+            if(install(candidate.transform))break;
           }
+          durable=selection.accepted || !frontier.stats.time_expired;
+          if(!durable)report(depth,"basis discovery cut by its time budget; the undecided original basis is not persisted",desired_top);
         }
         if(selection.accepted) {
           ++statistics_.basis_selections;
-          selection.reason="lower component epsilon lookahead or simpler equal-demand matrix; exact endpoint and contour checks passed";
+          selection.reason="lower component epsilon lookahead or simpler equal-demand matrix; endpoint functionals pulled back exactly";
         }
-        else if(selection.reason.empty())selection.reason="no certified demand improvement within the bounded search";
+        else if(selection.reason.empty())selection.reason="no demand improvement within the bounded search";
       }catch(const std::exception& error) {
         if(cached_basis && cached_basis->selected)throw;
         if(!cached_basis && !selection.scan_seconds)selection.scan_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
         selection.reason=std::string("keeping original basis: ")+error.what();
+        durable=selection.accepted;
       }
-      if(basis_store_ && !cached_basis) {
+      if(timer)statistics_.endpoint_operator_seconds=operators_before;
+      if(basis_store_ && !cached_basis && durable) {
         auto unit=fuchsify::detail::identity(node.closure.matrix.size(),graph_.dimension);
         basis_persistence::Choice choice{accepted_basis?*accepted_basis:
           PhysicalBasisTransform{node.closure.matrix,unit,unit,node.closure.matrix},selection.accepted};
@@ -1217,8 +1254,17 @@ class Evaluator {
     expressions_[depth]=std::move(expression);cache_[depth]=std::move(result);return *cache_[depth];
   }
   LaurentRows endpoint_operator(Endpoint& endpoint,const Rational& exact_point_value,int high) {
-    if(endpoint.direct_operator)
-      return exact_laurent_rows(*endpoint.direct_operator,graph_.dimension.constant(exact_point_value),high);
+    Seconds timer(statistics_.endpoint_operator_seconds);
+    if(endpoint.direct_operator) {
+      auto direct=exact_laurent_rows(*endpoint.direct_operator,graph_.dimension.constant(exact_point_value),high);
+      // The direct primitive has one row per operation. Zero-constraint rows
+      // contributed by the OTHER endpoint's series have no functional here:
+      // they are exact zero rows, as on the series route below.
+      if(direct.coefficients.size()<endpoint.functionals.size())
+        direct.coefficients.resize(endpoint.functionals.size(),
+          std::vector(direct.columns(),std::vector<B>(direct.high-direct.low+1,B(0))));
+      return direct;
+    }
     const auto point=B::from_strings(exact_point_value.str());
     const auto rows=endpoint.functionals.size();const auto d=endpoint.matching_frame.columns;
     if(std::none_of(endpoint.functionals.begin(),endpoint.functionals.end(),[](const auto& value){return value.has_value();}))
@@ -1285,52 +1331,96 @@ class Evaluator {
     auto& saved=upper?prepared.upper_operator:prepared.lower_operator;
     if(!saved || saved->high<high) {
       const auto& rewritten=upper?prepared.rewritten_upper:prepared.rewritten_lower;
-      if(rewritten)saved=exact_laurent_rows(*rewritten,graph_.dimension.constant(prepared.geometry.overlap),high);
+      if(prepared.pullback_base)saved=pulled_back_operator(*prepared.pullback_base,prepared.pullback_map,upper,high);
+      else if(!prepared.pullback_map.empty())throw std::logic_error("a screening plan cannot extend its endpoint operators");
+      else if(rewritten)saved=exact_laurent_rows(*rewritten,graph_.dimension.constant(prepared.geometry.overlap),high);
       else saved=endpoint_operator(upper?prepared.upper:prepared.lower,prepared.geometry.overlap,high);
     }
     return *saved;
   }
-  void preflight_linear_demands(std::size_t depth,Plan& prepared) {
+  // Exact rows applied to the child at the anchor: their pole depth and the
+  // child-component highs they need for an output at order zero. They depend
+  // on the graph node only, never on the internal basis of a plan.
+  const DirectDemand& direct_demand(std::size_t depth) {
+    auto& saved=direct_demands_[depth];if(saved)return *saved;
+    const auto& node=graph_.nodes[depth];DirectDemand result;
+    result.needs.assign(node.closure.ordered_basis.size(),std::nullopt);
+    for(std::size_t i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
+      for(std::size_t j=0;j<node.observable_rows[i].size();++j) {
+        const auto& entry=node.observable_rows[i][j];if(entry.is_zero())continue;
+        const auto at=entry.substitute(exact_point(entry,xi_,entry.constant(node.anchor)));
+        if(at.is_zero())continue;
+        const int valuation=checked(*exact_epsilon_valuation(at,ei_));
+        result.low=std::min(result.low,valuation);
+        epsilon_demand::raise(result.needs.at(j),epsilon_demand::checked(-static_cast<long>(valuation)));
+      }
+    saved=std::move(result);return *saved;
+  }
+  // For every output at epsilon order zero: the order through which each child
+  // component is consumed, from the endpoint rows retained through
+  // operator_high. Exact valuations of the connection, the forcing rows and
+  // the anchor gauge propagate the windows; a zero-containing ball of nonzero
+  // radius counts as nonzero. Equivalently, column j of the local operator
+  // vanishes identically below order -needs[j].
+  epsilon_demand::Highs component_child_needs(std::size_t depth,Plan& prepared,int operator_high) {
+    namespace ed=epsilon_demand;
+    const auto d=prepared.gauge.matrix.size();
+    const ed::Highs outputs(prepared.lower.functionals.size(),0);
+    if(!prepared.connection_valuations)prepared.connection_valuations=ed::valuations(prepared.gauge.matrix,ei_);
+    if(!prepared.anchor_inverse_valuations) {
+      auto inverse=prepared.inverse_diagonal;const auto& node=graph_.nodes[depth];
+      for(auto& row:inverse)for(auto& value:row)if(!value.is_zero())value=value.substitute(exact_point(value,xi_,value.constant(node.anchor)));
+      prepared.anchor_inverse_valuations=ed::valuations(inverse,ei_);
+    }
+    auto needs=ed::merge(ed::pullback(cached_endpoint_operator(prepared,false,operator_high),outputs),
+                         ed::pullback(cached_endpoint_operator(prepared,true,operator_high),outputs));
+    if(needs.size()!=d)throw std::logic_error("endpoint operator width differs from the connection");
+    for(const auto& row:prepared.beta_rows)for(std::size_t j=0;j<d;++j)if(!row[j].is_zero())
+      ed::raise(needs[j],ed::checked(-static_cast<long>(checked(*exact_epsilon_valuation(row[j],ei_)))));
+    // Both arms and the forcing reach the anchor through the same connection.
+    const auto initial=ed::close(*prepared.connection_valuations,std::move(needs));
+    return ed::merge(ed::pullback(*prepared.anchor_inverse_valuations,initial),direct_demand(depth).needs);
+  }
+  void preflight_linear_demands(std::size_t depth,Plan& prepared,bool announce=true) {
     if(prepared.adjoint_child_loss)return;
-    report(depth,"structural child-window preflight",0);
+    if(announce)report(depth,"structural child-window preflight",0);
     const auto l=cached_endpoint_operator(prepared,false,0).low;
     const auto r=cached_endpoint_operator(prepared,true,0).low;
-    int q=0,direct=0;
+    int q=0;
     for(const auto& row:prepared.beta_rows)for(const auto& entry:row)if(!entry.is_zero())
       q=std::min(q,checked(*exact_epsilon_valuation(entry,ei_)));
-    const auto& node=graph_.nodes[depth];
-    for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
-      for(const auto& entry:node.observable_rows[i])if(!entry.is_zero()) {
-        const auto at=entry.substitute(exact_point(entry,xi_,entry.constant(node.anchor)));
-        if(!at.is_zero())direct=std::min(direct,checked(*exact_epsilon_valuation(at,ei_)));
-      }
+    const int direct=direct_demand(depth).low;
     const long loss=std::max<std::int64_t>(0,prepared.largest_shift);
     // Epsilon-regular homogeneous transport preserves lower bounds, while
-    // forcing can lower them to q. No numerical cancellation is used here.
-    prepared.adjoint_child_loss=checked(-std::min(static_cast<long>(std::min({l,r,q}))-loss,static_cast<long>(direct)));
-    // Endpoint composition and middle integration independently request the
-    // child map: max(H-l,H-r,H-q), followed by the inverse D gauge.
-    prepared.factored_child_loss=checked(std::max(loss+std::max({-static_cast<long>(l),-static_cast<long>(r),-static_cast<long>(q)}),-static_cast<long>(direct)));
+    // forcing can lower them to q; the inverse D gauge follows. This is the
+    // bound of one common window for all child components.
+    const int uniform=checked(std::max(loss+std::max({-static_cast<long>(l),-static_cast<long>(r),-static_cast<long>(q)}),-static_cast<long>(direct)));
+    int tight=uniform;epsilon_demand::Highs component;
     if(options_.component_epsilon_demands) {
-      namespace ed=epsilon_demand;
-      const auto d=prepared.gauge.matrix.size();
-      const ed::Highs outputs(prepared.lower.functionals.size(),0);
-      auto left=ed::pullback(cached_endpoint_operator(prepared,false,0),outputs);
-      auto right=ed::pullback(cached_endpoint_operator(prepared,true,0),outputs);
-      Matrix beta(outputs.size(),std::vector<Exact>(d,graph_.dimension.constant(0)));
-      for(std::size_t i=0;i<prepared.beta_indices.size();++i)beta[prepared.beta_indices[i]]=prepared.beta_rows[i];
-      auto middle=ed::close(prepared.gauge.matrix,ed::merge(right,ed::pullback(beta,outputs,ei_)),ei_);
-      auto initial=ed::close(prepared.gauge.matrix,ed::merge(left,middle),ei_);
-      auto inverse=prepared.inverse_diagonal;
-      for(auto& row:inverse)for(auto& value:row)value=value.substitute(exact_point(value,xi_,value.constant(node.anchor)));
-      prepared.component_child_loss=ed::pullback(inverse,initial,ei_);
-      Matrix direct_map(outputs.size(),std::vector<Exact>(d,graph_.dimension.constant(0)));
-      for(std::size_t i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
-        for(std::size_t j=0;j<d;++j)direct_map[i][j]=node.observable_rows[i][j].substitute(exact_point(graph_.dimension,xi_,graph_.dimension.constant(node.anchor)));
-      prepared.component_child_loss=ed::merge(prepared.component_child_loss,ed::pullback(direct_map,outputs,ei_));
-      prepared.factored_child_loss=std::min(*prepared.factored_child_loss,std::max(0,ed::maximum(prepared.component_child_loss)));
+      component=component_child_needs(depth,prepared,0);
+      tight=std::min(tight,std::max(0,epsilon_demand::maximum(component)));
     }
+    // Publish only a complete profile: a failed propagation must fail again on
+    // the next call instead of leaving the common-window half behind.
+    prepared.component_child_loss=std::move(component);
+    prepared.factored_child_loss=tight;prepared.adjoint_child_loss=uniform;
     ++statistics_.demand_preflights;
+  }
+  // Replace rounding noise below each child component's structural window by
+  // the exact zero it represents, then drop the orders that became empty. A
+  // column shift or an exact gauge product declares one common low for all
+  // columns; without this the child would be asked for orders that no
+  // coefficient consumes. A value excluding zero would contradict the
+  // structural bound: it is kept, and the wider child demand with it.
+  void impose_structural_columns(std::size_t depth,Plan& prepared,LaurentRows& local,int operator_high) {
+    const auto needs=component_child_needs(depth,prepared,operator_high);
+    for(std::size_t j=0;j<needs.size();++j)if(needs[j])
+      for(int k=local.low;k<=local.high && k< -*needs[j];++k)for(auto& row:local.coefficients) {
+        auto& value=row[j][k-local.low];if(value.is_zero())continue;
+        if(value.contains_zero()){value=B(0);++statistics_.structural_zero_coefficients;}
+        else ++statistics_.structural_zero_conflicts;
+      }
+    linear_boundary::tighten(local);
   }
   PreparedAdjointStage adjoint_stage(std::size_t depth,Plan& prepared,int high) {
     const auto& node=graph_.nodes[depth];const auto sample=graph_.dimension;
@@ -1351,7 +1441,10 @@ class Evaluator {
     const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),end=sample.constant(Rational(1)-prepared.geometry.overlap);
     const auto h_ball=B::from_strings(prepared.geometry.overlap.str());
     preflight_linear_demands(depth,prepared);
-    int demand=checked(static_cast<long>(desired_top)+*prepared.adjoint_child_loss);
+    // With component demands the local operator is tightened to its structural
+    // columns below, so the child is needed through the tight bound only. The
+    // refinement loop still decides: a lower retained low raises the demand.
+    int demand=checked(static_cast<long>(desired_top)+*prepared.factored_child_loss);
     auto& combined=prepared.local_operator;
     for(unsigned refinement=0;refinement<options_.max_refinements;++refinement) {
       if(demand>static_cast<int>(options_.max_epsilon))throw std::runtime_error("recursive adjoint child epsilon demand exceeds finite budget");
@@ -1374,6 +1467,7 @@ class Evaluator {
         Matrix direct(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
         for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)direct[i]=node.observable_rows[i];
         combined=add_laurent_rows(*combined,exact_laurent_rows(direct,anchor,combined->high));
+        if(options_.component_epsilon_demands)impose_structural_columns(depth,prepared,*combined,high);
         observe_operator(depth,"combined local operator",*combined);
       } else ++statistics_.local_operator_reuses;
       try {

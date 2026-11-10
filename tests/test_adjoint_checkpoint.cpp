@@ -105,6 +105,25 @@ int main(){try {
   const auto saved_count=stats.saved;options.chart_observer=[](unsigned,double,double,const LaurentRows&){throw std::runtime_error("completed arm unexpectedly ran");};
   equal(continuous,cp::transport(a,initial,forcing,path,options,storage));
   require(stats.saved==saved_count && stats.completed_reused==1,"completed arm was recomputed or rewritten");
+  {
+    // A state larger than the file budget is not persisted, but the transport
+    // it belongs to must still complete with the same retained balls.
+    const auto small=directory/"oversize";cp::Statistics tiny_stats;cp::Options tiny{small,64,&tiny_stats};
+    options=AdjointOptions{};equal(continuous,cp::transport(a,initial,forcing,path,options,tiny));
+    require(tiny_stats.skipped_oversize==1 && tiny_stats.saved==0 && !std::filesystem::exists(small/(key+".json")),
+      "oversize checkpoint aborted the transport or was written");
+    // Intermediate saves are throttled; the first accepted chart and the
+    // completed arm are always persisted and remain reusable.
+    const auto slow=directory/"throttled";cp::Statistics slow_stats;cp::Options throttled{slow,64*1024*1024,&slow_stats,3600};
+    equal(continuous,cp::transport(a,initial,forcing,path,options,throttled));
+    require(slow_stats.saved==2,"throttled checkpoints did not keep exactly the first chart and the completed arm");
+    options.chart_observer=[](unsigned,double,double,const LaurentRows&){throw std::runtime_error("completed arm unexpectedly ran");};
+    equal(continuous,cp::transport(a,initial,forcing,path,options,throttled));
+    require(slow_stats.completed_reused==1,"throttled completed arm was not reusable");
+    cp::Statistics eager_stats;cp::Options eager{directory/"eager",64*1024*1024,&eager_stats,0};
+    options=AdjointOptions{};equal(continuous,cp::transport(a,initial,forcing,path,options,eager));
+    require(eager_stats.saved==snapshots.size(),"zero save interval did not persist every accepted chart");
+  }
   auto corrupt=saved_envelope;corrupt.as_object().at("payload").as_object()["leg"]=42;
   cp::detail::publish(file,boost::json::serialize(corrupt));
   rejects([&]{cp::transport(a,initial,forcing,path,options,storage);},"corrupt matching checkpoint silently restarted");

@@ -74,5 +74,13 @@ int main(){try {
     return scan::DemandCost{1};
   });
   check(derivative_candidate,"parameter-dependent candidate missing");
+  // The deterministic trial bound and a wall-clock cut are different ends:
+  // only the latter leaves the discovery undecided for a later run.
+  options.seconds=10;
+  auto complete=scan::scan_candidates(level,2,0,options);
+  check(!complete.stats.time_expired,"completed discovery reported a wall-clock cut");
+  options.seconds=1e-9;
+  auto cut=scan::scan_candidates(level,2,0,options);
+  check(cut.stats.time_expired&&cut.stats.budget_reached&&cut.stats.trials<complete.stats.trials,"wall-clock cut not reported");
   std::cout<<"Demand-first Pareto basis candidates, exact identities, sparse sectors and cache recovery passed\n";
 }catch(const std::exception &error){std::cerr<<error.what()<<'\n';return 1;}}

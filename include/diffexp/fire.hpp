@@ -76,13 +76,13 @@ inline std::string start(const ibp::PropagatorBasis& b,const Exact& dimension,
   if(n>20)throw std::invalid_argument("native FIRE preparation limited to 20 slots");
   std::ostringstream out;out<<"ExampleDimension[1] = "<<n<<"\n\nSBasis0L[1] = "
     <<b.space.loops*(b.space.loops+b.space.externals())<<"\n\n";
-  std::size_t r=0;
+  std::size_t r=0;const auto table=ibp::contractions(b);
   for(unsigned i=0;i<b.space.loops;++i)for(unsigned v=0;v<b.space.loops+b.space.externals();++v) {
     ++r;std::map<ibp::Integral,std::map<unsigned,Exact>> coefficients;
     auto add=[&](const ibp::Integral& shift,unsigned index,const Exact& c){ibp::add(coefficients[shift],index,c);};
     ibp::Integral shift(n,0);if(i==v)add(shift,0,dimension);
     for(std::size_t k=0;k<n;++k) {
-      auto contraction=b.rewrite(b.space.contraction(b.denominators[k],i,v));
+      const auto& contraction=table[r-1][k];
       shift.assign(n,0);++shift[k];add(shift,k+1,-contraction.constant);
       for(std::size_t j=0;j<n;++j){--shift[j];add(shift,k+1,-contraction.linear[j]);++shift[j];}
     }

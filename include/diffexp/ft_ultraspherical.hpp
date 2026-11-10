@@ -10,6 +10,7 @@ namespace diffexp::ft_ultraspherical {
 using B = Jet::Ball;
 namespace ultra = ft_ultraspherical_detail;
 namespace sp = transport::spectral_detail;
+namespace shared = ft_spectral::detail;
 // Explicit opt-in: raw affine paths and internal precision protection.
 struct Options : ft_spectral::Options {
   Options(){diagonal_gauge=false;endpoint_clustering=false;}
@@ -26,7 +27,6 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
               const ExactEpsilonMatrix &forcing,
               const std::vector<Exact> &vertices, const Options &options,
               Diagnostics &diagnostics, unsigned arithmetic_accuracy_goal = 0) {
-  using namespace ft_spectral::detail;
   diagnostics = {};
   auto started = std::chrono::steady_clock::now();
   double preparing = 0;
@@ -44,7 +44,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
     if(options.working_bits<128||options.working_bits>16384)throw sp::Rejected("FT ultraspherical internal precision budget");
     B::set_precision(std::max<slong>({512,options.working_bits,precision_restore.previous}));
     const auto bits = B::precision();
-    check_request(matrix, initial, forcing, vertices, options, bits);
+    shared::check_request(matrix, initial, forcing, vertices, options, bits);
     const auto d = initial.columns(), r = initial.coefficients.size();
     // A conservative routing policy, not a proof that the dynamics cannot
     // contract uncertainty. Decline this backend before expensive preparation;
@@ -56,7 +56,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       if(!sp::le(transport::arithmetic_error(value),input_tolerance*sp::midpoint_scale(value)))
         throw sp::Rejected("FT ultraspherical inherited input exceeds arm budget; use fallback");
     }
-    auto window = open_window(matrix, initial, forcing, vertices, options,
+    auto window = shared::open_window(matrix, initial, forcing, vertices, options,
                               arithmetic_accuracy_goal);
     const auto xi = window.xi, ei = window.ei;
     const int low = window.low;
@@ -76,7 +76,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       // parameter clustering and no diagonal gauge to apply.
       if(options.endpoint_clustering||options.diagonal_gauge)throw sp::Rejected("coefficient prototype requires affine ungauged path");
       auto point = exact_point(from, xi, from + width * from.variable(xi));
-      const auto coupling = couple(
+      const auto coupling = shared::couple(
           matrix, forcing, point, width, window, options.max_nodes,
           std::vector<const Exact *>(d, nullptr),
           [](const Exact &, unsigned, unsigned) {
@@ -105,10 +105,10 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       }
       if(polynomial_degree>32)throw sp::Rejected("FT ultraspherical polynomial degree budget");
       minimum_degree=std::max(minimum_degree,polynomial_degree);
-      const auto partitioned = partition(d, coupling.edges, options, diagnostics);
+      const auto partitioned = shared::partition(d, coupling.edges, options, diagnostics);
       const auto &blocks = partitioned.members;
       const auto &block_id = partitioned.block_id;
-      const auto geometry = path_geometry(coupling.denominators, xi, bits, check);
+      const auto geometry = shared::path_geometry(coupling.denominators, xi, bits, check);
       if (sp::node_forecast(geometry.singularities, options.accuracy_goal) >
           (options.conservative ? 2 * options.max_nodes : 512))
         throw sp::Rejected("FT spectral interval too close to singularities");
@@ -122,7 +122,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
         if(uncertain&&!std::all_of(matrix[j].begin(),matrix[j].end(),[](const Exact&v){return v.is_zero();}))active.push_back(j);
       }
       const unsigned nr=r+active.size();
-      Refinement refinement;
+      shared::Refinement refinement;
       std::vector<B> previous_affine;
       bool accepted = false;
       for (unsigned n : {8u,12u,16u,24u,32u,48u,64u,80u,96u,128u}) {
@@ -204,7 +204,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
           unsigned absolute = 0;
           if (auto tails = refinement.converged(values, difference, n, window,
                                                 absolute)) {
-            commit(current, values, *tails);
+            shared::commit(current, values, *tails);
             accepted = true;
             diagnostics.absolute_stability_components += absolute;
             ++diagnostics.legs;

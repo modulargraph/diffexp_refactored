@@ -94,6 +94,22 @@ int main(){try {
         const auto b=k<pair.second->low?B(0):pair.second->coefficients[i][j][k-pair.second->low];
         require(upper(a-b)<1e-24,"direct and full endpoint maps disagree in original coordinates");
       }
+  {
+    // Mixed endpoints: the lower one is direct (one row per operation), the
+    // upper series contributes a zero-constraint row for the fixed 1/(1-x)
+    // weight. Both operators must expose the same row count to the demand
+    // propagation and to transport.
+    auto constrained=functional_graph;
+    constrained.nodes[0].observable_rows[0][2]=path.constant(1)/(path.constant(1)-path);
+    auto mixed=direct_endpoint;mixed.automatic_basis_scan=false;unsigned constraints=0;
+    mixed.progress=[&](std::size_t,const std::string& phase,int){if(phase.rfind("physical endpoint zero constraints",0)==0)++constraints;};
+    recursion::Evaluator mixed_solver(constrained,mixed);
+    const auto profile=mixed_solver.epsilon_demand_profile(0);
+    require(constraints==1 && mixed_solver.statistics().direct_endpoints==1 && mixed_solver.statistics().endpoint_series_built==1,
+        "mixed direct/series endpoint fixture lost its constraint row");
+    require(profile.child_component_loss.size()==3 && mixed_solver.statistics().demand_preflights==1,
+        "direct endpoint operator lacks the other endpoint's constraint rows");
+  }
   recursion::Evaluator solver(graph,observed);auto result=solver.evaluate(0);
   const auto& geometry=solver.endpoint_geometry(0);
   require(geometry.overlap<=observed.overlap && NativeTailMagnitude::upper_abs(B::from_strings(geometry.overlap.str()))*NativeTailMagnitude::from_ui(16)<=geometry.nearest_pole_lower,"geometric endpoint margin must be proven from all nonzero pole enclosures");

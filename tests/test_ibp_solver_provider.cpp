@@ -102,7 +102,11 @@ int main(int argc,char** argv){try{
     auto manifest=*std::filesystem::directory_iterator(planned_options.cache_directory/"closure-plans");auto corrupted=fire_modular::detail::read(manifest.path());corrupted["demands"]=boost::json::array{};fire_modular::detail::save(manifest.path(),corrupted);
     ibp_solver::Session invalid_hint(basis,d,field,planned_options);auto invalid_stage=level::prepare(basis,d,field,0,requests,stage_options,[&](const auto& r,const auto& l){return invalid_hint(r,l);});require(!invalid_stage.success,"valid-hash closure plan omitted original requests");
   }
-  // A failed specialized probe must only disable the degree heuristic. This
+  // An unfinished plan is still a valid hint: the level preparer closes the rest.
+  {auto short_options=sliced_options;short_options.cache_directory=options.cache_directory/"short-plan";short_options.closure_parameter=0;short_options.max_planning_passes=1;
+    ibp_solver::Session shortened(basis,d,field,short_options);level::Options stage_options;stage_options.total_timeout_seconds=90;stage_options.provider=limits;
+    auto stage=level::prepare(basis,d,field,0,requests,stage_options,[&](const auto& r,const auto& l){return shortened(r,l);});
+    require(stage.success,stage.reason.c_str());require(shortened.planning_statistics().passes>=1&&!std::filesystem::exists(short_options.cache_directory/"closure-plans"),"an unstabilized closure plan was saved as complete");}
   // deliberately exercises fallback without weakening cache-integrity checks.
   ibp_solver::Sampler fallback_sampler(basis,d,options);bool failed_slice=false;
   fire_modular::Options fallback_options;fallback_options.cache_directory=options.cache_directory;

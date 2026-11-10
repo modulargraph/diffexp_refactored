@@ -55,11 +55,7 @@ inline CertifiedRationalResult certified_rational_line(
   }
   const Rational requested_radius(options.initial_radius);
   if(!(Rational(0)<requested_radius))throw std::invalid_argument("certified rational radius must be positive");
-  struct PrecisionScope {
-    slong previous;
-    explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}
-    ~PrecisionScope(){B::set_precision(previous);}
-  } precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   // Parse/validate the recurrence only once; separate exact centered copies
   // are used for disk proofs to avoid interval dependency in denominators.
   const auto compiled=compile_rational_entries(entries);

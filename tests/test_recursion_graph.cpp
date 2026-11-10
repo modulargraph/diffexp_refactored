@@ -1,5 +1,6 @@
 #include "diffexp/recursion_graph.hpp"
 #include <iostream>
+#include <thread>
 using namespace diffexp;
 void require(bool test,const char* message){if(!test)throw std::runtime_error(message);}
 int main(int argc,char** argv){try {
@@ -50,6 +51,19 @@ int main(int argc,char** argv){try {
   bool rejected=false;options.anchors={Rational(0),Rational("1/3")};
   try{recursion::prepare(feynman::example_family("sunrise"),{},options,native);}catch(const std::invalid_argument&){rejected=true;}
   require(rejected,"singular matching anchor rejected before expensive work");options.anchors.clear();
+  {
+    // The total budget gates the START of a level. A level that completes
+    // after the deadline (here the terminal, exactly zero one) is kept.
+    auto hurried=options;hurried.total_timeout_seconds=1;
+    auto slow_zero=[](const ibp::PropagatorBasis&,const Exact&,const ExactField&,std::size_t,
+        const std::vector<ibp::Integral>& requested,const level::Options&) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+      level::Result result;result.success=true;result.target_rows.assign(requested.size(),{});return result;
+    };
+    auto late=recursion::prepare(feynman::example_family("sunrise"),{},hurried,slow_zero);
+    require(late.nodes.size()==1 && late.nodes[0].closure.ordered_basis.empty() && late.events.back().elapsed_seconds>1,
+      "completed terminal level discarded for finishing after the total budget");
+  }
   if(argc>1) {
     options.reduction.provider.executable=argv[1];options.reduction.provider.timeout_seconds=90;
     options.reduction.total_timeout_seconds=180;options.total_timeout_seconds=300;

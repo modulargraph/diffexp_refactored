@@ -122,6 +122,73 @@ int main(int argc, char **argv) {
               constant.project(std::vector<Exact>{e("1/x^2")}));
         },
         "fixed unregulated power divergence must reject");
+    // y'=0 with the observable (1+x^3)/x^3 = x^-3 + 1. At x order 2 the
+    // retained series stops at x^-1: the x^0 coefficient is unknown and must be
+    // refused, never reported as a vanishing endpoint constant.
+    for (unsigned mode : {0, 1, 2, 3}) {
+      AffineFrobeniusSeries::Options options;
+      options.univariate_epsilon_projection = mode == 1;
+      options.cleared_epsilon_projection = mode == 2;
+      options.finite_lag_projection = mode == 3;
+      const AffineFrobeniusSeries::Matrix pole{{e("(1+x^3)/x^3")}},
+          deep{{e("(1+x^4)/x^4")}};
+      auto shallow = AffineFrobeniusSeries::prepare({{e("0")}}, 0, 1, 2, options),
+           reaching = AffineFrobeniusSeries::prepare({{e("0")}}, 0, 1, 3, options);
+      rejects([&] { shallow.project_endpoint_domain(pole); },
+              "endpoint constant beyond the retained x frontier was reported");
+      auto limit = reaching.project_endpoint_domain(pole);
+      check(limit.zero_constraints.size() == 1 &&
+                limit.zero_constraints[0].power == Rational(-3) &&
+                reaching.dr_endpoint_constant(limit.admissible)[0][0] == e("1"),
+            "reaching endpoint frontier lost its divergent mode or constant");
+      // An integral must see every fixed power <= -1: x^-4 at order 2 is known
+      // only through x^-2, while order 3 reaches x^-1.
+      rejects([&] { shallow.dr_domain(shallow.project(deep), true); },
+              "integral domain beyond the retained x frontier was reported");
+      auto integral = reaching.dr_domain(reaching.project(deep), true);
+      check(integral.zero_constraints.size() == 1 &&
+                integral.zero_constraints[0].power == Rational(-4) &&
+                integral.admissible.terms.empty(),
+            "reaching integral frontier lost its nonintegrable mode");
+      // Nonzero epsilon slopes have no fixed sector and need no frontier.
+      auto sloped = AffineFrobeniusSeries::prepare({{e("eps/x")}}, 0, 1, 2, options);
+      check(sloped.project_endpoint_domain({{e("1/x^9")}}).zero_constraints.empty(),
+            "regulated sector was held to the fixed endpoint frontier");
+      // Shapes are validated before any entry is read.
+      auto square = AffineFrobeniusSeries::prepare(
+          {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2, options);
+      bool ragged = false;
+      try {
+        square.project(AffineFrobeniusSeries::Matrix{{e("1"), e("0")}, {e("1")}});
+      } catch (const std::invalid_argument &) {
+        ragged = true;
+      }
+      check(ragged, "ragged observable rows were indexed before validation");
+    }
+    {
+      auto square = AffineFrobeniusSeries::prepare(
+          {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2);
+      auto misplaced = square.terms();
+      misplaced.terms.front().column = 7;
+      bool caught = false;
+      try {
+        square.contract(misplaced, {e("1"), e("1")});
+      } catch (const std::invalid_argument &) {
+        caught = true;
+      }
+      check(caught, "contraction indexed a column outside its constants");
+      caught = false;
+      try {
+        AffineFrobeniusSeries::prepare(AffineFrobeniusSeries::Matrix(1), 0, 1, 2);
+      } catch (const std::invalid_argument &) {
+        caught = true;
+      }
+      check(caught, "empty source row was indexed before validation");
+      check(square.epsilon_valuation(e("eps^4*(2+eps)/(3-eps)")) == 4 &&
+                square.epsilon_valuation(e("(1+eps)/(eps^3*(1-2*eps))")) == -3 &&
+                square.epsilon_valuation(e("7/3")) == 0,
+            "exponent-only epsilon valuation changed");
+    }
     // Equal-slope rational Jordan residue: x^(-1+2eps) log(x).
     auto jordan = AffineFrobeniusSeries::prepare(
         {{e("(-1+2*eps)/x"), e("1/x")}, {e("0"), e("(-1+2*eps)/x")}}, 0, 1, 2);

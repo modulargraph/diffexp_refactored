@@ -1,5 +1,6 @@
 #include "diffexp/ft_spectral.hpp"
 #include "diffexp/ft_spectral_checkpoint.hpp"
+#include "diffexp/ft_ultraspherical.hpp"
 #include <iostream>
 using namespace diffexp;
 using B=Jet::Ball;
@@ -113,6 +114,9 @@ int main(){try {
  acb_log(logleft.raw(),(-pball).raw(),256);acb_log(logright.raw(),(B(1)-pball).raw(),256);
  near(near_result->coefficients[0][0][0],logright-logleft,"near-interior logarithmic integral");
  require(stats.subdivisions>0,"near-interior subdivision missing");
+ // The scalar collocation inverse depends only on the node count: every
+ // subdivision attempt of this ungauged, uncoupled system reuses one per level.
+ require(stats.factorizations<=5,"plain collocation inverse was not shared across subdivision attempts");
  auto bounded=split;bounded.max_subdivisions=1;bounded.accuracy_goal=40;
  require(!ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},bounded,stats)&&stats.subdivisions<=1,"subdivision count bound ignored");
  // Existing uncertainty between local and whole-arm budgets must survive.
@@ -127,6 +131,23 @@ int main(){try {
  arb_add_error_2exp_si(acb_realref(inherited.coefficients[0][0][0].raw()),-130);
  inherited_options.max_subdivisions=1;
  require(!ft_spectral::try_transport({{zero}},inherited,{{zero}},{zero,one},inherited_options,stats),"above-global inherited uncertainty accepted");
+ // An inherited ball wider than the arm budget is not a resolution failure:
+ // bisecting the path cannot narrow it, so no subdivision may be spent on it.
+ inherited_options.max_subdivisions=64;
+ require(!ft_spectral::try_transport({{zero}},inherited,{{zero}},{zero,one},inherited_options,stats)&&stats.subdivisions==0&&stats.reason.find("inherited input uncertainty")!=std::string::npos,"inherited uncertainty was retried by subdivision");
+ // The coupled-node budget counts intervals. A level beyond it ends the
+ // ladder like any unresolved segment, so bisection still reaches the goal
+ // within the budget; a block too large for the first level is structural.
+ auto budgeted=options;budgeted.endpoint_clustering=false;budgeted.max_block_nodes=32;
+ require(!ft_spectral::try_transport({{zero,-one},{-one,zero}},{0,0,{{{B(1)},{B(0)}}}},{{zero,zero}},{zero,one},budgeted,stats)&&stats.reason=="FT spectral resolution or arithmetic accuracy exhausted"&&stats.nodes==std::vector<unsigned>({8,12,16}),"coupled-node budget did not end refinement at the last admissible level");
+ budgeted.max_subdivisions=64;
+ auto budget_block=ft_spectral::try_transport({{zero,-one},{-one,zero}},{0,0,{{{B(1)},{B(0)}}}},{{zero,zero}},{zero,one},budgeted,stats);
+ require(bool(budget_block),"coupled-node budget was not retried by subdivision: "+stats.reason);
+ near(budget_block->coefficients[0][0][0],(expone+B(1)/expone)/B(2),"budgeted coupled SCC cosh");
+ near(budget_block->coefficients[0][1][0],(expone-B(1)/expone)/B(2),"budgeted coupled SCC sinh");
+ require(stats.subdivisions>0&&*std::max_element(stats.nodes.begin(),stats.nodes.end())<=16,"budgeted coupled SCC exceeded its node budget");
+ budgeted.max_block_nodes=8;
+ require(!ft_spectral::try_transport({{zero,-one},{-one,zero}},{0,0,{{{B(1)},{B(0)}}}},{{zero,zero}},{zero,one},budgeted,stats)&&stats.subdivisions==0&&stats.reason=="FT spectral coupled-node budget","oversized coupled block was retried by subdivision");
  auto zero_goal=split;zero_goal.accuracy_goal=0;
  require(!ft_spectral::try_transport({{zero}},exp_initial,{{zero}},{zero,one},zero_goal,stats),"subdivision accepted zero accuracy goal");
  auto contour_split=ft_spectral::try_transport({{-one/(x.constant(2)*x)}},exp_initial,{{zero}},{one,imag,-one,-imag,one},split,stats);
@@ -136,5 +157,21 @@ int main(){try {
  require(!ft_spectral::try_transport({{-one}},exp_initial,{{zero}},{zero,one},timed,stats),"total subdivision time bound ignored");
  require(!ft_spectral::try_transport({{-one/(x-one/one.constant(3))}},exp_initial,{{zero}},{zero,one},split,stats)&&stats.subdivisions==0,"subdivision hid a true path pole");
  require(!ft_spectral::try_transport({{one/eps}},exp_initial,{{zero}},{zero,one},split,stats)&&stats.subdivisions==0,"subdivision retried structural unsupported input");
+ // Coefficient-space backend on the same contract. g'=-(8-16x)g maps to
+ // u'=4tu on [-1,1], whose first natural pivot 1-4/4 vanishes exactly; the
+ // regular solution exp(8x^2-8x) must still be found by exchanging rows.
+ ft_ultraspherical::Options coefficient;coefficient.accuracy_goal=20;
+ auto ultra=[&](const ExactEpsilonMatrix& a,const LaurentRows& initial,const ExactEpsilonMatrix& f,const std::vector<Exact>& path){auto result=ft_ultraspherical::try_transport(a,initial,f,path,coefficient,stats);require(bool(result),"ultraspherical: "+stats.reason);require(B::precision()==256,"ultraspherical precision escaped its scope");return *result;};
+ auto pivoted=ultra({{one.constant(8)-one.constant(16)*x}},exp_initial,{{zero}},{zero,one});
+ near(pivoted.coefficients[0][0][0],B(1),"ultraspherical vanishing natural pivot");
+ near(ultra({{-one}},exp_initial,{{zero}},{zero,one}).coefficients[0][0][0],expone,"ultraspherical exponential");
+ auto ultra_block=ultra({{zero,-one},{-one,zero}},{0,0,{{{B(1)},{B(0)}}}},{{zero,zero}},{zero,one});
+ near(ultra_block.coefficients[0][0][0],(expone+B(1)/expone)/B(2),"ultraspherical coupled SCC cosh");
+ near(ultra_block.coefficients[0][1][0],(expone-B(1)/expone)/B(2),"ultraspherical coupled SCC sinh");
+ auto half_way=ft_ultraspherical::try_transport({{one.constant(8)-one.constant(16)*x}},exp_initial,{{zero}},{zero,one/one.constant(2)},coefficient,stats);
+ B exp_minus_two;acb_exp(exp_minus_two.raw(),B(-2).raw(),256);
+ require(bool(half_way),"ultraspherical half leg: "+stats.reason);near(half_way->coefficients[0][0][0],exp_minus_two,"ultraspherical Gaussian half leg");
+ coefficient.max_block_nodes=8;
+ require(!ft_ultraspherical::try_transport({{zero,-one},{-one,zero}},{0,0,{{{B(1)},{B(0)}}}},{{zero,zero}},{zero,one},coefficient,stats)&&stats.reason=="FT spectral coupled-node budget","ultraspherical oversized coupled block accepted");
  std::cout<<"FT spectral gauges, SCC ordering, Laurent windows, branches and fallback passed\n";
  }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -13,7 +13,10 @@ int main(){try{
  // Synthetic cached coordinate, not an asserted physical integral identity:
  // U=Y/(1+x) has U'=0 while Y'=Y/(1+x).
  node.closure.requested_integrals={dotted};node.closure.target_rows={{one/(one+x)}};
- node.observable_rows={{one}};node.operations={pullback::Plan{}};
+ // The Direct pole is a child epsilon loss, without which no scan runs. It
+ // is the same in every internal basis, so candidates tie on demand.
+ const auto eps=graph.dimension.variable(1);
+ node.observable_rows={{one},{one/eps}};node.operations={pullback::Plan{},pullback::Plan{}};
  node.operations[0].operation=feynman::Operation::UpperLimit;
  causal::Prescription prescription;prescription.f_rim=-1;prescription.levels={{1}};
  prescription.provenance="synthetic endpoint-screening identity";
@@ -36,6 +39,26 @@ int main(){try{
    const auto& rhs=composed.coefficients[0][0][k-composed.low];
    check(acb_overlaps(lhs.raw(),rhs.raw()),"upper-cut coordinate pullback disagrees with rebuilt endpoint");
    B exact(k?0:2);check(acb_contains(lhs.raw(),exact.raw()),"requested physical upper functional changed");}
+ // The selected basis reuses the original endpoint frames through the exact
+ // pullback: selecting it must not build a second pair of endpoint series.
+ check(search.statistics().endpoint_series_built==original.statistics().endpoint_series_built &&
+       search.statistics().endpoint_series_built==2,"basis selection rebuilt exact endpoint series");
+ check(search.statistics().basis_scans==1 && search.statistics().basis_scans_skipped==0,"scan accounting");
+ {
+   // No child epsilon loss: nothing to gain, so no discovery and no change.
+   auto lossless=graph;lossless.nodes[0].observable_rows={{one}};lossless.nodes[0].operations.resize(1);
+   recursion::Evaluator idle(lossless,settings);(void)idle.prepare_factored_consumers(0,0);
+   check(idle.statistics().basis_scans==0 && idle.statistics().basis_scans_skipped==1 &&
+         !idle.basis_selections().at(0).accepted && idle.statistics().demand_preflights==1,
+         "basis discovery ran although the original basis loses no child order");
+   // A closed-form leaf child: its extra orders are cheaper than a discovery.
+   auto above_leaf=graph;above_leaf.nodes.push_back(graph.nodes[0]);above_leaf.nodes[1].scalar_leaf=true;
+   auto two=settings;two.causal_prescription->levels={{1},{1}};
+   recursion::Evaluator leafward(above_leaf,two);(void)leafward.prepare_factored_consumers(0,0);
+   check(leafward.statistics().basis_scans==0 && leafward.statistics().basis_scans_skipped==1 &&
+         leafward.basis_selections().at(0).reason.find("leaf")!=std::string::npos,
+         "basis discovery ran above the closed-form leaf");
+ }
  check(recursion::basis_persistence::revision==std::string("physical-basis-demand-selection-v3"),"screen revision did not invalidate v2 decisions");
  std::cout<<"Cheap endpoint screens, bounded full validation, upper-cut identity and v3 revision passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

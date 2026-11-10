@@ -82,6 +82,19 @@ int main(){try{
   options.seconds_budget=20;options.accuracy_goal=40;options.matrix_bits=0;B::set_precision(64);
   check(!transport::spectral_try(exponential,exp_initial,options,diagnostics),"insufficient spectral precision accepted");
   B::set_precision(256);
+  // matrix_bits governs the collocation operator, its inverse and their
+  // products, not only the node samples: extra matrix precision must shrink
+  // the arithmetic radius the inverse leaves on the first epsilon order.
+  {
+    transport::SpectralOptions guarded;guarded.accuracy_goal=40;guarded.seconds_budget=20;
+    auto working=transport::spectral_try(exponential,exp_initial,guarded,diagnostics);
+    guarded.matrix_bits=512;
+    auto extended=transport::spectral_try(exponential,exp_initial,guarded,diagnostics);
+    check(working && extended && B::precision()==256,"matrix precision run failed or escaped its scope");
+    near(extended->values[0][1],B(1),"1e-60","matrix precision changed the solution");
+    auto narrow_radius=transport::arithmetic_error(extended->values[0][1])*B(16),wide_radius=transport::arithmetic_error(working->values[0][1]);
+    check(arb_lt(acb_realref(narrow_radius.raw()),acb_realref(wide_radius.raw())),"matrix_bits did not govern the collocation inverse");
+  }
   // Exercise selection through the public request interface, including the
   // native pullback of ordinary dt input and forced non-spectral choices.
   auto integration=j::parse(R"JSON({"dimension":1,"epsilon_order":3,"taylor_order":24,"working_bits":256,"accuracy_goal":20,"recurrence":"spectral","paths":{"t":"x/2"},"entries":[{"row":0,"column":0,"epsilon":1,"variable":"t","expression":"1"}],"boundary":[["1","0","0","0"]]})JSON").as_object();

@@ -136,6 +136,40 @@ int main(int argc, char **argv) {
           "certified removable pole still demands an extra boundary order");
     check(ao::apply_operator(conservative,just_enough,{0,0}).status==am::Status::NeedMoreBoundary,
           "conservative operator unexpectedly waived a boundary coefficient");
+    {
+      // Extending the exact epsilon coefficients one order at a time must give
+      // the same series for the same exact-operation charge as one direct build.
+      ExactField gauge_field({"x", "ell"});
+      Exact gauge_zero(gauge_field, 0);
+      const auto shifts =
+          coalescing.valuation_metadata(coalescing.terms()).minimum_by_column;
+      am::detail::Budget direct{am::Options{}}, grown{am::Options{}};
+      auto full = am::detail::exact_coefficients(coalescing, coalescing.terms(),
+                                                 shifts, 3, gauge_zero, direct);
+      am::detail::ExactSeries stepwise;
+      for (unsigned n = 0; n <= 3; ++n)
+        am::detail::extend_exact_coefficients(stepwise, coalescing,
+                                              coalescing.terms(), shifts, n,
+                                              gauge_zero, grown);
+      check(stepwise == full && direct.work > 0 && grown.work == direct.work,
+            "incremental epsilon orders were recharged or changed");
+      am::detail::Budget probing{am::Options{}};
+      auto gauge = am::detail::adaptive_row_gauge(
+          coalescing, coalescing.terms(), shifts, x, gauge_zero, probing);
+      check(gauge.steps > 0 &&
+                gauge.coefficients.size() >= gauge.inverse_epsilon_powers.size(),
+            "adaptive gauge did not retain its exact coefficient prefix");
+      for (unsigned n = 0; n < gauge.coefficients.size() && n < full.size(); ++n)
+        check(gauge.coefficients[n] == full[n],
+              "adaptive gauge coefficient prefix differs from a direct build");
+      // A functional term outside its declared shape is refused, not indexed.
+      auto misplaced = coalescing_primitive;
+      misplaced.terms.front().row = 5;
+      auto refused = ao::compose(coalescing_inverse, coalescing, misplaced, x, 2);
+      check(refused.status == am::Status::Unsupported &&
+                refused.reason.find("outside shape") != std::string::npos,
+            "functional coordinate outside its shape was indexed");
+    }
     auto limited=certificate_options;limited.principal_part_max_operations=0;
     auto fallback=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,limited);
     check(fallback.success() && fallback.principal_part_attempted &&

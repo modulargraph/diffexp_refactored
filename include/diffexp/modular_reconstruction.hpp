@@ -152,7 +152,6 @@ inline bool dense_scan_saturated(std::size_t samples,std::size_t variables,unsig
 // cap would silently delete monomials such as x^15 eps^2 from the ansatz.
 inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigned max_variable_degree,
     std::size_t limit=1024) {
-  const unsigned max_degree=max_variable_degree;
   Ansatz result;
   auto terms=[&](bool denominator)->std::optional<std::vector<Power>> {
     std::vector<std::pair<unsigned,unsigned>> ranges;
@@ -160,16 +159,16 @@ inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigne
       const auto& powers=denominator?image.ansatz.denominator:image.ansatz.numerator;
       const auto offset=denominator?image.ansatz.numerator.size():0;
       if(image.coefficients.size()!=image.ansatz.numerator.size()+image.ansatz.denominator.size())throw std::invalid_argument("slice image shape");
-      unsigned lo=max_degree+1,hi=0;
+      unsigned lo=max_variable_degree+1,hi=0;
       for(std::size_t j=0;j<powers.size();++j){if(powers[j].size()!=1)throw std::invalid_argument("degree slice must be univariate");
         if(image.coefficients[offset+j]){lo=std::min(lo,powers[j][0]);hi=std::max(hi,powers[j][0]);}}
-      if(lo>max_degree)return std::nullopt;ranges.emplace_back(lo,hi);
+      if(lo>max_variable_degree)return std::nullopt;ranges.emplace_back(lo,hi);
     }
     std::vector<Power> out;Power power(slices.size());bool overflow=false;
-    auto visit=[&](auto&& self,std::size_t i,unsigned sum)->void {
+    auto visit=[&](auto&& self,std::size_t i)->void {
       if(overflow)return;if(i==ranges.size()){out.push_back(power);overflow=out.size()>limit;return;}
-      for(unsigned e=ranges[i].first;e<=ranges[i].second&&!overflow;++e){power[i]=e;self(self,i+1,sum+e);}
-    };visit(visit,0,0);if(overflow||out.empty())return std::nullopt;return out;
+      for(unsigned e=ranges[i].first;e<=ranges[i].second&&!overflow;++e){power[i]=e;self(self,i+1);}
+    };visit(visit,0);if(overflow||out.empty())return std::nullopt;return out;
   };
   auto n=terms(false),d=terms(true);if(!n||!d)return std::nullopt;
   result.numerator=std::move(*n);result.denominator=std::move(*d);return result;

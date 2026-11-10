@@ -34,5 +34,10 @@ int main(){try {
     B expected;acb_exp(expected.raw(),B::from_strings(rate).raw(),384);
     if(size(stiff[0][0]/expected-B(1))>1e-30)throw std::runtime_error("stiff pole-free line was not subdivided to its Taylor accuracy");
   }
+  // Two simple roots 2^-20 apart are not separable at the requested 16 bits;
+  // an exact squarefree polynomial must be retried at higher precision.
+  auto near_roots=polynomial_roots((x-x.constant(1))*(x.constant(1048576)*x-x.constant(1048577)),2,16);
+  if(near_roots.size()!=2 || size(near_roots[0]-near_roots[1])>1e-5 || near_roots[0].contains_zero())
+    throw std::runtime_error("close simple roots were not isolated after a precision retry");
   std::cout<<"Laurent contour transport and explicit boundary demands passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

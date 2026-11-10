@@ -28,9 +28,11 @@ struct Factor {
  if(a[k][k].contains_zero()){unsigned best=k;
  for(auto i:rows[k])if(i>k&&!a[i][k].contains_zero()&&(best==k||lower(a[i][k])>lower(a[best][k])))best=i;
  if(best==k)throw std::runtime_error("ultra zero-containing pivot: whole-arm fallback required");
- for(auto j:cols[k])rows[j].erase(k);for(auto j:cols[best])rows[j].erase(best);
+ for(auto j:cols[k])rows[j].erase(k);
+ for(auto j:cols[best])rows[j].erase(best);
  std::swap(a[k],a[best]);std::swap(cols[k],cols[best]);
- for(auto j:cols[k])rows[j].insert(k);for(auto j:cols[best])rows[j].insert(best);
+ for(auto j:cols[k])rows[j].insert(k);
+ for(auto j:cols[best])rows[j].insert(best);
  exchange[k]=best;}
  std::vector<unsigned> targets;for(auto i:rows[k])if(i>k)targets.push_back(i);
  for(auto i:targets){B f=a[i][k]/a[k][k];elimination[k].push_back({i,f});

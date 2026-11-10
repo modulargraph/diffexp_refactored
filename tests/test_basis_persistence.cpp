@@ -80,10 +80,31 @@ int main(){try{
   auto disabled=options;disabled.automatic_basis_scan=false;
   recursion::Evaluator disabled_solver(graph,disabled);(void)disabled_solver.epsilon_demand_profile(0);
   require(disabled_solver.statistics().basis_cache_hits==0 && disabled_solver.basis_selections().empty(),"disabled scan loaded automatic basis");
+  // Without a child epsilon loss there is nothing a scan could gain: it is
+  // skipped, and a skipped scan is not a decision worth persisting.
+  changed=graph;changed.nodes[0].closure.matrix={{zero}};
+  auto skipped_options=options;skipped_options.basis_cache_directory=root/"skipped";
+  recursion::Evaluator skipped(changed,skipped_options);(void)skipped.epsilon_demand_profile(0);
+  require(skipped.statistics().basis_scans==0 && skipped.statistics().basis_scans_skipped==1 &&
+          skipped.statistics().basis_cache_writes==0 && !skipped.basis_selections().at(0).accepted,
+          "a basis scan ran, or was persisted, although the original basis loses no child order");
   // A completed no-improvement decision is also durable, avoiding a future
   // wall-clock scan selecting different coordinates during a continuation.
-  changed=graph;changed.nodes[0].closure.matrix={{zero}};
-  auto original_options=options;original_options.basis_cache_directory=root/"original";
+  // The Direct pole gives the level a child loss no internal basis can remove,
+  // and the budget lets the one-master discovery run to its end.
+  const auto eps=graph.dimension.variable(1);
+  changed.nodes[0].observable_rows={{one/eps}};
+  auto original_options=options;original_options.basis_cache_directory=root/"original";original_options.basis_scan_seconds=5;
+  // A discovery cut by its wall-clock budget decided nothing: it must not pin
+  // the original basis for every later run with a real budget.
+  auto cut_options=original_options;cut_options.basis_cache_directory=root/"cut";cut_options.basis_scan_seconds=0.000001;
+  recursion::Evaluator hurried(changed,cut_options);(void)hurried.epsilon_demand_profile(0);
+  require(hurried.statistics().basis_scans==1 && hurried.statistics().basis_cache_writes==0 &&
+          !hurried.basis_selections().at(0).accepted,"a time-cut discovery was persisted as a decision");
+  cut_options.basis_scan_seconds=5;
+  recursion::Evaluator patient(changed,cut_options);(void)patient.epsilon_demand_profile(0);
+  require(patient.statistics().basis_cache_hits==0 && patient.statistics().basis_scans==1 &&
+          patient.statistics().basis_cache_writes==1,"a time-cut discovery blocked the later complete one");
   recursion::Evaluator first(changed,original_options);(void)first.epsilon_demand_profile(0);
   require(first.statistics().basis_scans==1 && first.statistics().basis_cache_writes==1,"original decision was not saved");
   recursion::Evaluator second(changed,original_options);(void)second.epsilon_demand_profile(0);
@@ -92,7 +113,6 @@ int main(){try{
   // A persisted coordinate remains pinned even when its cost ties the original.
   auto pinned=options;pinned.basis_cache_directory=root/"equal-cost-pinned";
   artifacts::Store pinned_store(pinned.basis_cache_directory);
-  const auto eps=graph.dimension.variable(1);
   bp::save(pinned_store,id,{{node.closure.matrix,{{eps}},{{one/eps}},node.closure.matrix},true},node.closure.matrix,0);
   recursion::Evaluator tied(graph,pinned);(void)tied.epsilon_demand_profile(0);
   require(tied.basis_selections().front().cache_hit && tied.basis_selections().front().accepted,

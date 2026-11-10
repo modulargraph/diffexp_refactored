@@ -1,5 +1,6 @@
 #include "diffexp/level_cache.hpp"
 #include <iostream>
+#include <thread>
 using namespace diffexp;
 namespace a=diffexp::artifacts;
 void require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
@@ -85,6 +86,17 @@ int main(){try {
   auto zero_again=cached_level::prepare(zeros,basis,d,field,0,requested,tiny);
   require(zero.result.success && zero_again.cache_hit && zero_again.result.ordered_basis.empty() &&
       zero_again.result.target_witnesses.size()==requested.size(),"zero-span cache lost exact target witnesses");
+  // A closure whose provider pass overran the level budget is nevertheless
+  // complete and exactly verified: it is kept and cached. Discarding it would
+  // repeat the same reduction and overrun the same way.
+  a::Store late(root/"late");auto hurried=options;hurried.total_timeout_seconds=1;std::size_t slow_calls=0;
+  auto slow=[&](const std::vector<ibp::Integral>& batch,const fire::Options& limits) {
+    ++slow_calls;std::this_thread::sleep_for(std::chrono::milliseconds(1100));return provider(batch,limits);
+  };
+  auto overrun=cached_level::prepare(late,basis,d,field,0,requested,hurried,slow);
+  require(overrun.result.success && !overrun.cache_hit && overrun.result.elapsed_seconds>1,"completed closure discarded for finishing after its budget");
+  auto kept=cached_level::prepare(late,basis,d,field,0,requested,tiny);
+  require(kept.cache_hit && kept.content_id==overrun.content_id && slow_calls==1,"late but verified closure was not cached");
   // Ordinary on-disk checksum corruption also fails closed, without FIRE.
   auto disk=store.path(scientific.key(),first.content_id);a::fs::permissions(disk,a::fs::perms::owner_write,a::fs::perm_options::add);
   std::ofstream(disk,std::ios::trunc)<<"{broken";

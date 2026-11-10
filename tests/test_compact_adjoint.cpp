@@ -80,5 +80,30 @@ int main(){try {
   require(large.constant(large.rational())==large,"direct exact rational conversion changed value");
   require(*exact_epsilon_valuation(e("eps^7/(eps^11*(1+x))"),1)==-4,
           "direct exponent valuation changed signed order");
+  {
+    // Term and operation budgets are charged per replicated observable row.
+    // A batch exceeding them must split like one exceeding the cell budget,
+    // and reproduce the explicitly batched retained balls exactly.
+    const ExactEpsilonMatrix scalar{{e("1/(1+x)")}},none(4,std::vector<Exact>{zero});
+    LaurentRows rows{0,0,{{{B(1)}},{{B(2)}},{{B(3)}},{{B(4)}}}};
+    AdjointOptions single;single.max_rows_per_batch=1;
+    const auto expected=transport_adjoint_rows(scalar,rows,none,{zero,one},single);
+    const auto one_row=rational_circuit::compile({{0,0,0,e("-1/(1+x)")}},2,0,1,0,80);
+    for(unsigned kind=0;kind<2;++kind) {
+      AdjointOptions tight;AdjointConditioningStats work;tight.conditioning_stats=&work;
+      if(kind==0)tight.max_circuit_operations=rational_circuit::operation_upper_bound(one_row.data(),80,1);
+      else tight.max_circuit_terms=one_row.data().visited_terms;
+      const auto split=transport_adjoint_rows(scalar,rows,none,{zero,one},tight);
+      require(work.circuit_batch_reductions==2,"circuit budget overrun did not split the row batch");
+      for(unsigned i=0;i<4;++i)require(acb_equal(split.coefficients[i][0][0].raw(),expected.coefficients[i][0][0].raw()),
+        "budget-split batches changed retained balls");
+      require(adjoint_checkpoint::identity(scalar,rows,none,{zero,one},tight)!=adjoint_checkpoint::identity(scalar,rows,none,{zero,one},AdjointOptions{}),
+        "circuit budgets missing from checkpoint identity");
+      if(kind==0)--tight.max_circuit_operations;else --tight.max_circuit_terms;
+      bool rejected=false;
+      try{transport_adjoint_rows(scalar,rows,none,{zero,one},tight);}catch(const std::length_error&){rejected=true;}
+      require(rejected,"a single row beyond the circuit budget was accepted");
+    }
+  }
   std::cout<<"compact adjoint integration passed\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}}

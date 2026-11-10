@@ -66,5 +66,37 @@ int main(){try{
   auto empty=graph;empty.nodes[0].observable_rows={{zero,zero,zero}};
   recursion::Evaluator zeros(empty,settings);auto z=zeros.evaluate(0);
   for(const auto& c:z.values[0])require(c.is_zero(),"structurally zero preflight result changed");
+  {
+    // Y0'=Y1/eps forces the gauge Y=(Z0,eps Z1,eps Z2), although the requested
+    // limit Y2(x->1)=Y2(anchor) never touches the coupled pair. One common
+    // window for all columns (maximum shift plus deepest row pole) would ask
+    // the child for one order nothing consumes; the structural column windows
+    // do not, and the transported operator's padding is exactly zero.
+    auto shifted=graph;auto& top=shifted.nodes[0];
+    top.operations[0].operation=feynman::Operation::UpperLimit;
+    top.closure.matrix={{zero,one/eps,zero},{zero,zero,zero},{zero,zero,zero}};top.closure.success=true;
+    top.observable_rows={{zero,zero,one}};
+    auto tight=settings;tight.automatic_basis_scan=false;int child_request=-1;
+    tight.progress=[&](std::size_t depth,const std::string& phase,int high){if(depth==0 && phase=="child boundary")child_request=high;};
+    recursion::Evaluator solver(shifted,tight);
+    const auto profile=solver.epsilon_demand_profile(0);
+    require(profile.anchor_inverse_pole_loss==1 && profile.adjoint_child_loss==1 && profile.factored_child_loss==0,
+      "synthetic gauge-shift level lost its common-window/structural-window distinction");
+    auto value=solver.evaluate(0);auto child=solver.evaluate(1,0);
+    require(child_request==0,"adjoint route requested a child epsilon order beyond the structural column window");
+    require(solver.statistics().refinements==0 && solver.statistics().structural_zero_conflicts==0 &&
+            solver.statistics().structural_zero_coefficients>0,"structural column window was not imposed cleanly");
+    require(value.low>=child.low,"tightened local operator still declares a pole the child lacks");
+    for(int k=child.low;k<=0;++k) {
+      const B expected=child.values[2][k-child.low];
+      const B actual=k<value.low?B(0):value.values[0][k-value.low];
+      require(acb_overlaps(actual.raw(),expected.raw()) && upper(actual-expected)<1e-12,"tight child window changed the transported limit");
+    }
+    // Transport time is accounted even when the transport throws.
+    auto broken=tight;broken.progress={};broken.ordinary_method=recursion::OrdinaryMethod::taylor;broken.adjoint.max_charts_per_leg=0;
+    recursion::Evaluator failing(shifted,broken);bool threw=false;
+    try{(void)failing.evaluate(1,0);}catch(const std::invalid_argument&){threw=true;}
+    require(threw && failing.statistics().ordinary_seconds>0,"time of a throwing ordinary transport was dropped");
+  }
   std::cout<<"Laurent-demand preflight: one child transport per forced method, direct poles, positive/zero rows and high-watermark reuse passed\n";
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -30,6 +30,14 @@ B quadrature(const Exact& rational) {
 }
 int main(){try {
   B::set_precision(384);ExactField field({"x","I"});Exact x(field,"x");
+  // U=x, F=x^2 at one loop: the endpoint power x^-2 carries no epsilon, so
+  // nothing regulates its power divergence. A finite part must not be returned.
+  try {
+    feynman::deepest_beta({x,x.pow(2)},1,2,1,1,2);
+    throw std::runtime_error("unregulated power divergence returned a finite part");
+  }catch(const std::domain_error& error) {
+    require(std::string(error.what()).find("power divergence not regulated")!=std::string::npos,"unregulated power divergence rejection reason");
+  }
   auto bubble=feynman::symanzik(feynman::banana(1,{Rational(1),Rational(1)}),{x,x.constant(1)-x});
   auto generic=feynman::deepest_beta(bubble,1,2,1,1,4);auto direct=feynman_bubble();
   double maximum=0;

@@ -24,6 +24,12 @@ int main(){try{
  B::set_precision(384);ExactField field({"x","eps"});auto e=[&](const char*s){return Exact(field,s);};
  ExactEpsilonMatrix a{{e("0"),e("eps^2")},{e("0"),e("0")}};
  auto closed=ed::close(a,{2,-1},1);check(closed==ed::Highs({2,0}),"epsilon closure orientation");
+ // Valuations computed once propagate exactly like the matrix they came from.
+ const auto table=ed::valuations(a,1);
+ check(!table[0][0]&&table[0][1]==std::optional<int>(2)&&!table[1][1],"exact valuation table");
+ check(ed::close(table,{2,-1})==closed&&ed::pullback(table,{2,-1})==ed::pullback(a,{2,-1},1)&&
+       ed::pullback(table,{2,-1})==ed::Highs({std::nullopt,0}),"precomputed valuations changed demand propagation");
+ rejects<std::domain_error>([&]{ed::close(ed::valuations({{e("0"),e("eps^-1")},{e("1"),e("0")}},1),{0,std::nullopt});},"precomputed negative epsilon cycle accepted");
  check(ed::close(a,{std::nullopt,-1},1)==ed::Highs({std::nullopt,-1}),"backward reachability direction");
  rejects<std::domain_error>([&]{ed::close({{e("0"),e("eps^-1")},{e("1"),e("0")}}, {0,std::nullopt},1);},"reachable negative epsilon cycle accepted");
  check(ed::close({{e("eps^-1"),e("0")},{e("0"),e("0")}}, {std::nullopt,-2},1)==ed::Highs({std::nullopt,-2}),"unreachable cycle demanded");

@@ -88,7 +88,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
     throw std::invalid_argument("invalid certified scalar functional precision or proof budget");
   const Rational requested_radius(options.initial_radius);
   if(!(Rational(0)<requested_radius))throw std::invalid_argument("certified scalar functional radius must be positive");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
 
   const auto& names=geometry.U.variables();auto found=std::find(names.begin(),names.end(),"x");
   if(found==names.end())throw std::invalid_argument("scalar functional needs the path variable x");
@@ -118,9 +118,13 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   auto fr=evaluate(data::Reader(ff.regular.str()).read(),x,{{"x",x}})/constant(ff.value);
   auto prefactor=ur.pow(c)*fr.pow(-a);
   auto logarithm=x.constant(loops+1)*ur.log()-x.constant(loops)*fr.log();
-  std::vector<Jet> weight_jets;
-  for(const auto& coefficient:weight_coefficients)
-    weight_jets.push_back(evaluate(data::Reader(coefficient.str()).read(),x,{{"x",x}}));
+  // Parsed once: the same expressions give the Taylor jets and, for every
+  // candidate radius, the whole-disk bounds.
+  std::vector<data::Expr> weight_expressions;std::vector<Jet> weight_jets;
+  for(const auto& coefficient:weight_coefficients) {
+    weight_expressions.push_back(data::Reader(coefficient.str()).read());
+    weight_jets.push_back(evaluate(weight_expressions.back(),x,{{"x",x}}));
+  }
   std::vector<Jet> analytic(maximum+1,x.constant(0));auto log_power=x.constant(1);
   for(unsigned m=0;m<=maximum;++m) {
     for(unsigned j=0;j+m<=maximum && j<gamma.coefficients.size();++j) {
@@ -148,8 +152,8 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
       auto l=native_tail_detail::eval(l_expression,disk,"x").value;
       native_tail_detail::require_finite(p);native_tail_detail::require_finite(l);
       std::vector<M> candidate_weights;
-      for(const auto& coefficient:weight_coefficients) {
-        auto value=native_tail_detail::eval(data::Reader(coefficient.str()).read(),disk,"x").value;
+      for(const auto& expression:weight_expressions) {
+        auto value=native_tail_detail::eval(expression,disk,"x").value;
         native_tail_detail::require_finite(value);candidate_weights.push_back(M::upper_abs(value));
       }
       p_bound=M::upper_abs(p);l_bound=M::upper_abs(l);weight_bounds=std::move(candidate_weights);disk_proved=true;break;
@@ -261,7 +265,7 @@ inline LaurentValue certified_scalar_functional(const Symanzik& geometry,unsigne
   using B=kernel::ComplexBall;
   if(options.working_bits<64 || options.working_bits>1000000 || !options.requested_digits || options.requested_digits>10000 || (options.f_rim!=1 && options.f_rim!=-1))
     throw std::invalid_argument("invalid scalar functional precision or F rim");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   (void)(geometry.U.constant(0)+geometry.F+weight);
   const auto& names=weight.variables();auto xi=std::find(names.begin(),names.end(),"x"),ei=std::find(names.begin(),names.end(),"eps");
   if(xi==names.end())throw std::invalid_argument("scalar functional requires x");

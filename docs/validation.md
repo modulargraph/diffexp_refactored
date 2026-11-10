@@ -3,7 +3,7 @@
 The C++ mathematical backend, command-line interface and Mathematica wrapper
 are validated separately, with numerical accuracy and runtime recorded explicitly.
 
-The current tree passes its 80 native regressions on Linux (GCC 13, FLINT
+Version 2.2.0 passes its 80 native regressions on Linux (GCC 13, FLINT
 3.4.0); see [timings](timings.md) for the ten Feynman-trick examples run with
 the built-in IBP solver. The inherited prepared-input compatibility runtime
 and its 52 tests were removed; nothing in the native core or the Mathematica

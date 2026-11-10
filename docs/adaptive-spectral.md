@@ -1,6 +1,6 @@
 # Adaptive spectral transport
 
-DiffExp 2.1 now integrates ordinary epsilon-linear differential equations with
+DiffExp 2.2 integrates ordinary epsilon-linear differential equations with
 an adaptive Chebyshev solver as well as local finite-lag/Taylor recurrences.
 The implementation follows the sequential-epsilon collocation method of
 [Yuanche Liu and Yang Zhang, CHESS](https://arxiv.org/abs/2606.26691).

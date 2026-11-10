@@ -11,7 +11,7 @@ pullback, series recurrence, Frobenius matching, analytic continuation and
 Feynman-trick recursion. The C++ package itself does not require Mathematica.
 
 ```wolfram
-Get["/path/to/DiffExp2.1/DiffExp.m"];
+Get["/path/to/DiffExp2.2/DiffExp.m"];
 $DiffExpExecutable = "/path/to/diffexp"; (* optional if built beside the package *)
 LoadConfiguration[{
   MatrixDirectory -> "/path/to/matrices",

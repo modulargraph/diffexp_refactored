@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   try {
     const std::string command = argc > 1 ? argv[1] : "--help";
     if (command == "--version") {
-      std::cout << "DiffExp 2.1.1 (standalone C++20 / FLINT)\n";
+      std::cout << "DiffExp 2.2.0 (standalone C++20 / FLINT)\n";
     } else if(command == "transport") {
       json_mode=true;if(argc!=3)throw std::invalid_argument("transport requires a JSON file or -");
       return diffexp::transport::run_file(argv[2]);
@@ -377,7 +377,7 @@ int main(int argc, char** argv) {
       return diffexp::run_henn_nonplanar(argv[2],order);
     } else if (command == "backend-info") {
       boost::json::object information{{"standalone_cpp",true},{"librarylink",false}};
-      information["package_version"]="2.1.1";information["native_transport"]=true;
+      information["package_version"]="2.2.0";information["native_transport"]=true;
       information["feynman_configuration_schema"]="DiffExp.FeynmanFamily/v1";
 #if defined(__unix__) || defined(__APPLE__)
       information["ibp_solver"]=true;information["ibp_default_provider"]="ibp-solver";information["ibp_prime_bits"]=61;

@@ -1,6 +1,6 @@
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --version
   OUTPUT_VARIABLE version RESULT_VARIABLE status)
-if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.1.1")
+if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.2.0")
   message(FATAL_ERROR "Version command failed: ${version}")
 endif()
 set(request "${DIFFEXP_SOURCE_DIR}/examples/logarithm.json")

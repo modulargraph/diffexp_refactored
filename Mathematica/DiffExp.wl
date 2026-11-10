@@ -1,4 +1,4 @@
-(* DiffExp 2.1: input preparation and a process wrapper for native C++ transport. *)
+(* DiffExp 2.2: input preparation and a process wrapper for native C++ transport. *)
 BeginPackage["DiffExp`"];
 $DiffExpExecutable::usage = "$DiffExpExecutable is Automatic or the path to the diffexp executable.";
 DiffExpRun::usage = "DiffExpRun[{arguments}, input] runs diffexp and returns its exit code, stdout and stderr. input defaults to an empty string. A failed process returns Failure.";

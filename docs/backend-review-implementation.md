@@ -1,6 +1,6 @@
 # Transport backend design
 
-DiffExp 2.1 uses compiled rational recurrences, sparse uncertainty propagation
+DiffExp 2.2 uses compiled rational recurrences, sparse uncertainty propagation
 and explicit coefficient-demand contracts for ordinary Feynman-trick transport.
 FLINT provides exact algebra and Arb/ACB provides numerical ball arithmetic.
 

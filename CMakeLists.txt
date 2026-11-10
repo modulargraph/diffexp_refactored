@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DiffExp VERSION 2.1.1 LANGUAGES CXX)
+project(DiffExp VERSION 2.2.0 LANGUAGES CXX)
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()

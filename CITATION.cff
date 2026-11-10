@@ -1,14 +1,14 @@
 cff-version: 1.2.0
 message: >-
-  If you use DiffExp 2.1, please cite this software and the method papers listed
+  If you use DiffExp 2.2, please cite this software and the method papers listed
   in docs/citation.md.
-title: DiffExp 2.1
+title: DiffExp 2.2
 type: software
 authors:
   - family-names: Hidding
     given-names: Martijn
-version: 2.1.1
-date-released: "2026-09-06"
+version: 2.2.0
+date-released: "2026-11-10"
 license: GPL-3.0-or-later
 repository-code: https://github.com/modulargraph/diffexp_refactored
 url: https://github.com/modulargraph/diffexp_refactored

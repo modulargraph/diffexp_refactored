@@ -1,6 +1,6 @@
 # Epsilon scheduling and physical-basis search
 
-DiffExp 2.1 schedules Feynman-trick transport by component demand, in both
+DiffExp 2.2 schedules Feynman-trick transport by component demand, in both
 linear methods (adjoint and factored). The aim is to reduce unnecessary
 coefficients while preserving the requested physical outputs and their
 uncertainty. This does not guarantee that every recursion level can use the same

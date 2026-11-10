@@ -1,6 +1,6 @@
-# DiffExp 2.1
+# DiffExp 2.2
 
-DiffExp 2.1 computes dimensionally regulated Feynman integrals with series
+DiffExp 2.2 computes dimensionally regulated Feynman integrals with series
 recurrences and recursive Feynman-parameter integration. The mathematical
 backend is a standalone C++20 package built on FLINT/Arb.
 
@@ -29,7 +29,7 @@ For your own system, point `MatrixDirectory` at your existing matrix files
 and supply your boundary values:
 
 ```wl
-Get["/path/to/DiffExp2.1/DiffExp.m"];
+Get["/path/to/DiffExp2.2/DiffExp.m"];
 
 matrixDirectory = CreateDirectory[];
 Put[{{1/(1-t)}}, FileNameJoin[{matrixDirectory, "dt_0.m"}]];
@@ -133,7 +133,7 @@ Install the executable, C++ headers and Mathematica wrapper with:
 cmake --install build --prefix /your/prefix
 ```
 
-CMake consumers use `find_package(DiffExp 2.1 CONFIG REQUIRED)` and link
+CMake consumers use `find_package(DiffExp 2.2 CONFIG REQUIRED)` and link
 `DiffExp::core`. Public headers are under `diffexp/`, with namespace `diffexp`.
 See [the consumer example](tests/consumer) and [architecture](docs/architecture.md).
 
@@ -211,7 +211,7 @@ See [timings](docs/timings.md) for measured runtimes and
 precision scope and Banana4 reference comparisons. The [example guide](docs/examples.md)
 describes the original-data downloads and the opt-in FT acceptance runner.
 
-DiffExp 2.1 replaces the previous application at the repository root. Earlier
+DiffExp 2 replaces the previous application at the repository root. Earlier
 versions remain available in Git history.
 
 ## License and citation

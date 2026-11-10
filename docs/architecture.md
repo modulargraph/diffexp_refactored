@@ -1,6 +1,6 @@
 # Architecture
 
-DiffExp 2.1 separates exact equation preparation, finite series construction,
+DiffExp 2.2 separates exact equation preparation, finite series construction,
 numerical continuation and scientific acceptance. A cache hit means that an
 artifact's mathematical checks passed; it does not turn a requested precision
 into an error certificate.

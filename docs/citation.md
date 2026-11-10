@@ -1,6 +1,6 @@
 # Citation
 
-When using DiffExp 2.1, cite the software release itself and the method papers
+When using DiffExp 2.2, cite the software release itself and the method papers
 relevant to the workflow used.
 
 For one-dimensional series transport:

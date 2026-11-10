@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
 
 - Mathematica `WorkingPrecision` defaults to `Automatic` (twice the
   `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.

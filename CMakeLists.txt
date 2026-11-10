@@ -64,7 +64,7 @@ if(BUILD_TESTING)
     add_executable(diffexp_compose_recursion_stage tools/compose_recursion_stage.cpp)
     target_link_libraries(diffexp_compose_recursion_stage PRIVATE DiffExp::core)
   endif()
-  list(APPEND native_tests rational_circuit rational_circuit_dot compact_adjoint uncertainty_support basis_persistence
+  list(APPEND native_tests rational_circuit rational_circuit_dot compact_recurrence compact_adjoint uncertainty_support basis_persistence
     component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening)
   foreach(name IN LISTS native_tests)
     add_executable(diffexp_test_${name} tests/test_${name}.cpp)

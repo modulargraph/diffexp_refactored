@@ -47,7 +47,6 @@ class TaylorTailEstimate {
     worst_=std::max(worst_,top+std::log2(sum)-denominator);
   }
   double log2_relative()const {return worst_;}
- private:
   static double log2_midpoint(const acb_struct* value) {
     mag_t real,imaginary;mag_init(real);mag_init(imaginary);
     arf_get_mag(real,arb_midref(acb_realref(value)));arf_get_mag(imaginary,arb_midref(acb_imagref(value)));
@@ -56,6 +55,7 @@ class TaylorTailEstimate {
       mag_is_inf(real)?std::numeric_limits<double>::infinity():mag_get_d_log2_approx(real);
     mag_clear(imaginary);mag_clear(real);return result;
   }
+ private:
   double step_,worst_=-std::numeric_limits<double>::infinity();unsigned first_,order_;
 };
 // Fixed-step charts (rational_line) step a quarter of the distance to the

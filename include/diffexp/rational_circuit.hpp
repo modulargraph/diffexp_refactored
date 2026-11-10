@@ -2,9 +2,18 @@
 
 #include "diffexp/laurent_transport.hpp"
 #include <flint/acb_poly.h>
+#include <array>
+#include <atomic>
+#include <cstdlib>
+#include <chrono>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 
 // The ordinary-chart executor for epsilon-regular rational connections
 // y' = A(x,eps) y. Every entry N/Q of A becomes a stream w = y_column/Q,
@@ -499,23 +508,37 @@ struct Series {
   // Structurally reachable rows, in storage order; every other row is zero.
   std::vector<unsigned> rows;
   // y[(n*rows.size()+r)*width+k] is Taylor order n, row rows[r], epsilon index k.
+  // Empty for a series the compact core holds (see `compact`), until
+  // materialize() fills it.
   std::vector<B> y;
+  // Storage of the compact core (detail/compact_recurrence.ipp), if it
+  // computed this series; evaluate() then works on it directly.
+  std::shared_ptr<void> compact;
   const B& at(unsigned n,std::size_t r,unsigned k)const {return y[(std::size_t(n)*rows.size()+r)*width+k];}
 };
-inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
-  const auto &p=prepared.data();
+namespace detail {
+inline void validate_boundary(const PreparedData& p,const Boundary& boundary) {
   const auto &plan=p.compiled.data();
   if (B::precision()!=p.precision)
     throw std::invalid_argument("rational circuit prepared precision mismatch");
   if (boundary.size()!=plan.dimension || boundary.empty() || boundary[0].empty() ||
       boundary[0].size()>p.max_width)
     throw std::invalid_argument("rational circuit boundary shape");
-  const unsigned width=unsigned(boundary[0].size()), d=plan.dimension, order=p.order;
+  const auto width=boundary[0].size();
   for (const auto &row:boundary) {
     if (row.size()!=width) throw std::invalid_argument("rational circuit ragged boundary");
     for (const auto &value:row)
       if (!value.is_finite()) throw std::invalid_argument("rational circuit nonfinite boundary");
   }
+}
+} // namespace detail
+// The recurrence in FLINT ball arithmetic: the reference implementation, and
+// the one that serves coefficients the compact core does not take.
+inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
+  const auto &p=prepared.data();
+  const auto &plan=p.compiled.data();
+  detail::validate_boundary(p,boundary);
+  const unsigned width=unsigned(boundary[0].size()), d=plan.dimension, order=p.order;
   // Exact structural reachability is computed separately for each RHS. A zero
   // ball proves a zero input; merely small balls never suppress dependencies.
   std::vector<std::vector<unsigned>> dependents(d);
@@ -680,11 +703,25 @@ inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistic
   if (statistics) *statistics=stats;
   return series;
 }
+#include "diffexp/detail/compact_recurrence.ipp"
+// False selects expand_balls for every chart (tests and comparisons).
+inline std::atomic<bool> compact_recurrence{std::getenv("DIFFEXP_BALL_RECURRENCE")==nullptr};
+inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
+  detail::validate_boundary(prepared.data(),boundary);
+  if(compact_recurrence.load(std::memory_order_relaxed))
+    if(auto series=expand_compact(prepared,boundary,statistics))return std::move(*series);
+  return expand_balls(prepared,boundary,statistics);
+}
 // Horner value of the retained polynomial at step; truncation_log2 receives
 // its TaylorTailEstimate (see rational_transport.hpp) when requested.
 inline Boundary evaluate(const Series &series,const B &step,double *truncation_log2=nullptr) {
   if (B::precision()!=series.precision || !step.is_finite())
     throw std::invalid_argument("rational circuit series precision or step");
+  if (series.compact) {
+    if (auto values=evaluate_compact(series,step,truncation_log2)) return std::move(*values);
+    Series copy=series; materialize(copy); copy.compact.reset();
+    return evaluate(copy,step,truncation_log2);
+  }
   Boundary result;
   result.reserve(series.dimension);
   for (unsigned i=0;i<series.dimension;++i) result.emplace_back(series.width);

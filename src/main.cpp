@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
         const std::string option=argv[i];
         if(option=="--json")continue;
         if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;continue;}
+        if(option=="--ft-transport" || option=="--ft-transport-digits")
+          throw std::invalid_argument(option+" was removed: Taylor transport is the only ordinary method");
         if(i+1>=argc)throw std::invalid_argument("missing "+command+" option value");
         const char* option_value=argv[++i];
         if(option=="--fire"){options.reduction.provider.executable=option_value;fire_given=true;}
@@ -92,17 +94,11 @@ int main(int argc, char** argv) {
           else if(option=="--fire-simplifier-threads")options.reduction.provider.simplifier_threads=number;
           else options.reduction.provider.memory_bytes=static_cast<std::size_t>(number)*1024*1024;
         }
-        else if(command=="ft" && option=="--ft-transport") {
-          const std::string method=option_value;
-          if(method!="auto" && method!="spectral" && method!="taylor" && method!="ultraspherical")throw std::invalid_argument("FT transport must be auto, spectral, taylor or ultraspherical");
-          numerical.ordinary_method=method=="ultraspherical"?diffexp::recursion::OrdinaryMethod::ultraspherical:
-            method=="auto"?diffexp::recursion::OrdinaryMethod::automatic:method=="spectral"?diffexp::recursion::OrdinaryMethod::spectral:diffexp::recursion::OrdinaryMethod::taylor;
-        }
         else if(command=="ft" && option=="--method") {
           const std::string method=option_value;
-          if(method!="adjoint" && method!="values" && method!="factored" && method!="auto")
-            throw std::invalid_argument("FT method must be adjoint, factored, auto or values");
-          numerical.observable_adjoint=method!="values";
+          if(method=="values")throw std::invalid_argument("--method values was removed: use adjoint (default), factored or auto");
+          if(method!="adjoint" && method!="factored" && method!="auto")
+            throw std::invalid_argument("FT method must be adjoint, factored or auto");
           numerical.linear_method=method=="factored"?diffexp::recursion::LinearMethod::factored:
             method=="auto"?diffexp::recursion::LinearMethod::automatic:diffexp::recursion::LinearMethod::adjoint;
         }
@@ -120,7 +116,6 @@ int main(int argc, char** argv) {
           else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;}
           else if(option=="--leaf-digits"){if(number<1 || number>100000)throw std::invalid_argument("leaf digits must be in 1..100000");numerical.leaf_digits=number;}
           else if(option=="--basis-scan-seconds"){if(number>60)throw std::invalid_argument("basis scan seconds must be in 0..60");numerical.automatic_basis_scan=number!=0;if(number)numerical.basis_scan_seconds=number;}
-          else if(option=="--ft-transport-digits"){if(!number || number>100000)throw std::invalid_argument("FT transport digits must be in 1..100000");numerical.spectral.accuracy_goal=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
         } else throw std::invalid_argument("unknown prepare option: "+option);
       }
@@ -250,12 +245,10 @@ int main(int argc, char** argv) {
           }
         }
         const auto& stats=evaluator.statistics();
-        boost::json::array rejected;for(const auto& reason:stats.spectral_rejections)rejected.emplace_back(reason);
-        report["ft_transport"]=boost::json::object{{"direct_endpoints",stats.direct_endpoints},{"spectral_attempts",stats.spectral_attempts},{"spectral_accepted",stats.spectral_accepted},{"spectral_legs",stats.spectral_legs},{"spectral_reused",stats.spectral_reused},{"rejections",rejected}};
+        report["ft_transport"]=boost::json::object{{"method","taylor"},{"direct_endpoints",stats.direct_endpoints}};
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
-        report["timings"].as_object()["spectral_seconds"]=stats.spectral_seconds;
         // Phases of numerical_seconds that precede transport. Disjoint from each
-        // other and from ordinary_seconds; spectral_seconds lies inside the latter.
+        // other and from ordinary_seconds.
         report["timings"].as_object()["endpoint_series_seconds"]=stats.endpoint_series_seconds;
         report["timings"].as_object()["endpoint_operator_seconds"]=stats.endpoint_operator_seconds;
         report["timings"].as_object()["basis_selection_seconds"]=stats.basis_selection_seconds;
@@ -385,7 +378,7 @@ int main(int argc, char** argv) {
       std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
       std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N. --ibp-validation anchored|strict (default anchored: held-out points eliminate the pilot's dependency subset of original equations, with one complete elimination per attempt; strict eliminates every equation at every point).\n";
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
-      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor|ultraspherical (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint).\n";
+      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto (default adjoint). Ordinary transport is by Taylor charts; --ft-transport, --ft-transport-digits and --method values were removed.\n";
       std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";
       std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds, per level, the search for an internal master basis with a smaller exact connection (cheaper transport) that does not widen the child epsilon window; 0 disables it.\n";
       std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the exact endpoint-series cache (affine-series), the persisted internal-basis choice stored beside it, and the ordinary-transport checkpoints; all three are then recomputed on every run.\n";

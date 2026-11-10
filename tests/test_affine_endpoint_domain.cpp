@@ -41,14 +41,14 @@ int main(){try{
   auto md=series.dr_domain(mixed,false);require(md.zero_constraints.size()==1 && md.zero_constraints[0].coefficients==std::vector<Exact>{one,-one},"domain split lost cancellation between fundamental columns");
   require(series.dr_endpoint_constant(series.contract(mixed,{one,one}))[0][0]==one,"exact physical contraction lost finite limit");
   for(auto operation:{feynman::Operation::LowerLimit,feynman::Operation::UpperLimit,feynman::Operation::BetaIntegral})
-    for(int method=0;method<3;++method) {
+    for(auto method:{recursion::LinearMethod::adjoint,recursion::LinearMethod::factored}) {
       auto graph=model(operation);recursion::NumericalOptions options;options.endpoint_order=12;options.ordinary_order=32;
-      options.observable_adjoint=method!=0;options.linear_method=method==2?recursion::LinearMethod::factored:recursion::LinearMethod::adjoint;
+      options.linear_method=method;
       recursion::Evaluator evaluator(graph,options);auto actual=evaluator.evaluate(0);auto leaf=evaluator.evaluate(1,0);
       require(actual.values.size()==1 && !actual.taylor_tail_certified,"domain auxiliaries leaked into physical outputs or certification");
       for(int k=std::max(actual.low,leaf.low);k<=0;++k)require(upper(actual.values[0][k-actual.low]-leaf.values[0][k-leaf.low])<1e-20,"constrained endpoint/integral differs from exact constant physical solution");
       require(evaluator.statistics().endpoint_constraint_rows>0 && evaluator.statistics().endpoint_constraint_coefficients>0,"physical endpoint domain was not checked");
-      if(options.observable_adjoint)require(evaluator.linear_expression().transform.coefficients.size()==1,"domain rows leaked into parent expression");
+      require(evaluator.linear_expression().transform.coefficients.size()==1,"domain rows leaked into parent expression");
       auto invalid_graph=model(operation,false,true);recursion::Evaluator invalid(invalid_graph,options);
       rejects_physical([&]{invalid.evaluate(0);});
     }
@@ -68,5 +68,5 @@ int main(){try{
   }
   auto graph=model(feynman::Operation::LowerLimit);recursion::NumericalOptions options;options.endpoint_order=12;
   recursion::Evaluator stage(graph,options);rejects([&]{stage.prepare_adjoint_stage(0,0);},"standalone stage exported undisclosed endpoint constraints");
-  std::cout<<"Physical endpoint domains: exact cross-column constraints, power/log cancellation, lower/upper/integral operations in values/adjoint/factored routes, invalid physical boundary rejection, auxiliary row isolation passed\n";
+  std::cout<<"Physical endpoint domains: exact cross-column constraints, power/log cancellation, lower/upper/integral operations in adjoint/factored routes, invalid physical boundary rejection, auxiliary row isolation passed\n";
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -10,8 +10,6 @@
 #include "diffexp/cached_affine.hpp"
 #include "diffexp/factored_transport.hpp"
 #include "diffexp/adjoint_checkpoint.hpp"
-#include "diffexp/ft_spectral_checkpoint.hpp"
-#include "diffexp/ft_ultraspherical_checkpoint.hpp"
 #include "diffexp/direct_adjoint_endpoint.hpp"
 #include "diffexp/recursion_physical_basis.hpp"
 #include "diffexp/physical_basis_scan.hpp"
@@ -21,7 +19,6 @@
 #include <map>
 
 namespace diffexp::recursion {
-enum class OrdinaryMethod { automatic, spectral, taylor, ultraspherical };
 enum class LinearMethod { adjoint, factored, automatic };
 struct BasisSelection;
 struct NumericalOptions {
@@ -29,7 +26,6 @@ struct NumericalOptions {
   bool exact_functional_reduction=true;
   bool automatic_basis_scan=true;
   double basis_scan_seconds=30;
-  unsigned principal_part_endpoint_milliseconds=5000;
   std::function<void(const BasisSelection&)> basis_selection_observer;
   // Exact, explicitly supplied internal bases, keyed by zero-based FT depth.
   // Every transform is checked against the graph before endpoint preparation.
@@ -42,18 +38,13 @@ struct NumericalOptions {
   // omitted epsilon/Taylor coefficients or exact vanishing of a period.
   Rational endpoint_constraint_tolerance{Rational("1/100000000000000000000")};
   unsigned max_endpoint_constraints=256;
-  bool observable_adjoint=true;
   // Guarded experimental route: build endpoint integration rows directly.
   // Unsupported fixed sectors retain the complete Frobenius construction.
   bool direct_endpoint_functionals=false;
   LinearMethod linear_method=LinearMethod::adjoint;
   AdjointOptions adjoint;
-  OrdinaryMethod ordinary_method=OrdinaryMethod::automatic;
-  // Zero derives the local spectral goal from leaf_digits + 12.
-  ft_spectral::Options spectral=[] {ft_spectral::Options value;value.accuracy_goal=0;return value;}();
   std::optional<causal::Prescription> causal_prescription;
   std::function<void(std::size_t,const std::string&,int)> progress;
-  std::function<void(const std::string&)> ordinary_progress;
   // Accepted fraction of the current ordinary arm's original path. This is
   // geometric progress, not an estimate of remaining computing time.
   std::function<void(double)> ordinary_fraction_progress;
@@ -84,7 +75,6 @@ struct NumericalStatistics {
   std::size_t component_transports=0,component_slots=0,component_rectangular_slots=0;
   std::size_t functional_reduction_attempts=0,functional_reduction_certificates=0;
   std::size_t basis_scans=0,basis_selections=0,basis_cache_hits=0,basis_cache_writes=0;
-  std::size_t principal_part_attempts=0,principal_part_certificates=0,principal_part_reused=0,principal_part_zero_coefficients=0;
   adjoint_checkpoint::Statistics ordinary_checkpoints;
   std::size_t exact_plans=0,leaf_evaluations=0,numeric_evaluations=0,refinements=0,cache_hits=0;
   std::size_t endpoint_series_built=0,endpoint_series_reused=0;
@@ -94,7 +84,7 @@ struct NumericalStatistics {
   std::size_t conditioning_method_fallbacks=0;
   std::size_t endpoint_constraint_rows=0,endpoint_constraint_coefficients=0;
   double maximum_endpoint_constraint_residual=0;
-  double ordinary_seconds=0,spectral_seconds=0;
+  double ordinary_seconds=0;
   // Wall time of the phases that precede transport. basis_selection_seconds
   // covers discovery, screening and installation, not the original plan.
   double endpoint_series_seconds=0,endpoint_operator_seconds=0,basis_selection_seconds=0,leaf_seconds=0;
@@ -102,9 +92,6 @@ struct NumericalStatistics {
   // rounding noise replaced by the exact zero, and (never expected) values
   // excluding zero, which are kept together with their wider child demand.
   std::size_t structural_zero_coefficients=0,structural_zero_conflicts=0;
-  std::size_t spectral_attempts=0,spectral_accepted=0,spectral_legs=0,spectral_reused=0;
-  std::size_t spectral_subdivisions=0,spectral_accepted_subsegments=0;
-  std::vector<std::string> spectral_rejections;
 };
 // A boundary-independent local problem. Endpoint rows act on the
 // epsilon-gauged master vector. Each arm satisfies g'=forcing-g*connection
@@ -122,13 +109,8 @@ struct PreparedFactoredConsumers {
 struct EpsilonDemandProfile {
   std::size_t depth,masters;
   int lower_endpoint_low,upper_endpoint_low,beta_low,anchor_inverse_pole_loss;
-  int adjoint_child_loss,factored_child_loss,common_high_child_loss;
+  int adjoint_child_loss,factored_child_loss;
   epsilon_demand::Highs child_component_loss;
-};
-struct EndpointEpsilonBasis {
-  PhysicalBasisTransform basis;
-  std::vector<int> additional_shifts;
-  int original_child_loss,estimated_child_loss;
 };
 struct BasisSelection {
   std::size_t depth=0,masters=0,original_characters=0,candidate_characters=0;
@@ -159,8 +141,6 @@ inline void validate_numerical_options(const NumericalOptions& options) {
   if(!std::isfinite(options.basis_scan_seconds) || options.basis_scan_seconds<=0 || options.basis_scan_seconds>60)
     fail("basis scan seconds must lie in (0,60]");
   if(options.leaf_digits>100000)fail("leaf digits must not exceed 100000");
-  if(!options.physical_bases.empty() && !options.observable_adjoint)
-    throw std::invalid_argument("general physical bases require the adjoint or factored recursive route");
 }
 
 // Only exact coordinates are durable. Endpoint acceptance, epsilon demands,
@@ -292,15 +272,10 @@ class Evaluator {
     std::vector<std::pair<Expansion,std::string>> pending_constraints;
     std::optional<Matrix> direct_operator;
     bool direct_operator_exact=false;
-    // Certificates belong to this immutable retained frame and functional set.
-    // Preserve them across higher epsilon requests; a later resource fallback
-    // must not undo an already proved principal-part cancellation.
-    std::optional<Rational> certified_operator_point;
     // The numerical inverse frame at the cut. It is prepared once and only
     // extended to higher epsilon orders afterwards.
     std::optional<affine_operator::Prepared> inverse;
     std::optional<Rational> inverse_point;
-    std::vector<std::optional<int>> certified_operator_lows;
   };
   struct Plan {
     EpsilonGaugeResult gauge;
@@ -352,7 +327,7 @@ class Evaluator {
     if(!options_.endpoint_cache_directory.empty())
       endpoint_store_=std::make_unique<artifacts::Store>(options_.endpoint_cache_directory,options_.endpoint_cache_max_bytes);
     const auto basis_directory=basis_persistence::directory(options_);
-    if(options_.automatic_basis_scan && options_.observable_adjoint && !basis_directory.empty())
+    if(options_.automatic_basis_scan && !basis_directory.empty())
       basis_store_=std::make_unique<artifacts::Store>(basis_directory,options_.endpoint_cache_max_bytes);
   }
   const NumericalStatistics& statistics()const{return statistics_;}
@@ -361,7 +336,7 @@ class Evaluator {
   // Copying the transform prevents a later refinement (or caller edit) from
   // changing the saved expression. No evaluation or materialization occurs.
   linear_boundary::Expression linear_expression(std::size_t depth=0)const {
-    if(!options_.observable_adjoint || depth>=expressions_.size() || !expressions_[depth])
+    if(depth>=expressions_.size() || !expressions_[depth])
       throw std::logic_error("recursive linear expression is not available");
     return *expressions_[depth];
   }
@@ -384,9 +359,9 @@ class Evaluator {
   // high is the endpoint/operator epsilon top before the final inverse-D
   // gauge shift, not the requested physical integral's epsilon order.
   PreparedAdjointStage prepare_adjoint_stage(std::size_t depth,unsigned high) {
-    if(!options_.observable_adjoint || depth>=graph_.nodes.size() || high>options_.max_epsilon ||
+    if(depth>=graph_.nodes.size() || high>options_.max_epsilon ||
         graph_.nodes[depth].scalar_leaf || graph_.nodes[depth].closure.ordered_basis.empty())
-      throw std::invalid_argument("local adjoint preparation depth, method or epsilon budget");
+      throw std::invalid_argument("local adjoint preparation depth or epsilon budget");
     PrecisionScope precision(options_.working_bits);
     if(!plans_[depth])report(depth,"endpoint preparation",high);
     // The standalone v1 stage contract exports the original ordered masters.
@@ -403,9 +378,8 @@ class Evaluator {
   // Exact structural demand inspection without evaluating the child or
   // transporting an ordinary segment. Endpoint artifacts can be reused.
   EpsilonDemandProfile epsilon_demand_profile(std::size_t depth) {
-    if(!options_.observable_adjoint || depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf ||
-        graph_.nodes[depth].closure.ordered_basis.empty())
-      throw std::invalid_argument("epsilon demand profile requires a nonleaf adjoint or factored level");
+    if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf || graph_.nodes[depth].closure.ordered_basis.empty())
+      throw std::invalid_argument("epsilon demand profile requires a nonleaf level");
     PrecisionScope precision(options_.working_bits);
     auto& prepared=plan(depth,0);preflight_linear_demands(depth,prepared);
     const int l=cached_endpoint_operator(prepared,false,0).low;
@@ -414,72 +388,7 @@ class Evaluator {
       if(!value.is_zero())q=std::min(q,checked(*exact_epsilon_valuation(value,ei_)));
     const int loss=checked(std::max<std::int64_t>(0,prepared.largest_shift));
     return {depth,prepared.gauge.matrix.size(),l,r,q,loss,
-      *prepared.adjoint_child_loss,*prepared.factored_child_loss,
-      std::max(*prepared.factored_child_loss,checked(loss+std::max(-static_cast<long>(l),-static_cast<long>(r)-q))),
-      prepared.component_child_loss};
-  }
-  // Optimize integer epsilon powers using the actual endpoint consumers.
-  // A retained nonzero ball is treated conservatively as nonzero; no small
-  // numerical coefficient is discarded. Positive orders are bounded by zero.
-  // The proposed gauge is exact, but the demand estimate must be rechecked
-  // by rebuilding endpoints before adopting it for a physical calculation.
-  EndpointEpsilonBasis optimize_endpoint_epsilon_basis(std::size_t depth) {
-    const auto profile=epsilon_demand_profile(depth);
-    PrecisionScope precision(options_.working_bits);auto& p=*plans_[depth];
-    const auto d=p.gauge.matrix.size();const auto sample=graph_.dimension;
-    std::vector<int> consumer(d,0),input(d,0);
-    for(bool upper:{false,true}) {
-      const auto& rows=cached_endpoint_operator(p,upper,0);
-      for(const auto& row:rows.coefficients)for(unsigned j=0;j<d;++j)
-        for(int k=rows.low;k<=rows.high;++k)if(!row[j][k-rows.low].is_zero())
-          consumer[j]=std::min(consumer[j],k);
-    }
-    for(const auto& row:p.beta_rows)for(unsigned j=0;j<d;++j)if(!row[j].is_zero())
-      consumer[j]=std::min(consumer[j],checked(*exact_epsilon_valuation(row[j],ei_)));
-    for(unsigned i=0;i<d;++i)for(const auto& entry:p.inverse_diagonal[i])if(!entry.is_zero()) {
-      const auto at=entry.substitute(exact_point(entry,xi_,sample.constant(graph_.nodes[depth].anchor)));
-      if(!at.is_zero())input[i]=std::min(input[i],checked(*exact_epsilon_valuation(at,ei_)));
-    }
-    struct Edge {unsigned from,to;int weight;};std::vector<Edge> connection;
-    for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j)if(!p.gauge.matrix[i][j].is_zero())
-      connection.push_back({j,i,checked(*exact_epsilon_valuation(p.gauge.matrix[i][j],ei_))});
-    int direct_loss=0;const auto& node=graph_.nodes[depth];
-    for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
-      for(const auto& entry:node.observable_rows[i])if(!entry.is_zero()) {
-        const auto at=entry.substitute(exact_point(entry,xi_,sample.constant(node.anchor)));
-        if(!at.is_zero())direct_loss=std::max(direct_loss,checked(-*exact_epsilon_valuation(at,ei_)));
-      }
-    std::vector<int> shifts(d,0);int estimate=profile.factored_child_loss;bool found=false;
-    for(int total=0;total<=profile.factored_child_loss && !found;++total)
-      for(int a=0;a<=total && !found;++a) {
-        auto edges=connection;const auto anchor=static_cast<unsigned>(d);
-        for(unsigned i=0;i<d;++i) {
-          edges.push_back({anchor,i,a+input[i]});
-          edges.push_back({i,anchor,total-a+consumer[i]});
-        }
-        std::vector<int> distance(d+1,0);bool feasible=true;
-        for(unsigned pass=0;pass<=d;++pass) {
-          bool changed=false;
-          for(const auto& e:edges)if(distance[e.to]>distance[e.from]+e.weight) {
-            distance[e.to]=distance[e.from]+e.weight;changed=true;
-          }
-          if(!changed)break;if(pass==d)feasible=false;
-        }
-        if(feasible) {
-          for(unsigned i=0;i<d;++i)shifts[i]=distance[i]-distance[anchor];
-          estimate=std::max(total,direct_loss);found=true;
-        }
-      }
-    if(!found)throw std::logic_error("endpoint epsilon power constraints lost the original feasible gauge");
-    auto to=p.inverse_diagonal,from=p.diagonal,connection_new=p.gauge.matrix;
-    for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j) {
-      to[i][j]=epsilon_gauge_detail::multiply_power(to[i][j],ei_,-shifts[i]);
-      from[i][j]=epsilon_gauge_detail::multiply_power(from[i][j],ei_,shifts[j]);
-      connection_new[i][j]=epsilon_gauge_detail::multiply_power(connection_new[i][j],ei_,shifts[j]-shifts[i]);
-    }
-    PhysicalBasisTransform basis{graph_.nodes[depth].closure.matrix,std::move(to),std::move(from),std::move(connection_new)};
-    verify_physical_basis(basis,graph_.nodes[depth].closure.matrix,xi_);
-    return {std::move(basis),std::move(shifts),profile.factored_child_loss,estimate};
+      *prepared.adjoint_child_loss,*prepared.factored_child_loss,prepared.component_child_loss};
   }
   LaurentBoundary evaluate(unsigned desired_top=0){return evaluate(0,desired_top);}
   LaurentBoundary evaluate(std::size_t depth,unsigned desired_top) {
@@ -503,41 +412,29 @@ class Evaluator {
       auto value=[&]{Seconds timer{statistics_.leaf_seconds};return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);}();
       ++statistics_.leaf_evaluations;
       auto result=LaurentBoundary{value.epsilon_low,std::move(value.values),value.taylor_tail_certified};
-      if(options_.observable_adjoint) {
-        auto source=std::make_shared<const LaurentBoundary>(result);
-        expressions_[depth]=linear_boundary::identity(source,checked(static_cast<long>(desired_top)-result.low));
-      }
+      expressions_[depth]=linear_boundary::identity(std::make_shared<const LaurentBoundary>(result),
+        checked(static_cast<long>(desired_top)-result.low));
       cache_[depth]=std::move(result);return *cache_[depth];
     }
     if(node.closure.ordered_basis.empty()) {
-      if(options_.observable_adjoint) {
-        auto source=LaurentBoundary{0,Boundary(1,std::vector<B>(desired_top+1,B(0))),true};source.values[0][0]=B(1);
-        expressions_[depth]=linear_boundary::Expression{
-          LaurentRows{0,static_cast<int>(desired_top),std::vector(node.requested.size(),std::vector(1,std::vector<B>(desired_top+1,B(0))))},
-          std::make_shared<const LaurentBoundary>(std::move(source))};
-      }
+      auto source=LaurentBoundary{0,Boundary(1,std::vector<B>(desired_top+1,B(0))),true};source.values[0][0]=B(1);
+      expressions_[depth]=linear_boundary::Expression{
+        LaurentRows{0,static_cast<int>(desired_top),std::vector(node.requested.size(),std::vector(1,std::vector<B>(desired_top+1,B(0))))},
+        std::make_shared<const LaurentBoundary>(std::move(source))};
       cache_[depth]=LaurentBoundary{0,Boundary(node.requested.size(),std::vector<B>(desired_top+1,B(0))),true};return *cache_[depth];
     }
     if(depth+1>=graph_.nodes.size() || graph_.nodes[depth+1].requested!=node.closure.ordered_basis)
       throw std::logic_error("recursive child does not own the parent's ordered master demand");
     if(std::all_of(node.operations.begin(),node.operations.end(),[](const auto& operation){return operation.operation==feynman::Operation::Direct;})) {
-      int demand=desired_top;
-      // Direct rows already expose their exact pole demand; discover it before
-      // recursively transporting a child at an insufficient materialized top.
-      for(const auto& row:node.observable_rows)for(const auto& coefficient:row)if(!coefficient.is_zero()) {
-        const auto at=coefficient.substitute(exact_point(coefficient,xi_,coefficient.constant(node.anchor)));
-        if(!at.is_zero())demand=std::max(demand,checked(static_cast<long>(desired_top)-*exact_epsilon_valuation(at,ei_)));
-      }
+      // No endpoint, no transport: the local operator is the exact rows at the
+      // anchor, whose pole depth is the child's epsilon loss.
+      int demand=checked(static_cast<long>(desired_top)-direct_demand(depth).low);
       for(unsigned attempt=0;attempt<options_.max_refinements;++attempt) {
         if(demand>static_cast<int>(options_.max_epsilon))throw std::runtime_error("recursive direct child epsilon demand exceeds finite budget");
         auto child=evaluate_child(depth+1,static_cast<unsigned>(demand));
         try {
-          if(options_.observable_adjoint) {
-            auto local=exact_laurent_rows(node.observable_rows,graph_.dimension.constant(node.anchor),checked(static_cast<long>(desired_top)-child_window_low(depth+1,child)));
-            return compose_child_expression(depth,std::move(local),desired_top);
-          }
-          auto result=apply_rational_rows(node.observable_rows,graph_.dimension.constant(node.anchor),child,desired_top);
-          result.taylor_tail_certified=false;cache_[depth]=std::move(result);return *cache_[depth];
+          auto local=exact_laurent_rows(node.observable_rows,graph_.dimension.constant(node.anchor),checked(static_cast<long>(desired_top)-child_window_low(depth+1,child)));
+          return compose_child_expression(depth,std::move(local),desired_top);
         }catch(const BoundaryDemand& request) {
           if(request.required_high<=demand)throw std::runtime_error("recursive direct demand made no progress");
           demand=request.required_high;++statistics_.refinements;report(depth,"child refinement",demand);
@@ -547,100 +444,33 @@ class Evaluator {
     }
     if(!plans_[depth])report(depth,"endpoint preparation",desired_top);
     auto& prepared=plan(depth,desired_top);
-    if(options_.observable_adjoint) {
-      auto method=options_.linear_method;
-      if(method==LinearMethod::automatic) {
-        const auto width=shared_source_width(depth+1);
-        std::size_t connections=0,observables=0;
-        for(const auto& row:prepared.gauge.matrix)for(const auto& c:row)connections+=!c.is_zero();
-        for(const auto& row:prepared.beta_rows)for(const auto& c:row)observables+=!c.is_zero();
-        const long double forward=static_cast<long double>(width)*(connections+observables);
-        const long double adjoint=static_cast<long double>(prepared.lower.functionals.size())*connections+observables;
-        const auto caps=factored_transport::Options{};
-        const bool supported=width<=caps.max_leaf_width &&
-            prepared.gauge.matrix.size()+prepared.lower.functionals.size()<=caps.max_augmented_dimension;
-        method=!prepared.factored_conditioning_failed && supported && forward<adjoint?LinearMethod::factored:LinearMethod::adjoint;
-      }
-      if(method==LinearMethod::factored) {
-        ++statistics_.factored_selections;
-        try {return evaluate_factored(depth,desired_top,prepared);}
-        catch(const ArithmeticConditioningFailure& failure) {
-          if(options_.linear_method!=LinearMethod::automatic ||
-              (failure.recursion_depth && *failure.recursion_depth!=depth))throw;
-          // One method change per exact plan, retaining endpoints, child
-          // expressions and their immutable sources. Future order extensions
-          // do not repeat a route that already failed at these settings.
-          prepared.factored_conditioning_failed=true;++statistics_.conditioning_method_fallbacks;
-          report(depth,std::string("factored conditioning fallback to adjoint: ")+failure.what(),desired_top);
-        }
-      }
-      ++statistics_.adjoint_selections;return evaluate_adjoint(depth,desired_top,prepared);
+    auto method=options_.linear_method;
+    if(method==LinearMethod::automatic) {
+      const auto width=shared_source_width(depth+1);
+      std::size_t connections=0,observables=0;
+      for(const auto& row:prepared.gauge.matrix)for(const auto& c:row)connections+=!c.is_zero();
+      for(const auto& row:prepared.beta_rows)for(const auto& c:row)observables+=!c.is_zero();
+      const long double forward=static_cast<long double>(width)*(connections+observables);
+      const long double adjoint=static_cast<long double>(prepared.lower.functionals.size())*connections+observables;
+      const auto caps=factored_transport::Options{};
+      const bool supported=width<=caps.max_leaf_width &&
+          prepared.gauge.matrix.size()+prepared.lower.functionals.size()<=caps.max_augmented_dimension;
+      method=!prepared.factored_conditioning_failed && supported && forward<adjoint?LinearMethod::factored:LinearMethod::adjoint;
     }
-    const auto x=graph_.dimension.variable(xi_);
-    auto anchor=x.constant(node.anchor),h=x.constant(prepared.geometry.overlap),end=x.constant(Rational(1)-prepared.geometry.overlap);
-    const auto h_ball=B::from_strings(prepared.geometry.overlap.str());
-    int lower_top=constant_demand(prepared.lower,desired_top),upper_top=constant_demand(prepared.upper,desired_top);
-    int transport_top=std::max({static_cast<int>(desired_top),lower_top,upper_top});
-    for(const auto& row:prepared.beta_rows)for(const auto& c:row)if(!c.is_zero())
-      transport_top=std::max(transport_top,checked(static_cast<long>(desired_top)-*exact_epsilon_valuation(c,ei_)));
-    for(unsigned refinement=0;refinement<options_.max_refinements;++refinement) {
-      const int child_top=checked(transport_top+prepared.largest_shift);
-      if(child_top>static_cast<int>(options_.max_epsilon))throw std::runtime_error("recursive child epsilon demand exceeds finite budget");
-      report(depth,"child boundary",child_top);
-      auto child=evaluate_child(depth+1,static_cast<unsigned>(child_top));
-      try {
-        std::vector<std::optional<LaurentBoundary>> outputs(node.operations.size());
-        for(std::size_t i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
-          outputs[i]=apply_rational_rows(Matrix{node.observable_rows[i]},anchor,child,desired_top);
-        auto gauged=apply_rational_rows(prepared.inverse_diagonal,anchor,child,transport_top);
-        report(depth,"lower transport",transport_top);
-        auto lower_state=transport_laurent(prepared.gauge.matrix,std::move(gauged),path(anchor,h,depth),options_.ordinary_order);
-        auto lower_physical=apply_rational_rows(prepared.diagonal,h,lower_state,transport_top);
-        report(depth,"lower matching",lower_top);
-        auto lower_constants=match(prepared.lower,lower_physical,h_ball,lower_top);
-        std::optional<RegularIntegrals> middle;
-        LaurentBoundary upper_state;
-        report(depth,"middle transport",transport_top);
-        if(!prepared.beta_rows.empty()) {
-          middle=integrate_regular_rows(prepared.gauge.matrix,prepared.beta_rows,lower_state,path(h,end,depth),desired_top,options_.ordinary_order);
-          upper_state=middle->endpoint;
-        }else upper_state=transport_laurent(prepared.gauge.matrix,std::move(lower_state),path(h,end,depth),options_.ordinary_order);
-        auto upper_physical=apply_rational_rows(prepared.diagonal,end,upper_state,transport_top);
-        report(depth,"upper matching",upper_top);
-        auto upper_constants=match(prepared.upper,upper_physical,h_ball,upper_top);
-        for(std::size_t i=node.operations.size();i<prepared.lower.functionals.size();++i) {
-          if(prepared.lower.functionals[i])check_endpoint_constraint(
-            apply(prepared.lower,*prepared.lower.functionals[i],lower_constants,h_ball,desired_top),0,
-            prepared.constraint_labels[i-node.operations.size()]);
-          if(prepared.upper.functionals[i])check_endpoint_constraint(
-            apply(prepared.upper,*prepared.upper.functionals[i],upper_constants,h_ball,desired_top),0,
-            prepared.constraint_labels[i-node.operations.size()]);
-        }
-        for(std::size_t i=0;i<node.operations.size();++i) {
-          const auto operation=node.operations[i].operation;
-          if(operation==feynman::Operation::BetaIntegral) {
-            auto lower=apply(prepared.lower,*prepared.lower.functionals[i],lower_constants,h_ball,desired_top);
-            auto upper=apply(prepared.upper,*prepared.upper.functionals[i],upper_constants,h_ball,desired_top);
-            auto position=std::find(prepared.beta_indices.begin(),prepared.beta_indices.end(),i)-prepared.beta_indices.begin();
-            LaurentBoundary mid{middle->integrals.low,Boundary{middle->integrals.values.at(position)},false};
-            outputs[i]=sum({lower,mid,upper},desired_top);
-          }else if(operation==feynman::Operation::LowerLimit)
-            outputs[i]=apply(prepared.lower,*prepared.lower.functionals[i],lower_constants,h_ball,desired_top);
-          else if(operation==feynman::Operation::UpperLimit)
-            outputs[i]=apply(prepared.upper,*prepared.upper.functionals[i],upper_constants,h_ball,desired_top);
-        }
-        int low=0;for(const auto& output:outputs) {if(!output)throw std::logic_error("recursive operation was not executed");low=std::min(low,output->low);}
-        LaurentBoundary result{low,Boundary(outputs.size(),std::vector<B>(static_cast<int>(desired_top)-low+1,B(0))),false};
-        for(std::size_t i=0;i<outputs.size();++i)for(int k=outputs[i]->low;k<=static_cast<int>(desired_top);++k)
-          result.values[i][k-low]=outputs[i]->values[0][k-outputs[i]->low];
-        cache_[depth]=std::move(result);return *cache_[depth];
-      }catch(const BoundaryDemand& demand) {
-        const auto next=std::max(transport_top+1,demand.required_high);
-        if(next<=transport_top)throw std::runtime_error("recursive epsilon refinement made no progress");
-        transport_top=checked(next);++statistics_.refinements;report(depth,"child refinement",transport_top);
+    if(method==LinearMethod::factored) {
+      ++statistics_.factored_selections;
+      try {return evaluate_factored(depth,desired_top,prepared);}
+      catch(const ArithmeticConditioningFailure& failure) {
+        if(options_.linear_method!=LinearMethod::automatic ||
+            (failure.recursion_depth && *failure.recursion_depth!=depth))throw;
+        // One method change per exact plan, retaining endpoints, child
+        // expressions and their immutable sources. Future order extensions
+        // do not repeat a route that already failed at these settings.
+        prepared.factored_conditioning_failed=true;++statistics_.conditioning_method_fallbacks;
+        report(depth,std::string("factored conditioning fallback to adjoint: ")+failure.what(),desired_top);
       }
     }
-    throw std::runtime_error("recursive child epsilon refinement budget exhausted");
+    ++statistics_.adjoint_selections;return evaluate_adjoint(depth,desired_top,prepared);
   }
  private:
   LaurentBoundary evaluate_child(std::size_t depth,unsigned high) {
@@ -668,41 +498,6 @@ class Evaluator {
     // by a method fallback, a rejected budget) is still transport time.
     Seconds timer{statistics_.ordinary_seconds};
     if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(0);
-    const auto finish=[&]{if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);};
-    if(options_.ordinary_method!=OrdinaryMethod::taylor && !settings.continuation && !settings.continuation_observer && !settings.chart_observer) {
-      // Existing checkpoints remain authoritative and are verified by their original adapter.
-      bool saved=false;
-      if(!options_.ordinary_cache_directory.empty())saved=std::filesystem::exists(options_.ordinary_cache_directory/(adjoint_checkpoint::identity(matrix,initial,forcing,vertices,settings)+".json"));
-      if(!saved){++statistics_.spectral_attempts;ft_spectral::Diagnostics diagnostics;
-        auto spectral=options_.spectral;
-        if(!spectral.accuracy_goal)spectral.accuracy_goal=options_.leaf_digits+12;
-        if(options_.ordinary_method==OrdinaryMethod::automatic){spectral.conservative=true;spectral.max_block_size=1;spectral.max_nodes=spectral.accuracy_goal>50?128:64;spectral.endpoint_clustering=false;spectral.seconds_budget=std::min(spectral.seconds_budget,2.0);}
-        std::optional<LaurentRows> result;
-        if(options_.ordinary_method==OrdinaryMethod::ultraspherical) {
-          ft_ultraspherical::Options coefficient;
-          static_cast<ft_spectral::Options&>(coefficient)=spectral;
-          coefficient.diagonal_gauge=false;coefficient.endpoint_clustering=false;
-          if(options_.ordinary_fraction_progress)coefficient.progress=[&](unsigned leg,double fraction) {
-            options_.ordinary_fraction_progress((leg+fraction)/static_cast<double>(std::max<std::size_t>(1,vertices.size()-1)));
-          };
-          result=ft_ultraspherical_checkpoint::try_transport(matrix,initial,forcing,vertices,coefficient,diagnostics,settings,
-            {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.spectral_reused});
-        } else result=ft_spectral_checkpoint::try_transport(matrix,initial,forcing,vertices,spectral,diagnostics,settings,
-            {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.spectral_reused});
-        statistics_.spectral_seconds+=diagnostics.preparation_seconds+diagnostics.numerical_seconds;
-        if(result){++statistics_.spectral_accepted;statistics_.spectral_legs+=diagnostics.legs;
-          statistics_.spectral_subdivisions+=diagnostics.subdivisions;
-          statistics_.spectral_accepted_subsegments+=diagnostics.accepted_subsegments;
-          if(options_.ordinary_progress)options_.ordinary_progress("spectral transport accepted: "+std::to_string(diagnostics.legs)+" contour legs, "+std::to_string(diagnostics.subdivisions)+" subdivisions");
-          finish();return std::move(*result);}
-        statistics_.spectral_rejections.push_back(diagnostics.reason);
-        if(options_.ordinary_progress){
-          const auto largest=diagnostics.block_sizes.empty()?0:*std::max_element(diagnostics.block_sizes.begin(),diagnostics.block_sizes.end());
-          const auto nodes=diagnostics.nodes.empty()?0:*std::max_element(diagnostics.nodes.begin(),diagnostics.nodes.end());
-          options_.ordinary_progress("spectral transport fallback: "+diagnostics.reason+"; largest block "+std::to_string(largest)+", maximum nodes "+std::to_string(nodes));
-        }
-      }
-    }
     auto observed=settings;
     if(options_.ordinary_fraction_progress) {
       const auto caller=observed.chart_observer;
@@ -713,7 +508,8 @@ class Evaluator {
     }
     auto result=adjoint_checkpoint::transport(matrix,std::move(initial),forcing,vertices,observed,
       {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.ordinary_checkpoints});
-    finish();return result;
+    if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);
+    return result;
   }
   causal::Prescription example_prescription()const {
     // A familiar name cannot authorize a prescription for altered kinematics.
@@ -750,7 +546,7 @@ class Evaluator {
   }
   std::optional<Endpoint> direct_endpoint(const Matrix& matrix,const Matrix& diagonal,
       const fuchsify::Result& fuchs,const Node& node,bool upper)const {
-    if(!options_.observable_adjoint || !options_.direct_endpoint_functionals || options_.endpoint_order>256)
+    if(!options_.direct_endpoint_functionals || options_.endpoint_order>256)
       return std::nullopt;
     // This stronger guard covers both integral rows and endpoint-limit rows:
     // the latter have no fixed Laurent/log sector and their formal DR constant
@@ -826,13 +622,12 @@ class Evaluator {
       return AffineFrobeniusSeries::prepare(fuchs.matrix,xi_,ei_,options_.endpoint_order,endpoint_options);
     }();
     auto physical_gauge=fuchsify::detail::multiply(diagonal,fuchs.transform);
-    // In the adjoint route P*(D*T*F)^-1*D = P*(T*F)^-1.
-    // Keep D in the physical observable P, while cancelling it from the
-    // receiving frame before epsilon normalization and numerical inversion.
-    const auto& receiving_gauge=options_.observable_adjoint?fuchs.transform:physical_gauge;
-    auto matching_frame=series.project(receiving_gauge);
+    // P*(D*T*F)^-1*D = P*(T*F)^-1: D stays in the physical observable P and
+    // is cancelled from the receiving frame before epsilon normalization and
+    // numerical inversion.
+    auto matching_frame=series.project(fuchs.transform);
     if(!matching_frame.wronskian_prefactor){
-      matching_frame.wronskian_prefactor=series.gauged_wronskian_prefactor(receiving_gauge,fuchs.matrix,matrix);
+      matching_frame.wronskian_prefactor=series.gauged_wronskian_prefactor(fuchs.transform,fuchs.matrix,matrix);
       if(matching_frame.wronskian_prefactor)report(depth,side+" Wronskian certified from exact trace and rational factors",high);
     }
     Endpoint result{std::move(series),std::move(matching_frame),std::vector<std::optional<Expansion>>(node.operations.size()),{}};
@@ -924,7 +719,7 @@ class Evaluator {
     if(plans_[depth])return *plans_[depth];const auto& node=graph_.nodes[depth];
     const auto explicit_basis=options_.physical_bases.find(depth);
     auto selected=build_plan(depth,desired_top,explicit_basis==options_.physical_bases.end()?nullptr:&explicit_basis->second);
-    if(options_.automatic_basis_scan && options_.observable_adjoint && explicit_basis==options_.physical_bases.end()) {
+    if(options_.automatic_basis_scan && explicit_basis==options_.physical_bases.end()) {
       // Starts after the original plan's own preflight, which every execution
       // needs. Operator work done for candidates is selection time.
       std::optional<Seconds> timer;double operators_before=0;
@@ -1268,33 +1063,10 @@ class Evaluator {
     }
     const auto& inverse=*endpoint.inverse;
     if(!inverse.success())throw std::domain_error("recursive endpoint operator inverse unsupported: "+inverse.reason);
-    if(!endpoint.certified_operator_point || *endpoint.certified_operator_point!=exact_point_value) {
-      endpoint.certified_operator_point=exact_point_value;
-      endpoint.certified_operator_lows.assign(rows,std::nullopt);
-    }
-    const auto certificate_deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(options_.principal_part_endpoint_milliseconds);
     std::vector<std::optional<affine_operator::Operator>> operators(rows);int low=0;
     for(unsigned i=0;i<rows;++i)if(endpoint.functionals[i]) {
-      auto matching=options_.matching;
-      const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(certificate_deadline-std::chrono::steady_clock::now()).count();
-      if(remaining<=0 || endpoint.certified_operator_lows[i])matching.certify_operator_principal_part=false;
-      else matching.principal_part_max_milliseconds=std::min<unsigned>(matching.principal_part_max_milliseconds,static_cast<unsigned>(remaining));
-      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,matching);
+      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,options_.matching);
       if(!operators[i]->success())throw std::domain_error("recursive endpoint operator composition unsupported: "+operators[i]->reason);
-      auto& op=*operators[i];statistics_.principal_part_attempts+=op.principal_part_attempted;
-      statistics_.principal_part_certificates+=op.principal_part_certified;
-      statistics_.principal_part_zero_coefficients+=op.principal_part_zero_coefficients;
-      if(op.principal_part_certified)endpoint.certified_operator_lows[i]=op.row_lower_bounds.at(0);
-      else if(endpoint.certified_operator_lows[i]) {
-        const int certified=std::min(high,*endpoint.certified_operator_lows[i]);
-        if(certified>op.matrix.low) {
-          for(auto& row:op.matrix.coefficients)for(auto& column:row)
-            column.erase(column.begin(),column.begin()+(certified-op.matrix.low));
-          op.matrix.low=certified;
-        }
-        op.row_lower_bounds[0]=std::max(op.row_lower_bounds[0],*endpoint.certified_operator_lows[i]);
-        ++statistics_.principal_part_reused;
-      }
       low=std::min(low,operators[i]->matrix.low);
     }
     LaurentRows result{low,high,std::vector(rows,std::vector(d,std::vector<B>(high-low+1,B(0))))};
@@ -1303,9 +1075,6 @@ class Evaluator {
       for(unsigned j=0;j<d;++j)for(int k=matrix.low;k<=high;++k)result.coefficients[i][j][k-low]=matrix.coefficients[0][j][k-matrix.low];
     }
     return result;
-  }
-  static LaurentRows shift_operator_columns(const LaurentRows& rows,const std::vector<std::int64_t>& shifts,bool inverse=false) {
-    return shift_laurent_columns(rows,shifts,inverse);
   }
   // This is the actual leaf-source width prescribed by the immutable graph:
   // scalar leaves return one row per request, and exact-zero nodes use one
@@ -1435,7 +1204,6 @@ class Evaluator {
   LaurentBoundary evaluate_adjoint(std::size_t depth,unsigned desired_top,Plan& prepared) {
     const auto& node=graph_.nodes[depth];auto sample=graph_.dimension;
     const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),end=sample.constant(Rational(1)-prepared.geometry.overlap);
-    const auto h_ball=B::from_strings(prepared.geometry.overlap.str());
     preflight_linear_demands(depth,prepared);
     // With component demands the local operator is tightened to its structural
     // columns below, so the child is needed through the tight bound only. The
@@ -1459,7 +1227,7 @@ class Evaluator {
           const auto inverse=exact_laurent_rows(prepared.inverse_diagonal,anchor,
             std::max(0,checked(static_cast<long>(needed_operator)-transported.low)));
           combined=linear_boundary::compose(transported,inverse,needed_operator);
-        } else combined=shift_operator_columns(transported,prepared.gauge.shifts,true);
+        } else combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
         Matrix direct(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
         for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)direct[i]=node.observable_rows[i];
         combined=add_laurent_rows(*combined,exact_laurent_rows(direct,anchor,combined->high));
@@ -1479,7 +1247,6 @@ class Evaluator {
   LaurentBoundary evaluate_factored(std::size_t depth,unsigned desired_top,Plan& prepared) {
     const auto& node=graph_.nodes[depth];const auto sample=graph_.dimension;
     const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),end=sample.constant(Rational(1)-prepared.geometry.overlap);
-    const auto h_ball=B::from_strings(prepared.geometry.overlap.str());
     Matrix beta(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
     for(unsigned i=0;i<prepared.beta_indices.size();++i)beta[prepared.beta_indices[i]]=prepared.beta_rows[i];
     int beta_low=0;
@@ -1610,19 +1377,6 @@ class Evaluator {
       for(auto demand:endpoint.series->valuation_metadata(*functional).required_source_top(high))result=std::max(result,demand);
     return checked(result);
   }
-  affine_matching::Boundary match(const Endpoint& endpoint,const LaurentBoundary& boundary,const B& point,int high)const {
-    auto result=affine_matching::match(*endpoint.series,endpoint.matching_frame,point,
-      {boundary.low,boundary.high(),boundary.values},{0,high},options_.matching);
-    if(result.status==affine_matching::Status::NeedMoreBoundary)throw BoundaryDemand(result.required_boundary_high,result.reason);
-    if(!result.success())throw std::domain_error("recursive endpoint matching unsupported: "+result.reason);
-    return std::move(result.value);
-  }
-  LaurentBoundary apply(const Endpoint& endpoint,const Expansion& functional,const affine_matching::Boundary& constants,
-      const B& point,unsigned high)const {
-    auto result=affine_matching::apply(*endpoint.series,functional,point,constants,{0,static_cast<int>(high)},options_.matching);
-    if(!result.success())throw std::domain_error("recursive endpoint functional unsupported: "+result.reason);
-    return {result.value.low,std::move(result.value.coefficients),false};
-  }
   std::vector<Exact> path(const Exact& from,const Exact& to,std::size_t depth)const {
     if(from==to)return {from};
     const auto& names=graph_.dimension.variables();auto ii=std::find(names.begin(),names.end(),"I");
@@ -1630,11 +1384,6 @@ class Evaluator {
     auto lift=graph_.dimension.variable(ii-names.begin())*graph_.dimension.constant(options_.contour_height)*
       graph_.dimension.constant(prescription_.levels.at(depth).x_detour_sign);
     return {from,from+lift,to+lift,to};
-  }
-  static LaurentBoundary sum(const std::vector<LaurentBoundary>& values,unsigned high) {
-    int low=0;for(const auto& value:values)low=std::min(low,value.low);
-    LaurentBoundary out{low,Boundary(1,std::vector<B>(static_cast<int>(high)-low+1,B(0))),false};
-    for(const auto& value:values)for(int k=value.low;k<=static_cast<int>(high);++k)out.values[0][k-low]+=value.values[0][k-value.low];return out;
   }
 };
 } // namespace diffexp::recursion

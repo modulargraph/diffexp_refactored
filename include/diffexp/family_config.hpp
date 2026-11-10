@@ -100,16 +100,21 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("leaf_digits"))c.numerical.leaf_digits=integer(*v,1,100000,"leaf digits");
     if(auto v=a.if_contains("contour_height"))c.numerical.contour_height=rational(*v);
     if(auto v=a.if_contains("overlap"))c.numerical.overlap=rational(*v);
+    // Taylor charts are the only ordinary transport. "auto" and "taylor" from
+    // earlier templates still mean exactly that; the removed backends and
+    // their accuracy knob are named in the error instead of being ignored.
     if(auto v=a.if_contains("transport")) {
-      const auto method=v->as_string();if(method!="auto" && method!="spectral" && method!="taylor" && method!="ultraspherical")throw std::invalid_argument("unknown FT ordinary transport");
-      c.numerical.ordinary_method=method=="ultraspherical"?recursion::OrdinaryMethod::ultraspherical:
-        method=="auto"?recursion::OrdinaryMethod::automatic:method=="spectral"?recursion::OrdinaryMethod::spectral:recursion::OrdinaryMethod::taylor;
+      const auto method=v->as_string();
+      if(method!="auto" && method!="taylor")throw std::invalid_argument("numerical transport \""+std::string(method)+
+        "\" was removed: Taylor transport is the only ordinary method (drop the key or use \"taylor\")");
     }
-    if(auto v=a.if_contains("transport_digits"))c.numerical.spectral.accuracy_goal=integer(*v,1,100000,"FT transport digits");
+    if(a.if_contains("transport_digits"))throw std::invalid_argument(
+      "numerical transport_digits was removed with the spectral backends: Taylor transport is the only ordinary method");
     if(auto v=a.if_contains("method")) {
       const auto method=v->as_string();
-      if(method!="adjoint" && method!="factored" && method!="auto" && method!="values")throw std::invalid_argument("unknown numerical method");
-      c.numerical.observable_adjoint=method!="values";
+      if(method=="values")throw std::invalid_argument(
+        "numerical method \"values\" was removed: use \"adjoint\" (default), \"factored\" or \"auto\"");
+      if(method!="adjoint" && method!="factored" && method!="auto")throw std::invalid_argument("unknown numerical method");
       c.numerical.linear_method=method=="factored"?recursion::LinearMethod::factored:method=="auto"?recursion::LinearMethod::automatic:recursion::LinearMethod::adjoint;
     }
   }
@@ -132,7 +137,7 @@ inline json::value describe(const feynman::ExampleFamily& f) {
   json::object out{{"schema","DiffExp.FeynmanFamily/v1"},{"name",f.name},{"loops",f.momenta.loops},
     {"external_gram",std::move(gram)},{"propagators",std::move(lines)},{"physical_count",f.physical_count},
     {"dimension_at_epsilon_zero",f.dimension_at_epsilon_zero},{"epsilon_order",f.name=="bubble"?4:f.name=="pentagon_massive"?2:0},
-    {"numerical",json::object{{"endpoint_order",32},{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"},{"transport","auto"}}}};
+    {"numerical",json::object{{"endpoint_order",32},{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"}}}};
   if(f.name=="henn_double_pentagon_x0") {
     json::array anchors,signs;for(const auto& q:causal::henn_anchors())anchors.emplace_back(q.str());
     for(unsigned i=0;i<7;++i)signs.push_back(i==0?1:-1);

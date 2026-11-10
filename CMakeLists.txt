@@ -54,7 +54,7 @@ if(BUILD_TESTING)
     list(APPEND native_tests ibp_solver_provider family_config fire_native level_preparation recursion_graph artifact_store certified_rational_transport
       gaussian_boundary level_cache scalar_functional recursion_leaf fire_session recursion_pipeline fire_batch_cache)
     list(APPEND native_tests box_oracle henn_boundary causal causal_contour pentagon_oracle affine_operator adjoint_transport linear_boundary
-      polynomial_transport henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
+      henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
       endpoint_gauge scalar_accumulator affine_large fire_backward_checkpoint affine_finite_lag conditioned_adjoint cached_affine
       factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational cached_affine_columns affine_endpoint_domain)
     # Explicit acceptance runner: large FT examples are opt-in, with a caller
@@ -63,12 +63,6 @@ if(BUILD_TESTING)
     target_link_libraries(diffexp_check_ft_laptop PRIVATE DiffExp::core)
     add_executable(diffexp_ft_examples tests/test_ft_examples.cpp)
     target_link_libraries(diffexp_ft_examples PRIVATE DiffExp::core)
-    add_executable(diffexp_profile_accepted_chart tools/profile_accepted_chart.cpp)
-    target_link_libraries(diffexp_profile_accepted_chart PRIVATE DiffExp::core)
-    add_executable(diffexp_benchmark_circuit_source tools/benchmark_circuit_source.cpp)
-    target_link_libraries(diffexp_benchmark_circuit_source PRIVATE DiffExp::core)
-    add_executable(diffexp_import_centered_checkpoint tools/import_centered_checkpoint.cpp)
-    target_link_libraries(diffexp_import_centered_checkpoint PRIVATE DiffExp::core)
     add_executable(diffexp_henn_ft tools/check_henn_ft.cpp)
     target_link_libraries(diffexp_henn_ft PRIVATE DiffExp::core)
     add_executable(diffexp_benchmark_affine_domain tools/benchmark_affine_domain.cpp)
@@ -86,11 +80,8 @@ if(BUILD_TESTING)
     add_executable(diffexp_compose_recursion_stage tools/compose_recursion_stage.cpp)
     target_link_libraries(diffexp_compose_recursion_stage PRIVATE DiffExp::core)
   endif()
-  list(APPEND native_tests diagonal_log_gauge ft_spectral rational_circuit rational_circuit_dot compact_adjoint uncertainty_support basis_persistence
+  list(APPEND native_tests rational_circuit rational_circuit_dot compact_adjoint uncertainty_support basis_persistence
     component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening)
-  if(UNIX)
-    list(APPEND native_tests ft_spectral_checkpoint)
-  endif()
   foreach(name IN LISTS native_tests)
     add_executable(diffexp_test_${name} tests/test_${name}.cpp)
     target_link_libraries(diffexp_test_${name} PRIVATE DiffExp::core)

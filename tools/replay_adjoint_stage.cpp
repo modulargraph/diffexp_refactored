@@ -21,7 +21,7 @@ int main(int argc,char** argv) {
     const auto order=artifacts::detail::integer(resources.at("ordinary_order"));
     if(bits<64 || order<8 || order>1000)throw std::invalid_argument("replay numerical resource budget");
     B::set_precision(bits);AdjointOptions options;options.taylor_order=order;options.conditioning_stats=&stats;
-    if(mode=="baseline"){options.centered_input=false;options.max_conditioning_halvings=0;options.max_truncation_halvings=0;}
+    if(mode=="baseline"){options.centered_input=false;options.max_conditioning_halvings=0;}
     auto initial=side=="lower"?stage.lower_endpoint:stage.upper_endpoint;
     auto vertices=side=="lower"?stage.lower_path:stage.upper_path;
     const auto& forcing=side=="lower"?stage.lower_forcing:stage.upper_forcing;
@@ -80,7 +80,7 @@ int main(int argc,char** argv) {
     output["result_arithmetic"]=quality(result);output["result_rows"]=exact_rows(result);
     output["status"]="completed_diagnostic";
   }catch(const std::exception& error){output["error"]=error.what();code=1;}
-  output["conditioning"]={{"polynomial_charts",stats.polynomial_charts},{"rational_cross_checks",stats.rational_cross_checks},{"centered_charts",stats.centered_charts},{"homogeneous_maps",stats.homogeneous_chart_maps},{"subdivisions",stats.conditioning_subdivisions},{"polynomial_homogeneous_columns",stats.polynomial_homogeneous_columns},{"rational_homogeneous_columns",stats.rational_homogeneous_columns}};
+  output["conditioning"]={{"charts",stats.charts},{"tail_limited_charts",stats.tail_limited_charts},{"centered_charts",stats.centered_charts},{"conditioning_subdivisions",stats.conditioning_subdivisions},{"recurrences",stats.recurrences}};
   output["native_elapsed_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
   output["process_cpu_seconds"]=static_cast<double>(std::clock()-cpu)/CLOCKS_PER_SEC;
   std::cout<<json::serialize(output)<<'\n';return code;

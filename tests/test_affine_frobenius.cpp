@@ -2,6 +2,8 @@
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
 #include <iostream>
+#include <map>
+#include <tuple>
 using namespace diffexp;
 using B = kernel::ComplexBall;
 void check(bool v, const char *why) {
@@ -30,9 +32,9 @@ int main(int argc, char **argv) {
   try {
     B::set_precision(256);
     ExactField field({"x", "eps"});
-    for(unsigned mode:{0,1,2,3}) {
+    {
       auto coefficient=[&](const char* text){return Exact(field,text);};
-      AffineFrobeniusSeries::Options limited;limited.max_terms=40;limited.univariate_epsilon_projection=mode==1;limited.cleared_epsilon_projection=mode==2;limited.finite_lag_projection=mode==3;
+      AffineFrobeniusSeries::Options limited;limited.max_terms=40;
       AffineFrobeniusSeries::Matrix diagonal{{coefficient("1/(1-x)"),coefficient("0")},
         {coefficient("0"),coefficient("1/(1-x)")}};
       auto f=AffineFrobeniusSeries::prepare(diagonal,0,1,8,limited);
@@ -65,25 +67,53 @@ int main(int argc, char **argv) {
         auto parsed=diffexp::evaluate(data::Reader(regular.str()).read(),ep,{{"eps",ep}});
         auto direct=native.regular_jet(10);
         for(unsigned k=0;k<10;++k)near(direct.at(k),parsed.at(k));
+        // The exact series division against the generic rational Taylor expansion.
+        const auto exact=native.regular_taylor(10);const auto reference=affine_frobenius_detail::taylor(regular,1,9);
+        for(unsigned k=0;k<10;++k)check(exact[k]==reference[k].rational(),"exact epsilon Taylor coefficient changed");
       }
       bool rejected=false;try{affine_frobenius_detail::EpsilonRational nonunivariate(e("x+eps"),1);}
       catch(const std::domain_error&){rejected=true;}check(rejected,"unsubstituted coefficient parameter accepted by native epsilon evaluator");
     }
     {
-      auto compare=[](const auto& a,const auto& b){
-        check(a.rows==b.rows&&a.columns==b.columns&&a.terms.size()==b.terms.size()&&a.wronskian_prefactor==b.wronskian_prefactor&&a.coherent_x_frontier==b.coherent_x_frontier,"projection metadata mismatch");
-        for(std::size_t i=0;i<a.terms.size();++i){const auto& x=a.terms[i];const auto& y=b.terms[i];check(x.row==y.row&&x.column==y.column&&x.log_degree==y.log_degree&&x.power==y.power&&x.slope==y.slope&&x.coefficient==y.coefficient,"univariate projection exact coefficient mismatch");}
-      };
-      for(unsigned mode:{1,2,3})for(const auto& a:std::vector<AffineFrobeniusSeries::Matrix>{
+      // Independent oracle for Laurent rows with epsilon-dependent poles: the
+      // termwise Taylor convolution of every row entry with the series, cut
+      // at the shared row frontier. project() never expands a rational entry.
+      using Key=std::tuple<unsigned,unsigned,Rational,Rational,unsigned>;
+      for(const auto& a:std::vector<AffineFrobeniusSeries::Matrix>{
           {{e("eps/x"),e("1/x")},{e("0"),e("eps/x+(x+eps)/(1-x)")}},
           {{e("0"),e("0")},{e("1/(1-x)"),e("1/x")}}}) {
-        AffineFrobeniusSeries::Options options;auto generic=AffineFrobeniusSeries::prepare(a,0,1,8,options);
-        options.univariate_epsilon_projection=mode==1;options.cleared_epsilon_projection=mode==2;options.finite_lag_projection=mode==3;auto fast=AffineFrobeniusSeries::prepare(a,0,1,8,options);
+        const unsigned order=8;auto series=AffineFrobeniusSeries::prepare(a,0,1,order);
         AffineFrobeniusSeries::Matrix rows{{e("(1+eps)/(x^2*(1+x))"),e("(x+eps)/(3*x*(1-x))")},{e("1/(2-eps)"),e("0")}};
-        compare(generic.project(rows),fast.project(rows));
-        auto g=generic.project_endpoint_domain(rows),f=fast.project_endpoint_domain(rows);compare(g.admissible,f.admissible);
-        check(g.zero_constraints.size()==f.zero_constraints.size(),"univariate projection domain size mismatch");
-        for(std::size_t i=0;i<g.zero_constraints.size();++i){const auto& x=g.zero_constraints[i];const auto& y=f.zero_constraints[i];check(x.row==y.row&&x.power==y.power&&x.log_degree==y.log_degree&&x.coefficients==y.coefficients,"univariate projection domain mismatch");}
+        std::map<Key,Exact> expected;
+        for(unsigned i=0;i<rows.size();++i){
+          long row_valuation=fuchsify::detail::valuation(e("0"),0);
+          for(const auto& entry:rows[i])row_valuation=std::min(row_valuation,fuchsify::detail::valuation(entry,0));
+          for(unsigned j=0;j<rows[i].size();++j){
+            if(rows[i][j].is_zero())continue;
+            const long val=fuchsify::detail::valuation(rows[i][j],0);
+            const auto taylor=affine_frobenius_detail::taylor(rows[i][j]/fuchsify::detail::power(e("x"),val),0,order);
+            for(const auto& t:series.terms().terms)if(t.row==j)for(unsigned k=0;k<=order;++k){
+              const auto power=t.power+Rational(val)+Rational(k);
+              if(power>series.absolute_x_frontiers()[t.column]+Rational(row_valuation))break;
+              auto [at,inserted]=expected.try_emplace(Key{i,t.column,power,t.slope,t.log_degree},e("0"));
+              at->second=at->second+t.coefficient*taylor[k];
+            }
+          }
+        }
+        std::erase_if(expected,[](const auto& item){return item.second.is_zero();});
+        const auto projected=series.project(rows);
+        check(projected.terms.size()==expected.size()&&projected.coherent_x_frontier,"projection term set differs from the Taylor convolution");
+        for(const auto& t:projected.terms){
+          const auto found=expected.find(Key{t.row,t.column,t.power,t.slope,t.log_degree});
+          check(found!=expected.end()&&found->second==t.coefficient,"projection coefficient differs from the Taylor convolution");
+        }
+        // The endpoint-only projection is the fixed nonpositive sector of it.
+        const auto endpoint=series.project_endpoint_domain(rows);
+        std::size_t fixed=0;
+        for(const auto& [key,value]:expected)if(std::get<3>(key).is_zero()&&std::get<2>(key)<=Rational(0))++fixed;
+        std::size_t constrained=0;for(const auto& c:endpoint.zero_constraints)for(const auto& value:c.coefficients)constrained+=!value.is_zero();
+        check(endpoint.admissible.terms.size()+constrained==fixed,"endpoint projection differs from the fixed sector of the full projection");
+        for(const auto& t:endpoint.admissible.terms)check(expected.at(Key{t.row,t.column,t.power,t.slope,t.log_degree})==t.coefficient,"endpoint projection coefficient differs from the full projection");
       }
     }
     Exact x = e("x");
@@ -122,6 +152,70 @@ int main(int argc, char **argv) {
               constant.project(std::vector<Exact>{e("1/x^2")}));
         },
         "fixed unregulated power divergence must reject");
+    // y'=0 with the observable (1+x^3)/x^3 = x^-3 + 1. At x order 2 the
+    // retained series stops at x^-1: the x^0 coefficient is unknown and must be
+    // refused, never reported as a vanishing endpoint constant.
+    {
+      AffineFrobeniusSeries::Options options;
+      const AffineFrobeniusSeries::Matrix pole{{e("(1+x^3)/x^3")}},
+          deep{{e("(1+x^4)/x^4")}};
+      auto shallow = AffineFrobeniusSeries::prepare({{e("0")}}, 0, 1, 2, options),
+           reaching = AffineFrobeniusSeries::prepare({{e("0")}}, 0, 1, 3, options);
+      rejects([&] { shallow.project_endpoint_domain(pole); },
+              "endpoint constant beyond the retained x frontier was reported");
+      auto limit = reaching.project_endpoint_domain(pole);
+      check(limit.zero_constraints.size() == 1 &&
+                limit.zero_constraints[0].power == Rational(-3) &&
+                reaching.dr_endpoint_constant(limit.admissible)[0][0] == e("1"),
+            "reaching endpoint frontier lost its divergent mode or constant");
+      // An integral must see every fixed power <= -1: x^-4 at order 2 is known
+      // only through x^-2, while order 3 reaches x^-1.
+      rejects([&] { shallow.dr_domain(shallow.project(deep), true); },
+              "integral domain beyond the retained x frontier was reported");
+      auto integral = reaching.dr_domain(reaching.project(deep), true);
+      check(integral.zero_constraints.size() == 1 &&
+                integral.zero_constraints[0].power == Rational(-4) &&
+                integral.admissible.terms.empty(),
+            "reaching integral frontier lost its nonintegrable mode");
+      // Nonzero epsilon slopes have no fixed sector and need no frontier.
+      auto sloped = AffineFrobeniusSeries::prepare({{e("eps/x")}}, 0, 1, 2, options);
+      check(sloped.project_endpoint_domain({{e("1/x^9")}}).zero_constraints.empty(),
+            "regulated sector was held to the fixed endpoint frontier");
+      // Shapes are validated before any entry is read.
+      auto square = AffineFrobeniusSeries::prepare(
+          {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2, options);
+      bool ragged = false;
+      try {
+        square.project(AffineFrobeniusSeries::Matrix{{e("1"), e("0")}, {e("1")}});
+      } catch (const std::invalid_argument &) {
+        ragged = true;
+      }
+      check(ragged, "ragged observable rows were indexed before validation");
+    }
+    {
+      auto square = AffineFrobeniusSeries::prepare(
+          {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2);
+      auto misplaced = square.terms();
+      misplaced.terms.front().column = 7;
+      bool caught = false;
+      try {
+        square.contract(misplaced, {e("1"), e("1")});
+      } catch (const std::invalid_argument &) {
+        caught = true;
+      }
+      check(caught, "contraction indexed a column outside its constants");
+      caught = false;
+      try {
+        AffineFrobeniusSeries::prepare(AffineFrobeniusSeries::Matrix(1), 0, 1, 2);
+      } catch (const std::invalid_argument &) {
+        caught = true;
+      }
+      check(caught, "empty source row was indexed before validation");
+      check(square.epsilon_valuation(e("eps^4*(2+eps)/(3-eps)")) == 4 &&
+                square.epsilon_valuation(e("(1+eps)/(eps^3*(1-2*eps))")) == -3 &&
+                square.epsilon_valuation(e("7/3")) == 0,
+            "exponent-only epsilon valuation changed");
+    }
     // Equal-slope rational Jordan residue: x^(-1+2eps) log(x).
     auto jordan = AffineFrobeniusSeries::prepare(
         {{e("(-1+2*eps)/x"), e("1/x")}, {e("0"), e("(-1+2*eps)/x")}}, 0, 1, 2);

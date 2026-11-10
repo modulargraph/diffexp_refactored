@@ -32,9 +32,13 @@ struct Options {
               max_series_cells = 8000000;
   // Operator-only alternative; exact normalization and K0 remain mandatory.
   bool numeric_operator_convolution = false;
-  // Preserve exact epsilon cancellations while removing x from symbolic
-  // normalization when the supplied positive real matchpoint is exact.
-  bool specialize_exact_point = false;
+  // When the supplied positive real matchpoint is an exact rational, the
+  // row normalization substitutes it and works in Q[log x] instead of
+  // Q(x, log x). Epsilon cancellations stay exact, and since log of a
+  // rational other than one is transcendental, a polynomial in it vanishes
+  // numerically exactly when it vanishes identically. An inexact point always
+  // takes the symbolic route.
+  bool specialize_exact_point = true;
   // Exact negative-power certificates concern the retained x expansion only.
   bool certify_operator_principal_part = false;
   unsigned principal_part_max_depth = 16, principal_part_max_milliseconds = 2000;
@@ -93,10 +97,10 @@ struct Budget {
        !arb_is_positive(acb_realref(point.raw())))return;
     fmpq_t q;fmpq_init(q);arf_get_fmpq(q,arb_midref(acb_realref(point.raw())));
     // Large dyadic points could otherwise create huge exact integer powers.
-    if(fmpz_bits(fmpq_numref(q))<=4096&&fmpz_bits(fmpq_denref(q))<=4096){
-      char* text=fmpq_get_str(nullptr,10,q);exact_x.emplace(text);flint_free(text);
-    }
-    fmpq_clear(q);
+    const bool bounded=fmpz_bits(fmpq_numref(q))<=4096&&fmpz_bits(fmpq_denref(q))<=4096;
+    std::optional<Q> value;
+    try{if(bounded)value=Q::from_fmpq(q);}catch(...){fmpq_clear(q);throw;}
+    fmpq_clear(q);exact_x=std::move(value);
   }
   void series_cells(std::size_t rows, std::size_t columns,
                     std::size_t depth) const {
@@ -199,32 +203,25 @@ inline std::pair<long, std::vector<Q>> rational_coefficients(const Exact &c,
     out[0] = c.rational();
     return {0, out};
   }
+  // A nonconstant coefficient is univariate in exactly the variable it uses.
   std::optional<std::size_t> variable;
-  for (auto &ts : {c.numerator_terms(), c.denominator_terms()})
-    for (auto &t : ts)
-      for (unsigned j = 0; j < t.powers.size(); ++j)
-        if (t.powers[j]) {
-          if (variable && *variable != j)
-            throw std::invalid_argument(
-                "matching coefficient depends on multiple parameters");
-          variable = j;
-        }
+  for (std::size_t j = 0; j < c.variable_count() && !variable; ++j)
+    if (c.is_univariate(j))
+      variable = j;
   if (!variable)
-    throw std::logic_error("nonconstant matching coefficient has no variable");
-  auto val = fuchsify::detail::valuation(c, *variable);
-  auto regular = c / fuchsify::detail::power(c.variable(*variable), val);
-  auto exact = affine_frobenius_detail::taylor(regular, *variable, top);
-  std::vector<Q> out;
-  for (auto &e : exact)
-    out.push_back(e.rational());
-  return {val, out};
+    throw std::invalid_argument(
+        "matching coefficient depends on multiple parameters");
+  const affine_frobenius_detail::EpsilonRational value(c, *variable);
+  return {value.valuation(), value.regular_taylor(top + 1)};
 }
 // Expand epsilon in an exact ring of x^r log(x)^k. Cancellation is decided
 // here, before evaluating at the matchpoint; no interval is classified as exact
 // zero.
+// Orders below `first` are left empty and are not charged: a caller extending
+// an existing prefix pays for each (term, order) contribution exactly once.
 inline Matrix coefficients(const AffineFrobeniusSeries::Expansion &expansion,
                            const std::vector<long> &shifts, unsigned top,
-                           Budget &budget) {
+                           Budget &budget, unsigned first = 0) {
   unsigned d = expansion.rows;
   budget.series_cells(d, expansion.columns, static_cast<std::size_t>(top) + 1);
   Matrix out(d, std::vector<Series>(expansion.columns, Series(top + 1)));
@@ -240,13 +237,15 @@ inline Matrix coefficients(const AffineFrobeniusSeries::Expansion &expansion,
       if (!c[k].is_zero()) {
         Q slope_power(1);
         for (unsigned m = 0; k + m + start <= top; ++m) {
-          budget.spend();
-          auto key = std::make_pair(t.power, t.log_degree + m);
-          auto &p = out[t.row][t.column][k + m + start];
-          auto [it, inserted] = p.try_emplace(key, Q(0));
-          it->second += c[k] * slope_power;
-          if (it->second.is_zero())
-            p.erase(it);
+          if (k + m + start >= first) {
+            budget.spend();
+            auto key = std::make_pair(t.power, t.log_degree + m);
+            auto &p = out[t.row][t.column][k + m + start];
+            auto [it, inserted] = p.try_emplace(key, Q(0));
+            it->second += c[k] * slope_power;
+            if (it->second.is_zero())
+              p.erase(it);
+          }
           slope_power = slope_power * t.slope / Q(m + 1);
           if (slope_power.is_zero())
             break;
@@ -281,28 +280,38 @@ inline void validate(const Boundary &b, unsigned rows) {
         throw std::invalid_argument("nonfinite Laurent boundary coefficient");
   }
 }
+// Certified ball inverse, or nothing when invertibility cannot be verified at
+// the working precision. The FLINT matrices are owned, so no path leaks them.
+inline std::optional<std::vector<std::vector<B>>>
+verified_inverse(const std::vector<std::vector<B>> &matrix) {
+  struct Owned {
+    acb_mat_t value;
+    explicit Owned(slong d) { acb_mat_init(value, d, d); }
+    ~Owned() { acb_mat_clear(value); }
+    Owned(const Owned &) = delete;
+    Owned &operator=(const Owned &) = delete;
+  };
+  const unsigned d = matrix.size();
+  Owned a(d), inv(d);
+  for (unsigned i = 0; i < d; ++i)
+    for (unsigned j = 0; j < d; ++j)
+      acb_set(acb_mat_entry(a.value, i, j), matrix.at(i).at(j).raw());
+  if (!acb_mat_inv(inv.value, a.value, B::precision()))
+    return std::nullopt;
+  std::vector out(d, std::vector<B>(d, B(0)));
+  for (unsigned i = 0; i < d; ++i)
+    for (unsigned j = 0; j < d; ++j)
+      acb_set(out[i][j].raw(), acb_mat_entry(inv.value, i, j));
+  return out;
+}
 inline std::optional<std::vector<std::vector<B>>>
 verified_inverse(const Matrix &matrix, const B &point) {
   const unsigned d = matrix.size();
-  acb_mat_t a, inv;
-  acb_mat_init(a, d, d);
-  acb_mat_init(inv, d, d);
+  std::vector leading(d, std::vector<B>(d, B(0)));
   for (unsigned i = 0; i < d; ++i)
-    for (unsigned j = 0; j < d; ++j) {
-      auto value = evaluate(matrix[i][j][0], point);
-      acb_set(acb_mat_entry(a, i, j), value.raw());
-    }
-  const bool success = acb_mat_inv(inv, a, B::precision()) != 0;
-  std::optional<std::vector<std::vector<B>>> out;
-  if (success) {
-    out = std::vector(d, std::vector<B>(d, B(0)));
-    for (unsigned i = 0; i < d; ++i)
-      for (unsigned j = 0; j < d; ++j)
-        acb_set((*out)[i][j].raw(), acb_mat_entry(inv, i, j));
-  }
-  acb_mat_clear(a);
-  acb_mat_clear(inv);
-  return out;
+    for (unsigned j = 0; j < d; ++j)
+      leading[i][j] = evaluate(matrix[i][j][0], point);
+  return verified_inverse(leading);
 }
 inline int integer(long n) {
   if (n < std::numeric_limits<int>::min() ||
@@ -439,32 +448,47 @@ inline Exact as_exact(const Polynomial &p, const Q &column_power,
   for (auto &[key, q] : p) {
     budget.spend();
     auto exponent = key.first - column_power;
-    auto text = exponent.str();
-    if (text.find('/') != std::string::npos)
+    if (!affine_frobenius_detail::is_integer(exponent))
       throw std::domain_error("physical affine column does not have integer x "
                               "shifts after its base exponent is factored");
-    long power = std::stol(text);
-    if (std::abs(power) > budget.options.max_symbolic_x_power)
+    const Q limit(static_cast<long>(budget.options.max_symbolic_x_power));
+    if (exponent > limit || exponent < -limit)
       throw std::length_error(
           "row normalization symbolic x-power budget exhausted");
+    const long power = affine_frobenius_detail::integer_value(exponent);
     out = out + zero.constant(q) * fuchsify::detail::power(x, power) *
                     ell.pow(key.second);
   }
   return out;
+}
+// Appends the epsilon orders out.size()..top. Orders already present are
+// neither recomputed nor charged again, so a row gauge that discovers its
+// depth one shear at a time spends the exact-operation budget only once.
+inline void
+extend_exact_coefficients(ExactSeries &out, const AffineFrobeniusSeries &series,
+                          const AffineFrobeniusSeries::Expansion &physical,
+                          const std::vector<long> &shifts, unsigned top,
+                          const Exact &zero, Budget &budget) {
+  if (top < out.size())
+    return;
+  const unsigned first = out.size(), d = physical.rows;
+  auto symbolic = coefficients(physical, shifts, top, budget, first);
+  for (unsigned n = first; n <= top; ++n) {
+    auto next = fuchsify::detail::zeros(d, physical.columns, zero);
+    for (unsigned i = 0; i < d; ++i)
+      for (unsigned j = 0; j < physical.columns; ++j)
+        next[i][j] = as_exact(symbolic[i][j][n], series.exponents()[j].power,
+                              zero, budget);
+    out.push_back(std::move(next));
+  }
 }
 inline ExactSeries
 exact_coefficients(const AffineFrobeniusSeries &series,
                    const AffineFrobeniusSeries::Expansion &physical,
                    const std::vector<long> &shifts, unsigned top,
                    const Exact &zero, Budget &budget) {
-  auto symbolic = coefficients(physical, shifts, top, budget);
-  unsigned d = physical.rows;
-  ExactSeries out(top + 1, fuchsify::detail::zeros(d, physical.columns, zero));
-  for (unsigned n = 0; n <= top; ++n)
-    for (unsigned i = 0; i < d; ++i)
-      for (unsigned j = 0; j < physical.columns; ++j)
-        out[n][i][j] = as_exact(symbolic[i][j][n], series.exponents()[j].power,
-                                zero, budget);
+  ExactSeries out;
+  extend_exact_coefficients(out, series, physical, shifts, top, zero, budget);
   return out;
 }
 inline ExactMatrix exact_product(const ExactMatrix &a, const ExactMatrix &b,
@@ -483,6 +507,12 @@ inline ExactMatrix exact_product(const ExactMatrix &a, const ExactMatrix &b,
 struct RowGauge {
   ExactSeries inverse_epsilon_powers;
   unsigned steps = 0, sheared_rows = 0;
+  // Exact epsilon coefficients of the gauged matrix generated while probing
+  // (adaptive gauge only); callers extend this prefix instead of rebuilding it.
+  ExactSeries coefficients;
+  // K_0 = sum_p R_p H_p after the final elimination: an exact permutation
+  // matrix (the identity unless a pivot was unverifiable at the point).
+  ExactMatrix leading;
 };
 template <class Coefficient>
 inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
@@ -565,8 +595,10 @@ inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
       if (++rank == d)
         break;
     }
-    if (rank == d)
+    if (rank == d) {
+      gauge.leading = std::move(leading);
       return gauge;
+    }
     if (step >= budget.options.max_row_normalization_steps)
       throw std::length_error(
           "singular-leading epsilon row-normalization step budget exhausted");
@@ -603,14 +635,15 @@ adaptive_row_gauge(const AffineFrobeniusSeries &series,
                    const std::vector<long> &shifts, const B &point,
                    const Exact &zero, Budget &budget) {
   ExactSeries coefficients;
-  return row_gauge_coefficients(
+  auto gauge = row_gauge_coefficients(
       physical.rows, zero, point, budget,
       [&](unsigned n) -> const ExactMatrix & {
-        if (n >= coefficients.size())
-          coefficients =
-              exact_coefficients(series, physical, shifts, n, zero, budget);
+        extend_exact_coefficients(coefficients, series, physical, shifts, n,
+                                  zero, budget);
         return coefficients[n];
       });
+  gauge.coefficients = std::move(coefficients);
+  return gauge;
 }
 inline Result
 row_normalized_match(const AffineFrobeniusSeries &series,
@@ -652,8 +685,9 @@ row_normalized_match(const AffineFrobeniusSeries &series,
   if (depth + loss >= budget.options.max_epsilon_depth)
     throw std::length_error(
         "normalized affine matching epsilon-depth budget exhausted");
-  auto original =
-      exact_coefficients(series, physical, shifts, depth + loss, zero, budget);
+  auto original = std::move(gauge.coefficients);
+  extend_exact_coefficients(original, series, physical, shifts, depth + loss,
+                            zero, budget);
   // Certify that the Laurent row gauge introduces no negative epsilon terms
   // in the normalized matrix, with identities checked exactly in Q(x,ell).
   for (unsigned q = 1; q <= loss; ++q) {
@@ -690,23 +724,11 @@ row_normalized_match(const AffineFrobeniusSeries &series,
     for (unsigned i = 0; i < d; ++i)
       for (unsigned j = 0; j < d; ++j)
         r[p][i][j] = evaluate_at(gauge.inverse_epsilon_powers[p][i][j]);
-  acb_mat_t leading, inverse;
-  acb_mat_init(leading, d, d);
-  acb_mat_init(inverse, d, d);
-  for (unsigned i = 0; i < d; ++i)
-    for (unsigned j = 0; j < d; ++j)
-      acb_set(acb_mat_entry(leading, i, j), k[0][i][j].raw());
-  bool ok = acb_mat_inv(inverse, leading, B::precision());
-  std::vector<std::vector<B>> inv(d, std::vector<B>(d, B(0)));
-  if (ok)
-    for (unsigned i = 0; i < d; ++i)
-      for (unsigned j = 0; j < d; ++j)
-        acb_set(inv[i][j].raw(), acb_mat_entry(inverse, i, j));
-  acb_mat_clear(leading);
-  acb_mat_clear(inverse);
-  if (!ok)
+  const auto inverse = verified_inverse(k[0]);
+  if (!inverse)
     throw PrecisionNeeded("normalized unit-leading matrix is not invertible at "
                           "working precision");
+  const auto &inv = *inverse;
   std::vector<std::vector<B>> w(depth + 1, std::vector<B>(d, B(0)));
   for (unsigned n = 0; n <= depth; ++n) {
     std::vector<B> rhs(d, B(0));

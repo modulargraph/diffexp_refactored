@@ -136,6 +136,40 @@ int main(int argc, char **argv) {
           "certified removable pole still demands an extra boundary order");
     check(ao::apply_operator(conservative,just_enough,{0,0}).status==am::Status::NeedMoreBoundary,
           "conservative operator unexpectedly waived a boundary coefficient");
+    {
+      // Extending the exact epsilon coefficients one order at a time must give
+      // the same series for the same exact-operation charge as one direct build.
+      ExactField gauge_field({"x", "ell"});
+      Exact gauge_zero(gauge_field, 0);
+      const auto shifts =
+          coalescing.valuation_metadata(coalescing.terms()).minimum_by_column;
+      am::detail::Budget direct{am::Options{}}, grown{am::Options{}};
+      auto full = am::detail::exact_coefficients(coalescing, coalescing.terms(),
+                                                 shifts, 3, gauge_zero, direct);
+      am::detail::ExactSeries stepwise;
+      for (unsigned n = 0; n <= 3; ++n)
+        am::detail::extend_exact_coefficients(stepwise, coalescing,
+                                              coalescing.terms(), shifts, n,
+                                              gauge_zero, grown);
+      check(stepwise == full && direct.work > 0 && grown.work == direct.work,
+            "incremental epsilon orders were recharged or changed");
+      am::detail::Budget probing{am::Options{}};
+      auto gauge = am::detail::adaptive_row_gauge(
+          coalescing, coalescing.terms(), shifts, x, gauge_zero, probing);
+      check(gauge.steps > 0 &&
+                gauge.coefficients.size() >= gauge.inverse_epsilon_powers.size(),
+            "adaptive gauge did not retain its exact coefficient prefix");
+      for (unsigned n = 0; n < gauge.coefficients.size() && n < full.size(); ++n)
+        check(gauge.coefficients[n] == full[n],
+              "adaptive gauge coefficient prefix differs from a direct build");
+      // A functional term outside its declared shape is refused, not indexed.
+      auto misplaced = coalescing_primitive;
+      misplaced.terms.front().row = 5;
+      auto refused = ao::compose(coalescing_inverse, coalescing, misplaced, x, 2);
+      check(refused.status == am::Status::Unsupported &&
+                refused.reason.find("outside shape") != std::string::npos,
+            "functional coordinate outside its shape was indexed");
+    }
     auto limited=certificate_options;limited.principal_part_max_operations=0;
     auto fallback=ao::compose(coalescing_inverse,coalescing,coalescing_primitive,x,2,limited);
     check(fallback.success() && fallback.principal_part_attempted &&
@@ -194,6 +228,36 @@ int main(int argc, char **argv) {
         for (int k = collision_inverse.inverse.low; k <= 8; ++k)
           near(numeric_collision.inverse.coefficients[i][j][k - numeric_collision.inverse.low],
                collision_inverse.inverse.coefficients[i][j][k - collision_inverse.inverse.low]);
+    // The recurrence is triangular in epsilon: an inverse prepared at a low
+    // order and extended must be the inverse prepared at the high order, in
+    // both arithmetic modes, without re-solving what it already holds.
+    for (const auto &mode : {ao::Options{}, numeric_options})
+      for (int start : {-1, 0, 3}) {
+        auto grown = ao::prepare(colliding, colliding.terms(), x, start, mode);
+        check(grown.success() && grown.inverse.high == start, grown.reason);
+        const auto solved = grown.recurrence->w.size();
+        ao::extend(grown, colliding, colliding.terms(), 2, mode);
+        check(grown.success() && grown.inverse.high == std::max(start, 2) &&
+                  (start >= 2) == (grown.recurrence->w.size() == solved),
+              "lower-order extension must be a no-op, a higher one must solve new orders");
+        ao::extend(grown, colliding, colliding.terms(), 8, mode);
+        const auto &fresh = mode.numeric_operator_convolution ? numeric_collision : collision_inverse;
+        check(grown.success() && grown.inverse.low == fresh.inverse.low && grown.inverse.high == 8 &&
+                  grown.row_lower_bounds == fresh.row_lower_bounds &&
+                  grown.recurrence->w.size() == fresh.recurrence->w.size(),
+              "extended inverse window differs from a fresh preparation");
+        for (unsigned i = 0; i < 2; ++i)
+          for (unsigned j = 0; j < 2; ++j)
+            for (int k = fresh.inverse.low; k <= 8; ++k)
+              check(acb_equal(grown.inverse.coefficients[i][j][k - grown.inverse.low].raw(),
+                              fresh.inverse.coefficients[i][j][k - fresh.inverse.low].raw()),
+                    "extended inverse coefficient differs from a fresh preparation");
+        // Only the row gauge and the leading order are assembled exactly when
+        // higher orders enter through ball products.
+        if (mode.numeric_operator_convolution)
+          check(grown.recurrence->exact.size() <= grown.row_pole_loss + 1,
+                "numeric orders were assembled as exact rational functions");
+      }
     auto numeric_identity = ao::compose(numeric_collision, colliding, colliding.terms(), x, 3);
     check(numeric_identity.success(), numeric_identity.reason);
     for (unsigned i = 0; i < 2; ++i)
@@ -215,10 +279,13 @@ int main(int argc, char **argv) {
         {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2);
     auto varying_frame=constant_series.project(std::vector<std::vector<Exact>>{
       {e("x+eps*x^2"),e("1")},{e("x+eps*x^2"),e("1+eps*(1+x)")}});
+    // Specialization is the default; the symbolic Q(x,log x) route is its oracle.
     auto specialized_options=numeric_options;specialized_options.specialize_exact_point=true;
+    auto symbolic_options=numeric_options;symbolic_options.specialize_exact_point=false;
     for(const char* at:{"1/8","3/16","1/128"}){
       const auto point=B::from_strings(at);
-      auto symbolic_inverse=ao::prepare(constant_series,varying_frame,point,3,numeric_options);
+      auto symbolic_inverse=ao::prepare(constant_series,varying_frame,point,3,symbolic_options);
+      check(!symbolic_inverse.specialized_exact_point,"symbolic normalization was specialized");
       auto point_inverse=ao::prepare(constant_series,varying_frame,point,3,specialized_options);
       check(symbolic_inverse.success()&&point_inverse.success(),symbolic_inverse.reason+point_inverse.reason);
       check(point_inverse.specialized_exact_point&&point_inverse.wronskian_verified,"exact rational point specialization was not checked");

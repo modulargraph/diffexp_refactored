@@ -279,10 +279,13 @@ int main(int argc, char **argv) {
         {{e("0"), e("0")}, {e("0"), e("0")}}, 0, 1, 2);
     auto varying_frame=constant_series.project(std::vector<std::vector<Exact>>{
       {e("x+eps*x^2"),e("1")},{e("x+eps*x^2"),e("1+eps*(1+x)")}});
+    // Specialization is the default; the symbolic Q(x,log x) route is its oracle.
     auto specialized_options=numeric_options;specialized_options.specialize_exact_point=true;
+    auto symbolic_options=numeric_options;symbolic_options.specialize_exact_point=false;
     for(const char* at:{"1/8","3/16","1/128"}){
       const auto point=B::from_strings(at);
-      auto symbolic_inverse=ao::prepare(constant_series,varying_frame,point,3,numeric_options);
+      auto symbolic_inverse=ao::prepare(constant_series,varying_frame,point,3,symbolic_options);
+      check(!symbolic_inverse.specialized_exact_point,"symbolic normalization was specialized");
       auto point_inverse=ao::prepare(constant_series,varying_frame,point,3,specialized_options);
       check(symbolic_inverse.success()&&point_inverse.success(),symbolic_inverse.reason+point_inverse.reason);
       check(point_inverse.specialized_exact_point&&point_inverse.wronskian_verified,"exact rational point specialization was not checked");

@@ -32,9 +32,13 @@ struct Options {
               max_series_cells = 8000000;
   // Operator-only alternative; exact normalization and K0 remain mandatory.
   bool numeric_operator_convolution = false;
-  // Preserve exact epsilon cancellations while removing x from symbolic
-  // normalization when the supplied positive real matchpoint is exact.
-  bool specialize_exact_point = false;
+  // When the supplied positive real matchpoint is an exact rational, the
+  // row normalization substitutes it and works in Q[log x] instead of
+  // Q(x, log x). Epsilon cancellations stay exact, and since log of a
+  // rational other than one is transcendental, a polynomial in it vanishes
+  // numerically exactly when it vanishes identically. An inexact point always
+  // takes the symbolic route.
+  bool specialize_exact_point = true;
   // Exact negative-power certificates concern the retained x expansion only.
   bool certify_operator_principal_part = false;
   unsigned principal_part_max_depth = 16, principal_part_max_milliseconds = 2000;
@@ -506,6 +510,9 @@ struct RowGauge {
   // Exact epsilon coefficients of the gauged matrix generated while probing
   // (adaptive gauge only); callers extend this prefix instead of rebuilding it.
   ExactSeries coefficients;
+  // K_0 = sum_p R_p H_p after the final elimination: an exact permutation
+  // matrix (the identity unless a pivot was unverifiable at the point).
+  ExactMatrix leading;
 };
 template <class Coefficient>
 inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
@@ -588,8 +595,10 @@ inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
       if (++rank == d)
         break;
     }
-    if (rank == d)
+    if (rank == d) {
+      gauge.leading = std::move(leading);
       return gauge;
+    }
     if (step >= budget.options.max_row_normalization_steps)
       throw std::length_error(
           "singular-leading epsilon row-normalization step budget exhausted");

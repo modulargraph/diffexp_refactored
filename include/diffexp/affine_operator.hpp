@@ -242,6 +242,7 @@ struct Recurrence {
   affine_matching::detail::Matrix symbolic;  // exact x^r log^k coefficients, by epsilon order
   unsigned symbolic_orders = 0;
   affine_matching::detail::ExactSeries exact, row_gauge;  // contiguous exact prefix; R
+  affine_matching::detail::ExactMatrix leading;  // exact K_0 left by the row gauge
   std::vector<long> shifts;
   unsigned loss = 0;
   B point, logarithm;
@@ -360,6 +361,15 @@ struct Recurrence {
     while (k.size() <= depth) {
       const unsigned n = k.size();
       auto value = zeros(d, d);
+      if (!n) {
+        // The gauge ends on K_0 itself, an exact permutation matrix.
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            value[i][j] = evaluate_at(leading[i][j]);
+        leading_inverse = inverse(value);
+        k.push_back(std::move(value));
+        continue;
+      }
       bool exact_required = !numeric;
       if (!exact_required) {
         // R and H are independently evaluated enclosures. Their exact zeros
@@ -383,7 +393,6 @@ struct Recurrence {
           for (unsigned j = 0; j < d; ++j)
             value[i][j] = evaluate_at(sum[i][j]);
       }
-      if (!n) leading_inverse = inverse(value);
       k.push_back(std::move(value));
     }
     while (w.size() <= depth) {
@@ -490,6 +499,7 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     const unsigned loss = gauge.inverse_epsilon_powers.size() - 1;
     state->loss = loss;
     state->row_gauge = std::move(gauge.inverse_epsilon_powers);
+    state->leading = std::move(gauge.leading);
     out.row_pole_loss = loss;
     out.normalization_steps = gauge.steps;
     out.determinant_valuation = gauge.sheared_rows;

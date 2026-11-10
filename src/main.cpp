@@ -143,6 +143,10 @@ int main(int argc, char** argv) {
         std::shared_ptr<diffexp::ibp_solver::Session> native_session;
         if(ibp_provider=="ibp-solver"){
           diffexp::ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.dots=ibp_dots;native.numerators=ibp_numerators;
+          // Coefficients are typically of low degree in epsilon and high degree in
+          // the merge parameter. Per-variable degree slices fit that shape with far
+          // fewer points than the dense total-degree scan, whose cap they also avoid.
+          native.degree_slices=true;native.max_samples_per_prime=1024;
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {

@@ -359,7 +359,8 @@ public:
     static constexpr long zero_valuation = std::numeric_limits<long>::max() / 4;
   };
   struct LaurentMatrix {
-    int low, high;
+    // An empty window, so a result returned on a failure path is well defined.
+    int low = 0, high = -1;
     std::vector<std::vector<std::vector<B>>> coefficients;
   };
   static constexpr bool omitted_tail_certified = false;

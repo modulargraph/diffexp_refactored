@@ -4,6 +4,7 @@
 #include <flint/nmod.h>
 #include <flint/fmpq.h>
 #include <optional>
+#include <functional>
 #include <numeric>
 
 namespace diffexp::modular {
@@ -105,8 +106,10 @@ inline std::optional<Image> fit(const std::vector<Sample>& samples,std::size_t c
   for(std::size_t i=0;i<columns;++i)result.coefficients.push_back(nmod_mul(nmod_mat_entry(kernel,i,0),scale,kernel->mod));
   nmod_mat_clear(kernel);return result;
 }
+// `checkpoint`, when supplied, is called before every dense ansatz so a caller's
+// deadline is honoured inside the (n,d) scan, not only between coefficients.
 inline std::optional<Image> discover(const std::vector<Sample>& samples,std::size_t coefficient,
-    std::size_t variables,unsigned max_degree,Word p) {
+    std::size_t variables,unsigned max_degree,Word p,const std::function<void()>& checkpoint={}) {
   if(samples.size()<4)return std::nullopt;
   const std::vector<Sample> training(samples.begin(),samples.end()-3);
   std::vector<std::vector<Power>> terms;for(unsigned d=0;d<=max_degree;++d){
@@ -115,18 +118,29 @@ inline std::optional<Image> discover(const std::vector<Sample>& samples,std::siz
   for(unsigned n=0;n<terms.size();++n)for(unsigned d=0;d<terms.size();++d)
     if(terms[n].size()+terms[d].size()<=training.size()+1)choices.push_back({terms[n].size()+terms[d].size(),n,d});
   std::sort(choices.begin(),choices.end(),[](auto a,auto b){return std::tie(a.count,a.n,a.d)<std::tie(b.count,b.n,b.d);});
-  for(auto c:choices)if(auto result=fit(training,coefficient,{terms[c.n],terms[c.d],0},p)) {
+  for(auto c:choices){if(checkpoint)checkpoint();if(auto result=fit(training,coefficient,{terms[c.n],terms[c.d],0},p)) {
     bool valid=true;for(std::size_t i=training.size();i<samples.size();++i)
       if(evaluate(*result,samples[i].point,p)!=std::optional<Word>(samples[i].coefficients.at(coefficient)))valid=false;
     if(valid)return result;
-  }
+  }}
   return std::nullopt;
+}
+// True once every (numerator,denominator) total-degree pair up to max_degree
+// already fits the training rows: further samples cannot help the dense scan.
+inline bool dense_scan_saturated(std::size_t samples,std::size_t variables,unsigned max_degree) {
+  if(samples<4)return false;
+  try{return 2*monomials(variables,max_degree).size()<=samples-3+1;}
+  catch(const std::runtime_error&){return false;}
 }
 // A generic univariate slice preserves each coordinate degree and valuation
 // unless that specialization cancels a factor. Treat the resulting box only
 // as a hypothesis: fit it at unrelated multivariate points and retain heldouts.
-inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigned max_degree,
+// The box is NOT cut by a total degree: a coefficient of bidegree (15,2) is
+// far cheaper than its dense total-degree-17 hull, and a global total-degree
+// cap would silently delete monomials such as x^15 eps^2 from the ansatz.
+inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigned max_variable_degree,
     std::size_t limit=1024) {
+  const unsigned max_degree=max_variable_degree;
   Ansatz result;
   auto terms=[&](bool denominator)->std::optional<std::vector<Power>> {
     std::vector<std::pair<unsigned,unsigned>> ranges;
@@ -142,7 +156,7 @@ inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigne
     std::vector<Power> out;Power power(slices.size());bool overflow=false;
     auto visit=[&](auto&& self,std::size_t i,unsigned sum)->void {
       if(overflow)return;if(i==ranges.size()){out.push_back(power);overflow=out.size()>limit;return;}
-      for(unsigned e=ranges[i].first;e<=ranges[i].second&&e<=max_degree-sum;++e){power[i]=e;self(self,i+1,sum+e);}
+      for(unsigned e=ranges[i].first;e<=ranges[i].second&&!overflow;++e){power[i]=e;self(self,i+1,sum+e);}
     };visit(visit,0,0);if(overflow||out.empty())return std::nullopt;return out;
   };
   auto n=terms(false),d=terms(true);if(!n||!d)return std::nullopt;

@@ -610,6 +610,19 @@ inline json::value run(const json::value& input) {
     throw std::invalid_argument("spectral transport requires an ordinary boundary, positive AccuracyGoal and no saved Taylor segments");
   const bool spectral_size_candidate=recurrence=="auto" && d>=16 && k>0 && goal>0 && !save && ordinary_start;
   auto c=compile(r,d,k,bits,spectral_requested || spectral_size_candidate);
+  // A pole of the connection on the open path or at its endpoint cannot be
+  // reached by ordinary charts: their clearance shrinks geometrically and the
+  // run would only fail after exhausting its refinement or chart budget.
+  // Report the location at once. A singular START is handled separately below.
+  for(const auto& point:c.singularities) {
+    if(point.contains_zero() || !arb_contains_zero(acb_imagref(point.raw())))continue;
+    B domain=B::from_strings("1/2");arb_add_error_2exp_si(acb_realref(domain.raw()),-1);
+    if(!arb_overlaps(acb_realref(point.raw()),acb_realref(domain.raw())))continue;
+    const auto location=decimal_mid(acb_realref(point.raw()),12);
+    throw std::runtime_error("transport path meets a singularity of the differential equation at path parameter "+location+
+      (acb_contains(point.raw(),B(1).raw())?" (the endpoint)":"")+
+      "; end the path before it or pass around it with a complex path (DeltaPrescriptions)");
+  }
   json::object spectral_diagnostic{{"attempted",false},{"accepted",false}};
   bool spectral_candidate=spectral_requested || spectral_size_candidate;
   // Estimate how many global nodes nearby complex singularities could demand.

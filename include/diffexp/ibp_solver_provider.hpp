@@ -7,7 +7,7 @@ namespace diffexp::ibp_solver {
 // DiffExp. No momentum reconstruction, renamed family, or new ISP completion.
 struct Options {
   std::filesystem::path cache_directory;
-  unsigned dots=1,numerators=2,max_degree=16,max_primes=8,probe_timeout_seconds=20;
+  unsigned dots=1,numerators=2,max_degree=16,max_variable_degree=64,max_primes=8,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   std::size_t sample_checkpoint_interval=1;
   bool degree_slices=false,dots_first=false,target_sector_seeds=false,selected_source_rows=false;
@@ -215,7 +215,7 @@ class Session {
     throw std::runtime_error("IBP derivative closure planning did not stabilize within its pass budget");
   }
   static fire_modular::Options configuration(const Options& o,const std::shared_ptr<Sampler>& sampler){
-    fire_modular::Options out;out.cache_directory=o.cache_directory;out.max_degree=o.max_degree;out.max_primes=o.max_primes;
+    fire_modular::Options out;out.cache_directory=o.cache_directory;out.max_degree=o.max_degree;out.max_variable_degree=o.max_variable_degree;out.max_primes=o.max_primes;
     out.max_samples_per_prime=o.max_samples_per_prime;out.probe_timeout_seconds=o.probe_timeout_seconds;out.progress=o.progress;out.modulus=prime;
     out.sample_checkpoint_interval=o.sample_checkpoint_interval;
     out.provider_identity=std::string("ibp-solver-parametric-")+(o.dots_first?"dots-first":"total-degree")+"-v1-dots-"+std::to_string(o.dots)+"-numerators-"+std::to_string(o.numerators);

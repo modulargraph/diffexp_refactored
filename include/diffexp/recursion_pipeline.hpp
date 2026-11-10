@@ -490,7 +490,7 @@ class Evaluator {
         auto child=evaluate_child(depth+1,static_cast<unsigned>(demand));
         try {
           if(options_.observable_adjoint) {
-            auto local=exact_laurent_rows(node.observable_rows,graph_.dimension.constant(node.anchor),checked(static_cast<long>(desired_top)-child.low));
+            auto local=exact_laurent_rows(node.observable_rows,graph_.dimension.constant(node.anchor),checked(static_cast<long>(desired_top)-child_window_low(depth+1,child)));
             return compose_child_expression(depth,std::move(local),desired_top);
           }
           auto result=apply_rational_rows(node.observable_rows,graph_.dimension.constant(node.anchor),child,desired_top);
@@ -1156,6 +1156,15 @@ class Evaluator {
     // to a parent. The shared-source contraction happens before this split.
     expression.transform.coefficients.resize(rows);result.values.resize(rows);
   }
+  // Composition measures the outer window against the child's stored map, a
+  // materialized value against its own trimmed low. A child map produced by
+  // another method (factored/component packing) can retain exactly-zero
+  // leading orders, so its declared low may lie below the value low.
+  int child_window_low(std::size_t child_depth,const LaurentBoundary& child) const {
+    if(child_depth>=expressions_.size() || !expressions_[child_depth] || !expressions_[child_depth]->leaf_source)return child.low;
+    const auto& expression=*expressions_[child_depth];
+    return std::min(child.low,checked(static_cast<long>(expression.transform.low)+expression.leaf_source->low));
+  }
   LaurentBoundary compose_child_expression(std::size_t depth,const LaurentRows& local,unsigned desired_top,const Plan* prepared=nullptr) {
     if(depth+1>=expressions_.size() || !expressions_[depth+1] || !cache_[depth+1])
       throw std::logic_error("recursive adjoint child has no synchronized linear expression");
@@ -1169,6 +1178,10 @@ class Evaluator {
       if(demand.required_outer_high>local.high)throw std::logic_error("recursive local operator lookahead invariant failed");
       throw BoundaryDemand(checked(static_cast<long>(demand.required_inner_high)+child.leaf_source->low),"recursive expression requires a higher child operator window");
     }
+    // Materialization drops whole-map exact-zero leading orders from the
+    // value. Drop them from the stored map as well, so a parent that sizes its
+    // operator from this value's low agrees with the map it composes.
+    linear_boundary::tighten(expression.transform);
     LaurentBoundary result;
     try {result=linear_boundary::materialize(expression,desired_top);}
     catch(const BoundaryDemand& demand) {
@@ -1319,7 +1332,7 @@ class Evaluator {
     for(unsigned refinement=0;refinement<options_.max_refinements;++refinement) {
       if(demand>static_cast<int>(options_.max_epsilon))throw std::runtime_error("recursive adjoint child epsilon demand exceeds finite budget");
       report(depth,"child boundary",demand);auto child=evaluate_child(depth+1,demand);
-      const int needed_operator=checked(static_cast<long>(desired_top)-child.low);
+      const int needed_operator=checked(static_cast<long>(desired_top)-child_window_low(depth+1,child));
       if(!combined || combined->high<needed_operator) {
         const int high=checked(needed_operator+prepared.largest_shift);
         auto stage=adjoint_stage(depth,prepared,high);

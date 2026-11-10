@@ -190,6 +190,39 @@ int main() {
     try { lb::identity(too_many_leaves, 0); }
     catch (const std::length_error &) { limited = true; }
     check(limited, "wide intermediate support removed the scalar leaf budget");
+    // A map with an exactly zero leading order: the materialized value starts
+    // one order higher. Tightening the stored map restores the invariant
+    // value.low == transform.low + source.low that parents rely on when they
+    // size a local operator from the value. Interval zeros are never dropped.
+    {
+      auto leaf = std::make_shared<const LaurentBoundary>(
+          LaurentBoundary{-1, Boundary{{B(2), B(3), B(5)}}, true});
+      lb::Expression padded{LaurentRows{-2, 1, {{{B(0), B(0), B(7), B(1)}}}}, leaf};
+      auto value = lb::materialize(padded, 0);
+      check(lb::tight_low(padded.transform) == 0 && value.low == -1 &&
+                value.low != padded.transform.low + leaf->low,
+            "padded map setup");
+      auto tight = padded;
+      lb::tighten(tight.transform);
+      auto tight_value = lb::materialize(tight, 0);
+      check(tight.transform.low == 0 && tight.transform.high == 1 &&
+                tight.transform.coefficients[0][0].size() == 2 &&
+                tight_value.low == tight.transform.low + leaf->low,
+            "tightened map does not agree with its value window");
+      check(tight_value.values.size() == value.values.size() &&
+                acb_equal(tight_value.values[0][0].raw(), value.values[0][0].raw()) &&
+                acb_equal(tight_value.values[0][1].raw(), value.values[0][1].raw()),
+            "tightening changed the materialized value");
+      B uncertain(0);
+      arb_add_error_2exp_si(acb_realref(uncertain.raw()), -100);
+      LaurentRows interval{-1, 0, {{{uncertain, B(1)}}}};
+      lb::tighten(interval);
+      check(interval.low == -1, "an interval containing zero was discarded");
+      LaurentRows zero{-1, 0, {{{B(0), B(0)}}}};
+      lb::tighten(zero);
+      check(zero.low == 0 && zero.coefficients[0][0].size() == 1,
+            "an all-zero map must retain one coefficient");
+    }
     std::cout << "Global shared-leaf linear composition, Laurent demands and "
                  "correlation preservation passed\n";
   } catch (const std::exception &e) {

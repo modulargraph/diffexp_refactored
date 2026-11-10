@@ -12,7 +12,10 @@ struct Options {
   bool sparse_lifting=false,degree_slices=false;
   std::function<modular::Word(unsigned)> modulus=modular::prime;
   std::string provider_identity="FIRE7p",prime_table="FIRE7-primes-1-through-16";
-  unsigned max_degree=16,max_primes=8,probe_timeout_seconds=20;
+  // max_degree caps the dense total-degree scan. Coordinate slices and their
+  // per-variable boxes have a separate cap: a coefficient of low degree in
+  // epsilon may need a high degree in the merge parameter alone.
+  unsigned max_degree=16,max_variable_degree=64,max_primes=8,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   std::size_t sample_checkpoint_interval=1;
   std::function<void(const std::string&)> progress;
@@ -69,7 +72,7 @@ class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||!options_.max_variable_degree||options_.max_variable_degree>256||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
     if(!options_.sample_checkpoint_interval||options_.sample_checkpoint_interval>4096)throw std::invalid_argument("modular checkpoint interval must be 1..4096");
     if(!exact_batches.empty())exact_batches_=std::make_unique<fire_batch::Cache>(std::move(exact_batches));
@@ -87,7 +90,7 @@ class Session {
       // Preserve existing FIRE sample/checkpoint identities. Native providers
       // additionally bind their implementation and seed policy.
       if(options_.sample_provider||options_.provider_identity!="FIRE7p")identity_input["provider"]=options_.provider_identity;
-      if(options_.degree_slices)identity_input["degree_discovery"]="coordinate-slices-v1";
+      if(options_.degree_slices)identity_input["degree_discovery"]="coordinate-slices-v2";
       const auto identity=artifacts::detail::sha256(artifacts::detail::canonical(identity_input));
       result.directory=fs::absolute(options_.cache_directory)/identity;fs::create_directories(result.directory);
       detail::publish(result.directory/"family.start",source);
@@ -179,19 +182,31 @@ class Session {
       bool sliced=false;
       std::map<detail::Key,modular::Ansatz> boxes;
       std::map<detail::Key,modular::Image> discovered;
+      const auto describe=[](const detail::Key& key){return "coefficient of "+fire::indices(key.second)+" in "+fire::indices(key.first);};
+      const std::function<void()> deadline=[&]{remaining();};
       for(;;) {
         while(probes.size()<count)probes.push_back(probe(1,probes.size()));
         terminal=detail::masters(probes.front());std::set<detail::Key> all_keys;
         for(const auto& p:probes)for(const auto& [a,row]:p.rows)for(const auto& [b,c]:row)all_keys.emplace(a,b);
         keys.assign(all_keys.begin(),all_keys.end());auto samples=flatten(probes,1);images.clear();
-        bool complete=true;
+        bool complete=true,dense_pending=false;std::size_t box_samples=0;std::optional<detail::Key> saturated;
         for(std::size_t i=0;i<keys.size();++i){remaining();std::optional<modular::Image> image;
           if(auto old=discovered.find(keys[i]);old!=discovered.end()){
             bool valid=true;for(const auto& sample:samples)if(modular::evaluate(old->second,sample.point,options_.modulus(1))!=std::optional<modular::Word>(sample.coefficients[i])){valid=false;break;}
             if(valid)image=old->second;else discovered.erase(old);
           }
-          if(!image)if(auto box=boxes.find(keys[i]);box!=boxes.end())image=modular::fit_with_holdouts(samples,i,box->second,options_.modulus(1));
-          if(!image)image=modular::discover(samples,i,active.size(),options_.max_degree,options_.modulus(1));
+          if(!image)if(auto box=boxes.find(keys[i]);box!=boxes.end()) {
+            // A box states exactly how many generic points it needs. Wait for
+            // them instead of repeating the dense scan at every sample count;
+            // a box refuted with enough points returns to the dense scan.
+            const auto required=box->second.numerator.size()+box->second.denominator.size()+3;
+            if(samples.size()<required)box_samples=std::max(box_samples,required);
+            else if(!(image=modular::fit_with_holdouts(samples,i,box->second,options_.modulus(1))))boxes.erase(box);
+          }
+          if(!image&&!boxes.contains(keys[i])) {
+            image=modular::discover(samples,i,active.size(),options_.max_degree,options_.modulus(1),deadline);
+            if(!image){if(modular::dense_scan_saturated(samples.size(),active.size(),options_.max_degree)){if(!saturated)saturated=keys[i];}else dense_pending=true;}
+          }
           if(image){discovered.insert_or_assign(keys[i],modular::compact_support(*image));images.push_back(std::move(*image));}else complete=false;
         }
         detail::save(result.directory/"progress.json",{{"schema","DiffExp3.ModularProgress/v1"},{"identity",identity},{"stage","degree-discovery"},{"samples_per_prime",probes.size()},{"coefficients",keys.size()},{"discovered",images.size()},{"fresh_samples",fresh},{"reused_samples",hits}});
@@ -201,25 +216,40 @@ class Session {
           sliced=true;std::vector<std::vector<std::optional<modular::Image>>> axes;bool valid=true;
           for(std::size_t axis=0;axis<active.size()&&valid;++axis){
             std::vector<detail::Probe> line;std::size_t wanted=8;std::vector<std::optional<modular::Image>> shapes(keys.size());
-            const auto maximum=std::min<std::size_t>(2*options_.max_degree+4,options_.max_samples_per_prime);
+            const auto maximum=std::min<std::size_t>(2*options_.max_variable_degree+4,options_.max_samples_per_prime);
             for(;;){
               try{while(line.size()<wanted){auto sample=probe(1,50000+1000*axis+line.size());if(detail::masters(sample)!=terminal){valid=false;break;}line.push_back(std::move(sample));}}
               catch(const detail::SliceFailure& e){status(std::string(e.what())+"; using multivariate discovery");valid=false;}
               if(!valid)break;auto slice=flatten(line,1);for(auto& s:slice)s.point={s.point[axis]};std::size_t found=0;
               for(std::size_t i=0;i<keys.size();++i){remaining();
                 if(shapes[i])for(const auto& sample:slice)if(modular::evaluate(*shapes[i],sample.point,options_.modulus(1))!=std::optional<modular::Word>(sample.coefficients[i])){shapes[i].reset();break;}
-                if(!shapes[i])shapes[i]=modular::discover(slice,i,1,options_.max_degree,options_.modulus(1));
+                if(!shapes[i])shapes[i]=modular::discover(slice,i,1,options_.max_variable_degree,options_.modulus(1),deadline);
                 found+=shapes[i].has_value();
               }
               if(found==keys.size()||wanted==maximum){status("coordinate "+std::to_string(axis)+" degrees "+std::to_string(found)+"/"+std::to_string(keys.size()));break;}wanted=std::min(2*wanted,maximum);
             }
             if(valid)axes.push_back(std::move(shapes));
           }
-          if(valid)for(std::size_t i=0;i<keys.size();++i){std::vector<modular::Image> slice;for(const auto& axis:axes){if(!axis[i])break;slice.push_back(*axis[i]);}if(slice.size()==active.size())if(auto box=modular::degree_box(slice,options_.max_degree))boxes.emplace(keys[i],std::move(*box));}
-          status("coordinate degree hypotheses "+std::to_string(boxes.size())+"/"+std::to_string(keys.size()));
+          if(valid)for(std::size_t i=0;i<keys.size();++i){if(discovered.contains(keys[i]))continue;std::vector<modular::Image> slice;for(const auto& axis:axes){if(!axis[i])break;slice.push_back(*axis[i]);}
+            if(slice.size()==active.size())if(auto box=modular::degree_box(slice,options_.max_variable_degree)){
+              box_samples=std::max(box_samples,box->numerator.size()+box->denominator.size()+3);boxes.emplace(keys[i],std::move(*box));saturated.reset();}}
+          status("coordinate degree hypotheses "+std::to_string(boxes.size())+"/"+std::to_string(keys.size()-discovered.size()));
+          // Keys without a box still depend on the dense scan below.
+          for(const auto& key:keys)if(!discovered.contains(key)&&!boxes.contains(key)){
+            if(modular::dense_scan_saturated(samples.size(),active.size(),options_.max_degree)){if(!saturated)saturated=key;}else dense_pending=true;}
         }
-        if(count==options_.max_samples_per_prime)throw std::runtime_error("modular sample/degree budget exhausted; progress retained");
-        count=std::min(count*2,options_.max_samples_per_prime);
+        // Name the exhausted budget. A saturated dense scan cannot be helped
+        // by more points; a box may simply need more than the sample cap.
+        if(saturated&&!boxes.contains(*saturated))
+          throw std::runtime_error("modular total-degree budget ("+std::to_string(options_.max_degree)+") exhausted for "+describe(*saturated)+
+            "; enable coordinate degree slices or raise max_degree; progress retained");
+        if(box_samples>options_.max_samples_per_prime)
+          throw std::runtime_error("modular sample budget exhausted: a coefficient needs "+std::to_string(box_samples)+" points, the limit is "+
+            std::to_string(options_.max_samples_per_prime)+"; progress retained");
+        auto next=std::max(count,box_samples);if(dense_pending)next=std::max(next,count*2);
+        next=std::min(next,options_.max_samples_per_prime);
+        if(next==count)throw std::runtime_error("modular sample/degree budget exhausted; progress retained");
+        count=next;
       }
       if(options_.sparse_lifting)for(auto& image:images)image=modular::compact_support(image);
       std::size_t lifting_samples=probes.size();

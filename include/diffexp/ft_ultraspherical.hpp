@@ -537,7 +537,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
         sp::Matrix state(w*m*d,nr);
         std::vector<std::shared_ptr<ultra::Factor>> factors;
         std::size_t factor_cells=0;
-        for(unsigned b=0;b<blocks.size();++b){check();unsigned size=blocks[b].size();if(size*m>options.max_block_nodes)throw sp::Rejected("FT spectral coupled-node budget");std::vector<ultra::V> q;std::vector<std::vector<ultra::V>> p;
+        for(unsigned b=0;b<blocks.size();++b){check();unsigned size=blocks[b].size();if(size*n>options.max_block_nodes)throw sp::Rejected("FT spectral coupled-node budget");std::vector<ultra::V> q;std::vector<std::vector<ultra::V>> p;
           for(auto i:blocks[b]){q.push_back(full_q[i][0]);p.emplace_back();for(auto j:blocks[b])p.back().push_back(full_p[i][j][0]);}
           factor_cells+=static_cast<std::size_t>(size)*size*m*m;if(factor_cells>options.max_cells)throw sp::Rejected("FT ultraspherical factor storage budget");
           factors.push_back(std::make_shared<ultra::Factor>(ultra::build(q,p,n)));++diagnostics.factorizations;

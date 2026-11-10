@@ -163,6 +163,34 @@ inline Expression compose(const LaurentRows &outer, const Expression &inner,
     throw std::invalid_argument("linear boundary transform/source dimensions");
   return {compose(outer, inner.transform, high, options), inner.leaf_source};
 }
+// Composition and component packing may retain leading structural zeros.
+// Only discard coefficients proved exactly zero across the entire map; an
+// interval containing zero still carries a source demand. Keep at least one
+// retained coefficient, preserving the original unknown upper tail.
+inline int tight_low(const LaurentRows &rows) {
+  int low = rows.low;
+  for (; low < rows.high; ++low) {
+    bool nonzero = false;
+    for (const auto &row : rows.coefficients)
+      for (const auto &column : row)
+        if (!column[low - rows.low].is_zero())
+          nonzero = true;
+    if (nonzero)
+      break;
+  }
+  return low;
+}
+// A stored expression must satisfy value.low == transform.low + source.low:
+// parents size their local operators from either number interchangeably.
+inline void tighten(LaurentRows &rows) {
+  const int low = tight_low(rows);
+  if (low == rows.low)
+    return;
+  for (auto &row : rows.coefficients)
+    for (auto &column : row)
+      column.erase(column.begin(), column.begin() + (low - rows.low));
+  rows.low = low;
+}
 inline LaurentBoundary materialize(const Expression &expression,
                                    int output_high,
                                    const Options &options = {}) {
@@ -171,17 +199,7 @@ inline LaurentBoundary materialize(const Expression &expression,
   if (columns != expression.leaf_source->values.size())
     throw std::invalid_argument("linear boundary materialization dimensions");
   detail::order(output_high, options);
-  // Composition and component packing may retain leading structural zeros.
-  // Only discard coefficients proved exactly zero across the entire map;
-  // an interval containing zero still carries a source demand. Keep at least
-  // one retained coefficient, preserving the original unknown upper tail.
-  int transform_low=expression.transform.low;
-  for(;transform_low<expression.transform.high;++transform_low) {
-    bool nonzero=false;
-    for(const auto& row:expression.transform.coefficients)for(const auto& column:row)
-      if(!column[transform_low-expression.transform.low].is_zero())nonzero=true;
-    if(nonzero)break;
-  }
+  const int transform_low = tight_low(expression.transform);
   const int transform_high = detail::order(static_cast<long>(output_high) -
                                                expression.leaf_source->low,
                                            options),
@@ -201,10 +219,7 @@ inline LaurentBoundary materialize(const Expression &expression,
                   options.max_operations);
   if(transform_low==expression.transform.low)
     return apply_laurent_rows(expression.transform, *expression.leaf_source,output_high);
-  auto trimmed=expression.transform;
-  for(auto& row:trimmed.coefficients)for(auto& column:row)
-    column.erase(column.begin(),column.begin()+(transform_low-trimmed.low));
-  trimmed.low=transform_low;
+  auto trimmed=expression.transform;tighten(trimmed);
   return apply_laurent_rows(trimmed,*expression.leaf_source,output_high);
 }
 } // namespace diffexp::linear_boundary

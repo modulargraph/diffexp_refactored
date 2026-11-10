@@ -512,7 +512,9 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
         for (unsigned b = 0; b < blocks.size(); ++b) {
           check();
           unsigned size = blocks[b].size(), z = size * m;
-          if (z > options.max_block_nodes)
+          // The budget counts intervals: 4x64 and 2x128 are the intended
+          // limits, and the closing node must not exclude them.
+          if (size * n > options.max_block_nodes)
             throw sp::Rejected("FT spectral coupled-node budget");
           bool zero = true;
           for (auto i : blocks[b])

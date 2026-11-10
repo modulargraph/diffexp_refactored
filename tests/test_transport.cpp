@@ -175,6 +175,17 @@ int main() {
     throw std::runtime_error("domain clipping removed a genuine endpoint pole");
   rejected=false;try{transport::run(endpoint_ghost);}catch(const std::runtime_error&){rejected=true;}
   if(!rejected)throw std::runtime_error("genuine singular endpoint accepted after ghost filtering");
+  // A pole on the open path is reported at once, with its location, instead
+  // of after the chart clearance has shrunk through the refinement budget.
+  auto crossing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"accuracy_goal":20,"paths":{"t":"2*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
+  std::string crossing_message;try{transport::run(crossing);}catch(const std::runtime_error& e){crossing_message=e.what();}
+  if(crossing_message.find("path parameter 0.5")==std::string::npos)throw std::runtime_error("interior path singularity was not located: "+crossing_message);
+  // The same pole off the real path, or behind the endpoint, is not an obstacle.
+  crossing.as_object()["paths"]=j::object{{"t","2*x+I*x*(1-x)"}};
+  result=transport::run(crossing);
+  if(std::abs(real(result)+1)>1e-15)throw std::runtime_error("complex detour around a path singularity");
+  crossing.as_object()["paths"]=j::object{{"t","x/2"}};
+  result=transport::run(crossing);if(std::abs(real(result)-2)>1e-15)throw std::runtime_error("regular path was rejected as singular");
   std::cout<<"Generic physical/canonical/algebraic transport and asymptotic matching passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

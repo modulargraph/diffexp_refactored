@@ -177,6 +177,9 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
         if(!slope)throw std::domain_error("scalar functional endpoint has a logarithmic divergence not regulated by epsilon");
         if(exponent-1>=low && exponent-1<=top)primitive[exponent-1-low]+=coefficient/B(slope);
       } else {
+        // x^(D-1) with D<0 and no epsilon in the exponent has no analytic
+        // continuation: h^D/D would be a Hadamard finite part, not the integral.
+        if(denominator<0 && !slope)throw std::domain_error("scalar functional endpoint has a power divergence not regulated by epsilon");
         auto term=coefficient/B(denominator);
         for(int target=exponent;target<=top;++target) {
           if(target>=low)primitive[target-low]+=term;

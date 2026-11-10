@@ -218,7 +218,7 @@ int main(int argc,char** argv) {
       else if(native_ibp){
         ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.degree_slices=true;native.probe_timeout_seconds=options.provider.timeout_seconds;native.sample_checkpoint_interval=32;
         native.closure_parameter=p;native.selected_source_rows=true;native.target_sector_seeds=true;
-        native.numerators=number("ibp_numerators",1,0,8);native.dots=number("ibp_dots",1,0,8);native.max_degree=number("ibp_max_degree",64,1,64);
+        native.numerators=number("ibp_numerators",1,0,8);native.dots=number("ibp_dots",1,0,8);native.max_degree=number("ibp_max_degree",64,1,64);native.max_variable_degree=std::max(native.max_variable_degree,native.max_degree);
         native.progress=[&](const auto& text){std::cerr<<elapsed(start)<<"s "<<text<<'\n';};
         auto session=std::make_shared<ibp_solver::Session>(b,d,f,native);
         fallback=[session,&modular_seconds,&modular_batches](const auto& batch,const auto& limits){const auto began=Clock::now();auto result=(*session)(batch,limits);modular_seconds+=elapsed(began);++modular_batches;return result;};

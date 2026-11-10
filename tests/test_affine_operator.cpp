@@ -228,6 +228,36 @@ int main(int argc, char **argv) {
         for (int k = collision_inverse.inverse.low; k <= 8; ++k)
           near(numeric_collision.inverse.coefficients[i][j][k - numeric_collision.inverse.low],
                collision_inverse.inverse.coefficients[i][j][k - collision_inverse.inverse.low]);
+    // The recurrence is triangular in epsilon: an inverse prepared at a low
+    // order and extended must be the inverse prepared at the high order, in
+    // both arithmetic modes, without re-solving what it already holds.
+    for (const auto &mode : {ao::Options{}, numeric_options})
+      for (int start : {-1, 0, 3}) {
+        auto grown = ao::prepare(colliding, colliding.terms(), x, start, mode);
+        check(grown.success() && grown.inverse.high == start, grown.reason);
+        const auto solved = grown.recurrence->w.size();
+        ao::extend(grown, colliding, colliding.terms(), 2, mode);
+        check(grown.success() && grown.inverse.high == std::max(start, 2) &&
+                  (start >= 2) == (grown.recurrence->w.size() == solved),
+              "lower-order extension must be a no-op, a higher one must solve new orders");
+        ao::extend(grown, colliding, colliding.terms(), 8, mode);
+        const auto &fresh = mode.numeric_operator_convolution ? numeric_collision : collision_inverse;
+        check(grown.success() && grown.inverse.low == fresh.inverse.low && grown.inverse.high == 8 &&
+                  grown.row_lower_bounds == fresh.row_lower_bounds &&
+                  grown.recurrence->w.size() == fresh.recurrence->w.size(),
+              "extended inverse window differs from a fresh preparation");
+        for (unsigned i = 0; i < 2; ++i)
+          for (unsigned j = 0; j < 2; ++j)
+            for (int k = fresh.inverse.low; k <= 8; ++k)
+              check(acb_equal(grown.inverse.coefficients[i][j][k - grown.inverse.low].raw(),
+                              fresh.inverse.coefficients[i][j][k - fresh.inverse.low].raw()),
+                    "extended inverse coefficient differs from a fresh preparation");
+        // Only the row gauge and the leading order are assembled exactly when
+        // higher orders enter through ball products.
+        if (mode.numeric_operator_convolution)
+          check(grown.recurrence->exact.size() <= grown.row_pole_loss + 1,
+                "numeric orders were assembled as exact rational functions");
+      }
     auto numeric_identity = ao::compose(numeric_collision, colliding, colliding.terms(), x, 3);
     check(numeric_identity.success(), numeric_identity.reason);
     for (unsigned i = 0; i < 2; ++i)

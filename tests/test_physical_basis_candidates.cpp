@@ -16,8 +16,10 @@ int main(){try {
   options.coordinate_rows={{e("eps^-1"),e("0")}};
   bool saw_larger=false,saw_lower_mix=false,saw_depth2=false;
   auto evaluate=[&](const scan::Candidate &c)->std::optional<scan::DemandCost>{
+    // Candidates are built by rank-one updates and not re-verified by the
+    // scanner: every one offered here must satisfy the exact gauge identity.
     recursion::verify_physical_basis(c.transform,level.matrix,0);
-    check(c.metadata.exact_verified,"missing exact certificate");
+    check(c.metadata.connection_characters==scan::expression_characters(c.transform.connection),"incremental connection size");
     auto requested=fuchsify::detail::multiply(level.target_rows,c.transform.from_basis);
     auto v=exact_epsilon_valuation(requested[0][0],1);
     std::uint64_t loss=v&&*v<0 ? -*v : 0;
@@ -74,16 +76,15 @@ int main(){try {
     return scan::DemandCost{1};
   });
   check(derivative_candidate,"parameter-dependent candidate missing");
-  // Pure epsilon rescalings can be withheld from a consumer whose cost is
-  // invariant under them; every other candidate family is still offered.
-  options.seconds=10;options.epsilon_scalings=false;bool scaled=false,sheared=false;
-  auto unscaled=scan::scan_candidates(level,2,0,options,[&](const scan::Candidate &c)->std::optional<scan::DemandCost>{
+  // Pure epsilon rescalings are not candidates: no structural child window
+  // and no transported matrix improves under a diagonal epsilon gauge.
+  options.seconds=10;bool scaled=false,sheared=false;
+  auto offered=scan::scan_candidates(level,2,0,options,[&](const scan::Candidate &c)->std::optional<scan::DemandCost>{
     scaled=scaled||c.metadata.provenance.find("epsilon scale row")!=std::string::npos;
     sheared=sheared||c.metadata.provenance.find("sparse row")!=std::string::npos||c.metadata.provenance.find("supplied exact coordinate")!=std::string::npos;
     return scan::DemandCost{1};
   });
-  check(!scaled&&sheared&&unscaled.stats.trials>0,"epsilon rescalings offered although disabled, or other candidates lost");
-  options.epsilon_scalings=true;
+  check(!scaled&&sheared&&offered.stats.trials>0,"epsilon rescalings offered, or other candidates lost");
   // The deterministic trial bound and a wall-clock cut are different ends:
   // only the latter leaves the discovery undecided for a later run.
   options.seconds=10;

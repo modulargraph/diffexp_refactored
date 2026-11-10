@@ -1,5 +1,6 @@
 #include "diffexp/recursion_pipeline.hpp"
 #include "diffexp/banana_oracle.hpp"
+#include "diffexp/family_config.hpp"
 #include <iostream>
 using namespace diffexp;using B=kernel::ComplexBall;
 void require(bool b,const char* message){if(!b)throw std::runtime_error(message);}
@@ -34,6 +35,13 @@ int main(){try {
     fails([&]{recursion::validate_numerical_options(invalid);},"ordinary order");
     invalid=recursion::NumericalOptions{};invalid.overlap=Rational("3/4");
     fails([&]{recursion::validate_numerical_options(invalid);},"overlap");
+    // Only a document that names epsilon_order has chosen it; a bare example
+    // name carries the template default.
+    auto document=family_config::describe(feynman::example_family("bubble")).as_object();
+    require(family_config::parse(document).epsilon_order_given && family_config::parse(document).epsilon_order==4,"configured epsilon order not recognised");
+    document.erase("epsilon_order");
+    require(!family_config::parse(document).epsilon_order_given && !family_config::load("bubble").epsilon_order_given &&
+            family_config::load("bubble").epsilon_order==4,"absent epsilon order reported as chosen");
   }
   auto bubble=recursion::prepare(feynman::example_family("bubble"),{{1,1},{2,1},{1,0},{0,1},{-1,1},{0,0}});
   recursion::Evaluator bubble_solver(bubble);auto b=bubble_solver.evaluate(4);

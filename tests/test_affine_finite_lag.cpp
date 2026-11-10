@@ -1,4 +1,4 @@
-#include "diffexp/affine_frobenius.hpp"
+#include "diffexp/cached_affine.hpp"
 #include <iostream>
 using namespace diffexp;
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
@@ -24,7 +24,15 @@ int main(){try{
     {{e("eps/x"),e("1/x")},{e("0"),e("eps/x+1/(1-x)")}},
     {{e("0"),e("0")},{e("1/(1-x)"),e("1/x")}},
     {{e("eps/x+1/(1-x-eps*x)"),e("1/(1+x)")},{e("eps/(1-x)"),e("2*eps/x")}},
-    {{e("1/x+1/(x+eps)"),e("0")},{e("1/(1-x)"),e("0")}}
+    {{e("1/x+1/(x+eps)"),e("0")},{e("1/(1-x)"),e("0")}},
+    // Half-integer Jordan block: the column exponent enters the derivative
+    // lags with a denominator, and its chain carries logarithms.
+    {{e("1/(2*x)+1/(1-x)"),e("1/x")},{e("0"),e("1/(2*x)+1/(1-x)")}},
+    // Logarithms of a Jordan block feed a row of different epsilon slope, so
+    // a log polynomial is divided by an epsilon-linear resonance denominator.
+    {{e("eps/x"),e("1/x"),e("0")},{e("0"),e("eps/x"),e("1/(1-x)")},{e("1/(1+x)"),e("x/(1-x)"),e("(1-eps)/x")}},
+    // Rational exponents with a moving row scale and a positive-order resonance.
+    {{e("(1/3+eps)/x+1/(1-x)"),e("1/((1+2*eps)*(1+x))")},{e("x/(1-x)"),e("(4/3+eps)/x+1/(2-x)")}}
   };
   for(const auto& matrix:examples)for(unsigned n:{4,8}){
     AffineFrobeniusSeries::Options old;old.finite_lag_recurrence=false;
@@ -33,11 +41,15 @@ int main(){try{
     auto finite=AffineFrobeniusSeries::prepare(matrix,0,1,n,enabled);
     require(finite.finite_lag_rows()>0,"finite lag path not exercised");
     equal(reference,finite);
+    // Both row forms feed one fraction-free recurrence, so their agreement
+    // alone would not test it: the independent verifier checks the polynomial
+    // ODE residual, the resonant constants and the Wronskian of the result.
+    cached_affine::detail::verify(matrix,0,1,n,enabled,cached_affine::detail::decode(cached_affine::detail::payload(finite),matrix[0][0],matrix.size(),n,enabled));
     auto fallback=old;fallback.finite_lag_recurrence=true;fallback.max_clearing_degree=0;
     equal(reference,AffineFrobeniusSeries::prepare(matrix,0,1,n,fallback));
   }
   AffineFrobeniusSeries::Matrix high_degree{{e("eps/x+1/(1-x^7)")}};
-  AffineFrobeniusSeries::Options forced;forced.finite_lag_recurrence=true;forced.finite_lag_cost_fallback=false;
+  AffineFrobeniusSeries::Options forced;forced.finite_lag_recurrence=true;
   auto finite=AffineFrobeniusSeries::prepare(high_degree,0,1,4,forced);
   require(finite.finite_lag_rows()==1,"bounded forced clearing was not exercised");
   auto reference=forced;reference.finite_lag_recurrence=false;

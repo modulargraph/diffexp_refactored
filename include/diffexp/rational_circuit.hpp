@@ -17,9 +17,6 @@ struct Options {
   unsigned max_dimension = 5000, max_degree = 256, max_epsilon_degree = 256;
   std::size_t max_terms = 200000, max_cells = 20000000,
               max_operations = 200000000;
-  // Pool finite convolution terms in FLINT dot products. False retains the
-  // scalar accumulation oracle at the same precision, order and support.
-  bool grouped_dot = true;
 };
 struct UnsupportedDomain : std::domain_error {
   using std::domain_error::domain_error;
@@ -30,10 +27,17 @@ struct InvalidPivot : std::domain_error {
 struct Scalar { Rational real{0}, imaginary{0}; };
 using Polynomial = std::vector<Scalar>;
 struct Block { unsigned epsilon, polynomial; };
+// A root of the epsilon-zero denominator polynomial, with a multiplicity not
+// below its true one. Extra roots or multiplicity only loosen the majorant.
+struct Pole { B root; unsigned multiplicity; };
 struct Denominator {
   std::vector<Block> blocks;
   unsigned lag = 0;
   bool one = false;
+  // Enclosures of every root of the epsilon-zero block. Empty with
+  // majorized=false when they could not be isolated.
+  std::vector<Pole> poles;
+  bool majorized = false;
 };
 struct Stream {
   unsigned column, denominator;
@@ -62,8 +66,7 @@ class Compiled {
   std::shared_ptr<const PlanData> data_;
 };
 struct Statistics {
-  // addmul_operations counts nonzero multiplication-accumulation terms,
-  // including terms executed together by a FLINT dot product.
+  // addmul_operations counts the nonzero terms of the pooled dot products.
   std::size_t addmul_operations = 0, scalar_operations = 0, dot_products = 0;
   std::size_t live_cells = 0, auxiliary_cells = 0, coefficient_cells = 0;
   // TaylorTailEstimate of the evaluated chart (see rational_transport.hpp);
@@ -73,12 +76,6 @@ struct Statistics {
 namespace detail {
 inline bool zero(const Scalar &a) {
   return a.real.is_zero() && a.imaginary.is_zero();
-}
-inline Scalar divide(const Scalar &a, const Scalar &b) {
-  const auto norm = b.real*b.real + b.imaginary*b.imaginary;
-  if (norm.is_zero()) throw UnsupportedDomain("zero Gaussian denominator");
-  return {(a.real*b.real+a.imaginary*b.imaginary)/norm,
-          (a.imaginary*b.real-a.real*b.imaginary)/norm};
 }
 inline std::size_t add(std::size_t a, std::size_t b, std::size_t limit,
                        const char *message) {
@@ -130,7 +127,7 @@ struct Compiler {
     return result;
   }
   std::vector<Block> blocks(const Support &support, unsigned subtract,
-                             unsigned offset, const Scalar &normalizer) {
+                             unsigned offset) {
     std::vector<Block> result;
     for (const auto &[ep, coefficients] : support) {
       const std::uint64_t epsilon = std::uint64_t(ep-subtract)+offset;
@@ -140,7 +137,7 @@ struct Compiler {
       if (size > out.options.max_cells)
         throw std::length_error("rational circuit polynomial storage budget exhausted");
       Polynomial polynomial(size);
-      for (const auto &[x,a] : coefficients) polynomial[x]=divide(a,normalizer);
+      for (const auto &[x,a] : coefficients) polynomial[x]=a;
       std::string key;
       for (const auto &a : polynomial)
         key += a.real.str()+","+a.imaginary.str()+";";
@@ -170,6 +167,58 @@ inline B ball(const Scalar &value) {
   arb_set_fmpq(acb_imagref(result.raw()), value.imaginary.raw(), B::precision());
   return result;
 }
+// Integers are converted without rounding; other rationals at bits.
+inline void set_exact(arb_t out, const Rational &value, slong bits) {
+  if (fmpz_is_one(fmpq_denref(value.raw()))) arb_set_fmpz(out, fmpq_numref(value.raw()));
+  else arb_set_fmpq(out, value.raw(), bits);
+}
+// Roots of an exact Gaussian polynomial d(x), isolated at a fixed precision
+// that does not depend on the caller's working precision. A real polynomial
+// yields exact multiplicities. Otherwise the roots of the real polynomial
+// d*conj(d) are used: its roots are those of d and their conjugates, and a
+// conjugate that d certainly does not vanish at is discarded.
+inline std::vector<Pole> poles(const Polynomial &d) {
+  constexpr slong bits = 128;
+  struct Poly { fmpq_poly_t q; Poly() { fmpq_poly_init(q); } ~Poly() { fmpq_poly_clear(q); } } norm;
+  bool real = true;
+  for (const auto &a : d) real = real && a.imaginary.is_zero();
+  if (real) for (std::size_t i=0;i<d.size();++i) fmpq_poly_set_coeff_fmpq(norm.q,i,d[i].real.raw());
+  else for (std::size_t i=0;i<d.size();++i) for (std::size_t j=0;j<d.size();++j) {
+    Rational sum = d[i].real*d[j].real + d[i].imaginary*d[j].imaginary;
+    if (sum.is_zero()) continue;
+    fmpq_t old; fmpq_init(old); fmpq_poly_get_coeff_fmpq(old,norm.q,i+j);
+    fmpq_add(old,old,sum.raw()); fmpq_poly_set_coeff_fmpq(norm.q,i+j,old); fmpq_clear(old);
+  }
+  std::vector<Pole> result;
+  for (auto &root : isolated_roots(norm.q,bits)) {
+    if (!real) {
+      B value(0), coefficient;
+      for (std::size_t i=d.size();i-->0;) {
+        acb_mul(value.raw(),value.raw(),root.value.raw(),bits);
+        arb_set_fmpq(acb_realref(coefficient.raw()),d[i].real.raw(),bits);
+        arb_set_fmpq(acb_imagref(coefficient.raw()),d[i].imaginary.raw(),bits);
+        acb_add(value.raw(),value.raw(),coefficient.raw(),bits);
+      }
+      if (!acb_contains_zero(value.raw())) continue;
+    }
+    result.push_back({std::move(root.value),root.multiplicity});
+  }
+  return result;
+}
+// Owned array of FLINT magnitudes, all zero initially.
+struct Magnitudes {
+  std::vector<mag_struct> values;
+  explicit Magnitudes(std::size_t n = 0) : values(n) { for (auto &v : values) mag_init(&v); }
+  Magnitudes(Magnitudes &&other) noexcept : values(std::move(other.values)) { other.values.clear(); }
+  Magnitudes &operator=(Magnitudes &&other) noexcept { std::swap(values,other.values); return *this; }
+  Magnitudes(const Magnitudes &other) : values(other.values.size()) {
+    for (std::size_t i=0;i<values.size();++i) { mag_init(&values[i]); mag_set(&values[i],&other.values[i]); }
+  }
+  ~Magnitudes() { for (auto &v : values) mag_clear(&v); }
+  mag_struct *operator[](std::size_t i) { return &values[i]; }
+  const mag_struct *operator[](std::size_t i) const { return &values[i]; }
+  std::size_t size() const { return values.size(); }
+};
 struct AcbPolynomial {
   acb_poly_t raw;
   AcbPolynomial() { acb_poly_init(raw); }
@@ -213,9 +262,10 @@ inline Compiled compile(const std::vector<RationalLineEntry> &entries,
       throw UnsupportedDomain("rational circuit requires an epsilon-regular connection");
     const std::uint64_t valuation=positive-dv;
     if (valuation>epsilon_high) continue; // Proven nonnegative valuation.
-    const auto normalizer=denominator.begin()->second.begin()->second;
-    auto qs=compiler.blocks(denominator,dv,0,normalizer);
-    auto ps=compiler.blocks(numerator,nv,unsigned(valuation),normalizer);
+    // Exact keeps integer polynomials: they stay integers here, so that their
+    // shifts to a dyadic chart centre are short exact numbers (see prepare).
+    auto qs=compiler.blocks(denominator,dv,0);
+    auto ps=compiler.blocks(numerator,nv,unsigned(valuation));
     Key key;
     for (auto b:qs) key.emplace_back(b.epsilon,b.polynomial);
     auto [denpos,newden]=denominators.emplace(std::move(key),out.denominators.size());
@@ -224,7 +274,14 @@ inline Compiled compile(const std::vector<RationalLineEntry> &entries,
       const bool one=qs.size()==1 && qs[0].epsilon==0 && p.size()==1 &&
                      p[0].real==Rational(1) && p[0].imaginary.is_zero();
       const auto qlag=detail::lag(qs,out);
-      out.denominators.push_back({std::move(qs),qlag,one});
+      Denominator denominator{std::move(qs),qlag,one,{},false};
+      // The interval recurrence for y/Q wraps: its radii grow at the rate of
+      // the root of prod(1+z/|root|)^multiplicity=2, a third or less of the
+      // pole distance for a triple pole. With the roots known, the quotient
+      // is instead enclosed by its midpoint recurrence plus a majorant.
+      try { denominator.poles=detail::poles(p); denominator.majorized=true; }
+      catch (const std::runtime_error &) {}
+      out.denominators.push_back(std::move(denominator));
     }
     const unsigned did=denpos->second;
     auto [position,inserted]=streams.emplace(std::make_pair(entry.column,did),out.streams.size());
@@ -258,28 +315,25 @@ inline Compiled compile(const ExactEpsilonMatrix &matrix,std::size_t xi,std::siz
   return compile(entries,unsigned(matrix.size()),xi,ei,epsilon_high,expected_order,options);
 }
 
-// Maximum borrowed term slots for the selected order/window. This is exposed
-// so orchestration can account for complete per-worker scratch before batching.
+// Largest number of terms pooled into one dot product for this order/window.
 inline std::size_t dot_capacity(const PlanData& plan,unsigned order,unsigned width) {
   if(!order || !width || width>plan.epsilon_high+1)
     throw std::invalid_argument("rational circuit dot schedule order/window");
   const auto limit=plan.options.max_cells;
   std::size_t capacity=0;
-  if(plan.options.grouped_dot) {
-    for(const auto& row:plan.row_entries) {
-      std::size_t count=0;
-      for(auto id:row)for(auto b:plan.entries[id].numerator)if(b.epsilon<width)
-        count=detail::add(count,std::min<std::size_t>(order,plan.polynomials[b.polynomial].size()),limit,
-                          "rational circuit dot scratch budget exhausted");
-      capacity=std::max(capacity,count);
-    }
-    for(const auto& q:plan.denominators)if(!q.one) {
-      std::size_t count=0;
-      for(auto b:q.blocks)if(b.epsilon<width)
-        count=detail::add(count,std::min<std::size_t>(order,plan.polynomials[b.polynomial].size()),limit,
-                          "rational circuit dot scratch budget exhausted");
-      capacity=std::max(capacity,count);
-    }
+  for(const auto& row:plan.row_entries) {
+    std::size_t count=0;
+    for(auto id:row)for(auto b:plan.entries[id].numerator)if(b.epsilon<width)
+      count=detail::add(count,std::min<std::size_t>(order,plan.polynomials[b.polynomial].size()),limit,
+                        "rational circuit dot scratch budget exhausted");
+    capacity=std::max(capacity,count);
+  }
+  for(const auto& q:plan.denominators)if(!q.one) {
+    std::size_t count=0;
+    for(auto b:q.blocks)if(b.epsilon<width)
+      count=detail::add(count,std::min<std::size_t>(order,plan.polynomials[b.polynomial].size()),limit,
+                        "rational circuit dot scratch budget exhausted");
+    capacity=std::max(capacity,count);
   }
   return capacity;
 }
@@ -326,6 +380,9 @@ struct PreparedData {
   unsigned order, max_width;
   std::vector<std::vector<B>> polynomials;
   std::vector<B> inverse_pivots;
+  // Per denominator, an upper bound of 1/|root-center| for every pole,
+  // repeated by multiplicity: the factors of the quotient majorant.
+  std::vector<detail::Magnitudes> inverse_distances;
   std::vector<unsigned> ring_lengths;
   std::size_t coefficient_cells=0, auxiliary_cells=0, workspace_cells=0,
               live_cells=0, preparation_cells=0, operation_upper_bound=0, dot_capacity=0;
@@ -363,10 +420,9 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
   out.workspace_cells=detail::add(out.workspace_cells,resultcells,limit,"rational circuit result storage budget exhausted");
   // Borrowed acb_struct views contain no owned limbs, but their storage is
   // nevertheless charged as two logical scalar slots per possible dot term.
-  if(plan.options.grouped_dot)
-    out.workspace_cells=detail::add(out.workspace_cells,
-      detail::add(detail::cells(2,out.dot_capacity,limit),1,limit,"rational circuit dot scratch budget exhausted"),
-      limit,"rational circuit dot workspace budget exhausted");
+  out.workspace_cells=detail::add(out.workspace_cells,
+    detail::add(detail::cells(2,out.dot_capacity,limit),1,limit,"rational circuit dot scratch budget exhausted"),
+    limit,"rational circuit dot workspace budget exhausted");
   out.live_cells=detail::add(out.workspace_cells,out.coefficient_cells,limit,"rational circuit live storage budget exhausted");
   out.live_cells=detail::add(out.live_cells,plan.denominators.size()+2,limit,"rational circuit pivot storage budget exhausted");
   // Count owned ball cells, including the two visible FLINT polynomial shift
@@ -382,15 +438,23 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
   out.operation_upper_bound=operation_upper_bound(plan,order,max_width);
   out.polynomials.reserve(plan.polynomials.size());
   for (const auto &p:plan.polynomials) {
-    detail::AcbPolynomial input,shifted;
+    // Exact integer coefficients shifted to a dyadic centre are exact dyadic
+    // numbers. Evaluate the shift without rounding and round only what does
+    // not fit the working precision: short exact coefficients make every
+    // recurrence product cheaper and free of coefficient radii.
+    std::vector<B> coefficients(p.size());slong exact=64;
     for (unsigned n=0;n<p.size();++n) {
-      const auto a=detail::ball(p[n]);
-      acb_poly_set_coeff_acb(input.raw,n,a.raw());
+      detail::set_exact(acb_realref(coefficients[n].raw()),p[n].real,out.precision);
+      detail::set_exact(acb_imagref(coefficients[n].raw()),p[n].imaginary,out.precision);
+      exact=std::max<slong>(exact,acb_bits(coefficients[n].raw())+64);
     }
-    acb_poly_taylor_shift(shifted.raw,input.raw,center.raw(),out.precision);
-    std::vector<B> coefficients(p.size());
-    for (unsigned n=0;n<p.size();++n)
-      acb_poly_get_coeff_acb(coefficients[n].raw(),shifted.raw,n);
+    exact+=static_cast<slong>(p.size())*(acb_bits(center.raw())+2);
+    // Horner shift p(center+t): every intermediate fits in `exact` bits.
+    for (std::size_t i=p.size();i-->1;)
+      for (std::size_t j=i-1;j+1<p.size();++j)
+        acb_addmul(coefficients[j].raw(),center.raw(),coefficients[j+1].raw(),exact);
+    for (auto &coefficient:coefficients)
+      acb_set_round(coefficient.raw(),coefficient.raw(),out.precision);
     out.polynomials.push_back(std::move(coefficients));
   }
   out.inverse_pivots.reserve(plan.denominators.size());
@@ -404,19 +468,43 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
     acb_inv(inverse.raw(),pivot.raw(),out.precision);
     if (!inverse.is_finite()) throw InvalidPivot("rational circuit inverse pivot is not finite");
     out.inverse_pivots.push_back(std::move(inverse));
+    std::size_t levels=0;
+    for (const auto &pole:denominator.poles) levels+=pole.multiplicity;
+    detail::Magnitudes inverses(levels);
+    levels=0;
+    for (const auto &pole:denominator.poles) {
+      B distance;
+      acb_sub(distance.raw(),pole.root.raw(),center.raw(),128);
+      detail::Magnitudes lower(1);
+      acb_get_mag_lower(lower[0],distance.raw());
+      if (mag_is_zero(lower[0])) throw InvalidPivot("rational circuit center is not separated from a denominator root");
+      for (unsigned copy=0;copy<pole.multiplicity;++copy) mag_inv(inverses[levels++],lower[0]);
+    }
+    out.inverse_distances.push_back(std::move(inverses));
   }
   return Prepared(std::move(out));
 }
 
-inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B &step,
-                      Statistics *statistics=nullptr) {
+// Taylor coefficients of one chart for one right-hand side. They do not
+// depend on the step, which can therefore be chosen (and shortened) after the
+// recurrence from the retained tail, without recomputing anything.
+struct Series {
+  unsigned dimension=0,width=0,order=0;
+  slong precision=0;
+  // Structurally reachable rows, in storage order; every other row is zero.
+  std::vector<unsigned> rows;
+  // y[(n*rows.size()+r)*width+k] is Taylor order n, row rows[r], epsilon index k.
+  std::vector<B> y;
+  const B& at(unsigned n,std::size_t r,unsigned k)const {return y[(std::size_t(n)*rows.size()+r)*width+k];}
+};
+inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
   const auto &p=prepared.data();
   const auto &plan=p.compiled.data();
   if (B::precision()!=p.precision)
     throw std::invalid_argument("rational circuit prepared precision mismatch");
   if (boundary.size()!=plan.dimension || boundary.empty() || boundary[0].empty() ||
-      boundary[0].size()>p.max_width || !step.is_finite())
-    throw std::invalid_argument("rational circuit boundary shape or step");
+      boundary[0].size()>p.max_width)
+    throw std::invalid_argument("rational circuit boundary shape");
   const unsigned width=unsigned(boundary[0].size()), d=plan.dimension, order=p.order;
   for (const auto &row:boundary) {
     if (row.size()!=width) throw std::invalid_argument("rational circuit ragged boundary");
@@ -430,7 +518,8 @@ inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B 
     if (!entry.numerator.empty() && entry.numerator.front().epsilon<width)
       dependents[plan.streams[entry.stream].column].push_back(entry.row);
   std::vector<bool> active(d,false), active_stream(plan.streams.size(),false);
-  std::vector<unsigned> queue;
+  Series series{d,width,order,p.precision,{},{}};
+  auto &queue=series.rows;
   for (unsigned i=0;i<d;++i)
     for (const auto &value:boundary[i]) if (!value.is_zero()) {
       active[i]=true; queue.push_back(i); break;
@@ -447,7 +536,8 @@ inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B 
       active_stream[entry.stream]=true;
   Statistics stats;
   stats.coefficient_cells=p.coefficient_cells;
-  std::vector<B> y(std::size_t(order+1)*queue.size()*width);
+  auto &y=series.y;
+  y.resize(std::size_t(order+1)*queue.size()*width);
   std::vector<std::size_t> offsets(plan.streams.size());
   for (unsigned id=0;id<plan.streams.size();++id) {
     offsets[id]=stats.auxiliary_cells;
@@ -455,120 +545,142 @@ inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B 
   }
   std::vector<B> w(stats.auxiliary_cells);
   stats.live_cells=y.size()+w.size()+std::size_t(d)*width+p.coefficient_cells+p.inverse_pivots.size()+2+
-    (plan.options.grouped_dot?2*p.dot_capacity+1:0);
+    2*p.dot_capacity+1;
   // These are non-owning copies of read-only FLINT structs. Never clear them:
   // their limb pointers belong to the prepared coefficients and Y/W arrays.
   // acb_dot reads these views and writes only the distinct accumulator below.
   std::vector<acb_struct> dot_left(p.dot_capacity),dot_right(p.dot_capacity);
-  std::optional<B> dot_result;
-  if(plan.options.grouped_dot)dot_result.emplace();
+  B dot_result;
   std::size_t dot_count=0;
-  // Report measured counts even when an arithmetic budget interrupts execution.
-  struct Publish { Statistics *target; Statistics &value;
-    ~Publish() { if (target) *target=value; }
-  } publish{statistics,stats};
-  auto spend=[&](bool addmul) {
-    auto &count=addmul?stats.addmul_operations:stats.scalar_operations;
-    ++count;
-    if (stats.addmul_operations+stats.scalar_operations>plan.options.max_operations)
-      throw std::length_error("rational circuit actual operation budget exhausted");
-  };
-  auto collect=[&](const B& a,const B& b) {
+  // midpoint=true enters only the exact midpoint of b (its radius is
+  // accounted for separately by the caller).
+  auto collect=[&](const B& a,const B& b,bool midpoint=false) {
     if(dot_count>=p.dot_capacity)throw std::logic_error("rational circuit dot schedule exceeded");
-    dot_left[dot_count]=*a.raw();dot_right[dot_count]=*b.raw();++dot_count;
-    spend(true);
+    dot_left[dot_count]=*a.raw();dot_right[dot_count]=*b.raw();
+    if(midpoint) {
+      auto* view=&dot_right[dot_count];
+      for(auto* radius:{arb_radref(acb_realref(view)),arb_radref(acb_imagref(view))}){MAG_EXP(radius)=0;MAG_MAN(radius)=0;}
+    }
+    ++dot_count;
   };
   auto flush=[&](B& value,bool subtract) {
     if(!dot_count)return;
-    acb_dot(dot_result->raw(),value.raw(),subtract,dot_left.data(),1,dot_right.data(),1,
+    acb_dot(dot_result.raw(),value.raw(),subtract,dot_left.data(),1,dot_right.data(),1,
             static_cast<slong>(dot_count),p.precision);
-    acb_swap(value.raw(),dot_result->raw());++stats.dot_products;dot_count=0;
+    acb_swap(value.raw(),dot_result.raw());++stats.dot_products;stats.addmul_operations+=dot_count;dot_count=0;
   };
   auto yat=[&](unsigned n,unsigned i,unsigned k)->B& {
     return y[(std::size_t(n)*queue.size()+row_index[i])*width+k];
   };
-  auto wat=[&](unsigned id,unsigned n,unsigned k)->B& {
-    const auto &stream=plan.streams[id];
-    if (!p.ring_lengths[id]) return yat(n,stream.column,k);
-    return w[offsets[id]+std::size_t(n%p.ring_lengths[id])*width+k];
+  // slot[id] is the ring row of Taylor order n; earlier orders precede it cyclically.
+  std::vector<unsigned> slot(plan.streams.size(),0);
+  auto wat=[&](unsigned id,unsigned n,unsigned back,unsigned k)->B& {
+    if (!p.ring_lengths[id]) return yat(n-back,plan.streams[id].column,k);
+    const unsigned row=slot[id]>=back?slot[id]-back:slot[id]+p.ring_lengths[id]-back;
+    return w[offsets[id]+std::size_t(row)*width+k];
   };
   for (auto i:queue)
     for (unsigned k=0;k<width;++k) yat(0,i,k)=boundary[i][k];
+  // Majorant state per active stream: chain[(level*width)+k] is the bound of
+  // the previous Taylor order after `level+1` of the pole factors.
+  std::vector<detail::Magnitudes> chains(plan.streams.size());
+  for (unsigned id=0;id<plan.streams.size();++id)
+    if (active_stream[id] && p.ring_lengths[id] && plan.denominators[plan.streams[id].denominator].majorized)
+      chains[id]=detail::Magnitudes(p.inverse_distances[plan.streams[id].denominator].size()*width);
+  detail::Magnitudes scratch(2);
   for (unsigned n=0;n<order;++n) {
     // QW=Y is triangular in (Taylor degree, epsilon storage index).
     for (unsigned id=0;id<plan.streams.size();++id) {
       if (!active_stream[id] || !p.ring_lengths[id]) continue;
+      slot[id]=n%p.ring_lengths[id];
       const auto &stream=plan.streams[id];
       const auto &denominator=plan.denominators[stream.denominator];
+      const auto &inverse=p.inverse_distances[stream.denominator];
       for (unsigned k=0;k<width;++k) {
-        auto &value=wat(id,n,k);
+        auto &value=wat(id,n,0,k);
         value=yat(n,stream.column,k); // overwrite the expired ring row
         for (auto b:denominator.blocks) if (b.epsilon<=k) {
           const auto &q=p.polynomials[b.polynomial];
           for (unsigned a=0;a<q.size() && a<=n;++a) {
             if ((!a && !b.epsilon) || q[a].is_zero()) continue;
-            const auto &previous=wat(id,n-a,k-b.epsilon);
-            if (previous.is_zero()) continue;
-            if(plan.options.grouped_dot)collect(q[a],previous);
-            else {spend(true);acb_submul(value.raw(),q[a].raw(),previous.raw(),p.precision);}
+            const auto &previous=wat(id,n,a,k-b.epsilon);
+            if (!previous.is_zero()) collect(q[a],previous,denominator.majorized && !b.epsilon);
           }
         }
-        if(plan.options.grouped_dot)flush(value,true);
-        spend(false);
+        flush(value,true);
+        ++stats.scalar_operations;
         acb_mul(value.raw(),value.raw(),p.inverse_pivots[stream.denominator].raw(),p.precision);
+        if (!denominator.majorized) continue;
+        // With Q0 the epsilon-zero block and m the midpoints of earlier
+        // quotients, `value` encloses (z_n - sum_{a>0} q_a m_{n-a})/q_0 for
+        // every admissible right-hand side z, so its radius bounds the defect
+        // d_n of Q0*m = z - q_0*d. Hence w-m = (q_0*d)/Q0, and the Taylor
+        // coefficients of q_0/Q0(center+t) = prod(1-t/root_i)^-1 are bounded
+        // by those of prod(1-t/|root_i|)^-1: a chain of positive first-order
+        // recurrences, free of the cancellation an interval recurrence loses.
+        auto *bound=scratch[0];
+        auto *real=arb_radref(acb_realref(value.raw())), *imaginary=arb_radref(acb_imagref(value.raw()));
+        mag_hypot(bound,real,imaginary);
+        for (std::size_t level=0;level<inverse.size();++level) {
+          auto *previous=chains[id][level*width+k];
+          mag_addmul(bound,previous,inverse[level]);
+          mag_set(previous,bound);
+        }
+        mag_set(real,bound); mag_set(imaginary,bound);
       }
     }
-    if(plan.options.grouped_dot) {
-      for(auto row:queue)for(unsigned k=0;k<width;++k) {
-        for(auto id:plan.row_entries[row]) {
-          const auto& entry=plan.entries[id];
-          if(!active_stream[entry.stream])continue;
-          for(auto b:entry.numerator)if(b.epsilon<=k) {
-            const auto& numerator=p.polynomials[b.polynomial];
-            for(unsigned a=0;a<numerator.size() && a<=n;++a) {
-              if(numerator[a].is_zero())continue;
-              const auto& source=wat(entry.stream,n-a,k-b.epsilon);
-              if(!source.is_zero())collect(numerator[a],source);
-            }
-          }
-        }
-        flush(yat(n+1,row,k),false);
-      }
-    } else for (const auto &entry:plan.entries) if (active_stream[entry.stream])
-      for (auto b:entry.numerator) if (b.epsilon<width) {
-        const auto &numerator=p.polynomials[b.polynomial];
-        for (unsigned a=0;a<numerator.size() && a<=n;++a) {
-          if (numerator[a].is_zero()) continue;
-          for (unsigned k=b.epsilon;k<width;++k) {
-            const auto &source=wat(entry.stream,n-a,k-b.epsilon);
-            if (source.is_zero()) continue;
-            spend(true);
-            acb_addmul(yat(n+1,entry.row,k).raw(),numerator[a].raw(),source.raw(),p.precision);
+    for(auto row:queue)for(unsigned k=0;k<width;++k) {
+      for(auto id:plan.row_entries[row]) {
+        const auto& entry=plan.entries[id];
+        if(!active_stream[entry.stream])continue;
+        for(auto b:entry.numerator)if(b.epsilon<=k) {
+          const auto& numerator=p.polynomials[b.polynomial];
+          for(unsigned a=0;a<numerator.size() && a<=n;++a) {
+            if(numerator[a].is_zero())continue;
+            const auto& source=wat(entry.stream,n,a,k-b.epsilon);
+            if(!source.is_zero())collect(numerator[a],source);
           }
         }
       }
-    for (auto i:queue)
-      for (unsigned k=0;k<width;++k) {
-        spend(false);
-        acb_div_ui(yat(n+1,i,k).raw(),yat(n+1,i,k).raw(),n+1,p.precision);
-      }
+      auto& value=yat(n+1,row,k);
+      flush(value,false);
+      ++stats.scalar_operations;
+      acb_div_ui(value.raw(),value.raw(),n+1,p.precision);
+    }
   }
+  if (statistics) *statistics=stats;
+  return series;
+}
+// Horner value of the retained polynomial at step; truncation_log2 receives
+// its TaylorTailEstimate (see rational_transport.hpp) when requested.
+inline Boundary evaluate(const Series &series,const B &step,double *truncation_log2=nullptr) {
+  if (B::precision()!=series.precision || !step.is_finite())
+    throw std::invalid_argument("rational circuit series precision or step");
   Boundary result;
-  result.reserve(d);
-  for (unsigned i=0;i<d;++i) result.emplace_back(width);
-  for (auto i:queue)
-    for (unsigned k=0;k<width;++k)
-      for (unsigned n=order+1;n-->0;) {
-        spend(false); acb_mul(result[i][k].raw(),result[i][k].raw(),step.raw(),p.precision);
-        spend(false); acb_add(result[i][k].raw(),result[i][k].raw(),yat(n,i,k).raw(),p.precision);
+  result.reserve(series.dimension);
+  for (unsigned i=0;i<series.dimension;++i) result.emplace_back(series.width);
+  for (std::size_t r=0;r<series.rows.size();++r)
+    for (unsigned k=0;k<series.width;++k) {
+      auto &value=result[series.rows[r]][k];
+      for (unsigned n=series.order+1;n-->0;) {
+        acb_mul(value.raw(),value.raw(),step.raw(),series.precision);
+        acb_add(value.raw(),value.raw(),series.at(n,r,k).raw(),series.precision);
       }
-  if (statistics) {
-    TaylorTailEstimate tail(step,order);
-    for (auto i:queue)
-      for (unsigned k=0;k<width;++k)
-        tail.component(result[i][k].raw(),[&](unsigned n){return yat(n,i,k).raw();});
-    stats.truncation_log2=tail.log2_relative();
+    }
+  if (truncation_log2) {
+    TaylorTailEstimate tail(step,series.order);
+    for (std::size_t r=0;r<series.rows.size();++r)
+      for (unsigned k=0;k<series.width;++k)
+        tail.component(result[series.rows[r]][k].raw(),[&](unsigned n){return series.at(n,r,k).raw();});
+    *truncation_log2=tail.log2_relative();
   }
+  return result;
+}
+inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B &step,
+                      Statistics *statistics=nullptr) {
+  Statistics stats;
+  auto result=evaluate(expand(prepared,boundary,&stats),step,&stats.truncation_log2);
+  if (statistics) *statistics=stats;
   return result;
 }
 inline Boundary chart(const Compiled &compiled,const Boundary &boundary,const B &center,

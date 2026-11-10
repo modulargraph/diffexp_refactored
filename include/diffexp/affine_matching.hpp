@@ -199,25 +199,16 @@ inline std::pair<long, std::vector<Q>> rational_coefficients(const Exact &c,
     out[0] = c.rational();
     return {0, out};
   }
+  // A nonconstant coefficient is univariate in exactly the variable it uses.
   std::optional<std::size_t> variable;
-  for (auto &ts : {c.numerator_terms(), c.denominator_terms()})
-    for (auto &t : ts)
-      for (unsigned j = 0; j < t.powers.size(); ++j)
-        if (t.powers[j]) {
-          if (variable && *variable != j)
-            throw std::invalid_argument(
-                "matching coefficient depends on multiple parameters");
-          variable = j;
-        }
+  for (std::size_t j = 0; j < c.variable_count() && !variable; ++j)
+    if (c.is_univariate(j))
+      variable = j;
   if (!variable)
-    throw std::logic_error("nonconstant matching coefficient has no variable");
-  auto val = fuchsify::detail::valuation(c, *variable);
-  auto regular = c / fuchsify::detail::power(c.variable(*variable), val);
-  auto exact = affine_frobenius_detail::taylor(regular, *variable, top);
-  std::vector<Q> out;
-  for (auto &e : exact)
-    out.push_back(e.rational());
-  return {val, out};
+    throw std::invalid_argument(
+        "matching coefficient depends on multiple parameters");
+  const affine_frobenius_detail::EpsilonRational value(c, *variable);
+  return {value.valuation(), value.regular_taylor(top + 1)};
 }
 // Expand epsilon in an exact ring of x^r log(x)^k. Cancellation is decided
 // here, before evaluating at the matchpoint; no interval is classified as exact

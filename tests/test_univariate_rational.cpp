@@ -13,13 +13,15 @@ int main(){try{
   rejected=false;try{auto invalid=ua/UnivariateRational(0);(void)invalid;}catch(const std::domain_error&){rejected=true;}
   if(!rejected)throw std::runtime_error("univariate zero divisor accepted");
   AffineFrobeniusSeries::Matrix matrix={{e/x,e.constant(1)/x,z},{z,e/x,e.constant(1)/(e.constant(1)-x)},{z,z,(e.constant(1)-e)/x+e/(e.constant(1)+x)}};
+  // The Taylor and the cleared row form must give the same exact series, and
+  // each must pass the independent polynomial ODE/normalization verifier.
+  std::optional<boost::json::object> first;
   for(bool cleared:{false,true}){
-    AffineFrobeniusSeries::Options reference;reference.finite_lag_recurrence=cleared;
-    auto optimized=reference;optimized.univariate_epsilon_recurrence=true;
-    auto old=AffineFrobeniusSeries::prepare(matrix,0,1,14,reference),next=AffineFrobeniusSeries::prepare(matrix,0,1,14,optimized);
-    if(cached_affine::detail::payload(old)!=cached_affine::detail::payload(next))throw std::runtime_error("univariate Jordan/resonance recurrence differs from existing exact coefficients");
-    auto state=cached_affine::detail::decode(cached_affine::detail::payload(next),e,3,14,optimized);
-    cached_affine::detail::verify(matrix,0,1,14,optimized,state);
+    AffineFrobeniusSeries::Options options;options.finite_lag_recurrence=cleared;
+    const auto payload=cached_affine::detail::payload(AffineFrobeniusSeries::prepare(matrix,0,1,14,options));
+    if(first&&*first!=payload)throw std::runtime_error("cleared and Taylor row forms give different Jordan/resonance coefficients");
+    first=payload;
+    cached_affine::detail::verify(matrix,0,1,14,options,cached_affine::detail::decode(payload,e,3,14,options));
   }
   std::cout<<"Exact univariate conversion/arithmetic, rejected specialization, full resonant Frobenius coefficients and independent polynomial ODE checks passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

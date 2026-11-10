@@ -80,20 +80,11 @@ int main(){try{
   auto disabled=options;disabled.automatic_basis_scan=false;
   recursion::Evaluator disabled_solver(graph,disabled);(void)disabled_solver.epsilon_demand_profile(0);
   require(disabled_solver.statistics().basis_cache_hits==0 && disabled_solver.basis_selections().empty(),"disabled scan loaded automatic basis");
-  // Without a child epsilon loss there is nothing a scan could gain: it is
-  // skipped, and a skipped scan is not a decision worth persisting.
   changed=graph;changed.nodes[0].closure.matrix={{zero}};
-  auto skipped_options=options;skipped_options.basis_cache_directory=root/"skipped";
-  recursion::Evaluator skipped(changed,skipped_options);(void)skipped.epsilon_demand_profile(0);
-  require(skipped.statistics().basis_scans==0 && skipped.statistics().basis_scans_skipped==1 &&
-          skipped.statistics().basis_cache_writes==0 && !skipped.basis_selections().at(0).accepted,
-          "a basis scan ran, or was persisted, although the original basis loses no child order");
   // A completed no-improvement decision is also durable, avoiding a future
   // wall-clock scan selecting different coordinates during a continuation.
-  // The Direct pole gives the level a child loss no internal basis can remove,
-  // and the budget lets the one-master discovery run to its end.
+  // The budget lets the one-master discovery run to its end.
   const auto eps=graph.dimension.variable(1);
-  changed.nodes[0].observable_rows={{one/eps}};
   auto original_options=options;original_options.basis_cache_directory=root/"original";original_options.basis_scan_seconds=5;
   // A discovery cut by its wall-clock budget decided nothing: it must not pin
   // the original basis for every later run with a real budget.

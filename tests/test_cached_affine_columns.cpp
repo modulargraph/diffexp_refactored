@@ -11,7 +11,7 @@ int main(){try{
   ExactField field({"x","eps"});auto e=[&](const char* s){return Exact(field,s);};
   ca::Matrix a{{e("eps/x+1/(1-x)"),e("1/x"),e("0")},
     {e("0"),e("eps/x+1/(1-x)"),e("1/x")},{e("0"),e("0"),e("eps/x+1/(1-x)")}};
-  ca::Series::Options options;options.univariate_epsilon_recurrence=true;const unsigned n=14;
+  ca::Series::Options options;const unsigned n=14;
   const auto base=ca::identity(a,0,1,n,options),key=ca::manifest_identity(base,3);const Demand demand{0,0,n,64,0};
   ar::Store store(path/"main");
   options.column_progress=[](unsigned completed,unsigned){if(completed==2)throw std::runtime_error("test interruption after two durable columns");};

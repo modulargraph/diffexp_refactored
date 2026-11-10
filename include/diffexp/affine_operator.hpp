@@ -23,6 +23,10 @@ struct PrincipalPartData {
   std::optional<Rational> exact_x;
   std::shared_ptr<PrincipalPartCache> cache = std::make_shared<PrincipalPartCache>();
 };
+namespace detail {
+using BallMatrix = std::vector<std::vector<B>>;
+struct Recurrence;
+} // namespace detail
 struct Operator {
   Status status = Status::Unsupported;
   std::string reason;
@@ -49,10 +53,11 @@ struct Prepared {
   bool specialized_exact_point = false;
   bool omitted_tail_certified = false;
   std::shared_ptr<const PrincipalPartData> principal_part_data;
+  // State of the epsilon recurrence behind `inverse`; see extend().
+  std::shared_ptr<detail::Recurrence> recurrence;
   bool success() const { return status == Status::Success; }
 };
 namespace detail {
-using BallMatrix = std::vector<std::vector<B>>;
 inline BallMatrix zeros(unsigned rows, unsigned cols) {
   return BallMatrix(rows, std::vector<B>(cols, B(0)));
 }
@@ -222,6 +227,220 @@ inline void certify_principal_part(Operator &out, const Prepared &prepared,
   } catch (const std::exception &e) { out.principal_part_reason = e.what(); }
   out.principal_part_exact_operations = budget.work;
 }
+// The recurrence K W = R is triangular in epsilon: W_n needs K_0..K_n and
+// nothing above. A prepared inverse therefore keeps what it has solved, and a
+// later, higher epsilon order costs only its own coefficients.
+//
+// Exact arithmetic is confined to what decides structure: the row gauge,
+// which fixes ranks and epsilon valuations from the orders 0..loss. With
+// numeric_operator_convolution every K_n, the leading one included, is a ball
+// product of the evaluated gauge and the x^r log(x)^k coefficients evaluated
+// at the point; nothing is assembled as an exact rational function unless an
+// enclosure turns out too wide. K_0 is inverted by a certified ball inverse,
+// so no pivot or rank is ever read off an interval.
+struct Recurrence {
+  affine_matching::detail::Matrix symbolic;  // exact x^r log^k coefficients, by epsilon order
+  unsigned symbolic_orders = 0;
+  affine_matching::detail::ExactSeries exact, row_gauge;  // contiguous exact prefix; R
+  std::vector<long> shifts;
+  unsigned loss = 0;
+  B point, logarithm;
+  slong precision = 0;
+  Exact zero;
+  std::vector<BallMatrix> r, h, k, w;
+  BallMatrix leading_inverse;
+  std::map<long, B> x_powers;
+  std::vector<B> log_powers;
+  Recurrence(const B &at, const Exact &exact_zero)
+      : point(at), precision(B::precision()), zero(exact_zero) {
+    acb_log(logarithm.raw(), point.raw(), precision);
+  }
+  // One pass over all series terms per call: ask for everything foreseeable.
+  void require_symbolic(const AffineFrobeniusSeries::Expansion &physical,
+                        unsigned top, affine_matching::detail::Budget &budget) {
+    if (top < symbolic_orders) return;
+    auto more = affine_matching::detail::coefficients(physical, shifts, top, budget, symbolic_orders);
+    if (!symbolic_orders) symbolic = std::move(more);
+    else
+      for (unsigned i = 0; i < symbolic.size(); ++i)
+        for (unsigned j = 0; j < symbolic[i].size(); ++j) {
+          symbolic[i][j].resize(top + 1);
+          for (unsigned n = symbolic_orders; n <= top; ++n)
+            symbolic[i][j][n] = std::move(more[i][j][n]);
+        }
+    symbolic_orders = top + 1;
+  }
+  const affine_matching::detail::ExactMatrix &exact_order(const AffineFrobeniusSeries &series,
+      const AffineFrobeniusSeries::Expansion &physical, unsigned n,
+      unsigned foreseen, affine_matching::detail::Budget &budget) {
+    require_symbolic(physical, std::max(n, foreseen), budget);
+    while (exact.size() <= n) {
+      const unsigned order = exact.size();
+      auto next = fuchsify::detail::zeros(physical.rows, physical.columns, zero);
+      for (unsigned i = 0; i < physical.rows; ++i)
+        for (unsigned j = 0; j < physical.columns; ++j)
+          next[i][j] = affine_matching::detail::as_exact(symbolic[i][j][order],
+                                    series.exponents()[j].power, zero, budget);
+      exact.push_back(std::move(next));
+    }
+    return exact[n];
+  }
+  BallMatrix numeric_order(const AffineFrobeniusSeries &series, unsigned n,
+                           affine_matching::detail::Budget &budget) {
+    BallMatrix out = zeros(symbolic.size(), symbolic.at(0).size());
+    for (unsigned i = 0; i < out.size(); ++i)
+      for (unsigned j = 0; j < out[i].size(); ++j)
+        for (const auto &[key, q] : symbolic[i][j][n]) {
+          budget.spend();
+          const auto exponent = key.first - series.exponents()[j].power;
+          if (!affine_frobenius_detail::is_integer(exponent))
+            throw std::domain_error("physical affine column does not have integer x "
+                                    "shifts after its base exponent is factored");
+          const long power = affine_frobenius_detail::integer_value(exponent);
+          auto x = x_powers.find(power);
+          if (x == x_powers.end()) {
+            B value;
+            acb_pow_si(value.raw(), point.raw(), power, precision);
+            x = x_powers.emplace(power, std::move(value)).first;
+          }
+          while (log_powers.size() <= key.second)
+            log_powers.push_back(log_powers.empty() ? B(1) : log_powers.back() * logarithm);
+          out[i][j] = out[i][j] + affine_frobenius_detail::ball(q) * x->second *
+                                      log_powers[key.second];
+        }
+    return out;
+  }
+  // The gauge must leave no negative epsilon order in R H. It guarantees
+  // this by construction; a violation is a defect, reported loudly: exactly
+  // in exact mode, and as an enclosure excluding zero otherwise.
+  void regular_gauge(const AffineFrobeniusSeries &series,
+                     const AffineFrobeniusSeries::Expansion &physical,
+                     bool numeric, affine_matching::detail::Budget &budget) {
+    const unsigned d = physical.rows;
+    for (unsigned q = 1; q <= loss; ++q) {
+      bool regular = true;
+      if (numeric) {
+        auto residual = zeros(d, d);
+        for (unsigned p = q; p <= loss; ++p)
+          product_add(residual, r[p], h[p - q], false, &budget);
+        for (const auto &row : residual)
+          for (const auto &value : row)
+            regular = regular && value.is_finite() && value.contains_zero();
+      } else {
+        exact_order(series, physical, loss, loss, budget);
+        auto residual = fuchsify::detail::zeros(d, d, zero);
+        for (unsigned p = q; p <= loss; ++p) {
+          auto product = affine_matching::detail::exact_product(row_gauge[p], exact[p - q], budget);
+          for (unsigned i = 0; i < d; ++i)
+            for (unsigned j = 0; j < d; ++j)
+              residual[i][j] = residual[i][j] + product[i][j];
+        }
+        regular = fuchsify::detail::zero(residual);
+      }
+      if (!regular)
+        throw std::logic_error("prepared affine row gauge has uncertified "
+                               "negative epsilon coefficients");
+    }
+  }
+  // Solve the orders k.size()..depth. Each completed order is appended whole,
+  // so an exhausted budget leaves a shorter but consistent recurrence.
+  void advance(const AffineFrobeniusSeries &series,
+               const AffineFrobeniusSeries::Expansion &physical, unsigned depth,
+               affine_matching::detail::Budget &budget, Prepared &out) {
+    const unsigned d = physical.rows;
+    const bool numeric = budget.options.numeric_operator_convolution;
+    affine_matching::detail::ExactPointEvaluator evaluate_at(point);
+    require_symbolic(physical, depth + loss, budget);
+    if (numeric)
+      while (h.size() <= depth + loss) {
+        auto next = numeric_order(series, h.size(), budget);
+        h.push_back(std::move(next));
+      }
+    if (k.empty()) regular_gauge(series, physical, numeric, budget);
+    while (k.size() <= depth) {
+      const unsigned n = k.size();
+      auto value = zeros(d, d);
+      bool exact_required = !numeric;
+      if (!exact_required) {
+        // R and H are independently evaluated enclosures. Their exact zeros
+        // are not used as pivots or valuation evidence. The product can widen
+        // balls when factors cancel; then the order is formed exactly.
+        for (unsigned p = 0; p <= loss; ++p)
+          product_add(value, r[p], h[n + p], false, &budget);
+        exact_required = convolution_needs_exact(value);
+        if (exact_required) ++out.numeric_convolution_fallbacks;
+      }
+      if (exact_required) {
+        exact_order(series, physical, n + loss, depth + loss, budget);
+        auto sum = fuchsify::detail::zeros(d, d, zero);
+        for (unsigned p = 0; p <= loss; ++p) {
+          auto product = affine_matching::detail::exact_product(row_gauge[p], exact[n + p], budget);
+          for (unsigned i = 0; i < d; ++i)
+            for (unsigned j = 0; j < d; ++j)
+              sum[i][j] = sum[i][j] + product[i][j];
+        }
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            value[i][j] = evaluate_at(sum[i][j]);
+      }
+      if (!n) leading_inverse = inverse(value);
+      k.push_back(std::move(value));
+    }
+    while (w.size() <= depth) {
+      const unsigned n = w.size();
+      auto rhs = n <= loss ? r[loss - n] : zeros(d, d);
+      for (unsigned lag = 1; lag <= n; ++lag)
+        product_add(rhs, k[lag], w[n - lag], true);
+      auto value = zeros(d, d);
+      product_add(value, leading_inverse, rhs);
+      w.push_back(std::move(value));
+    }
+    out.used_numeric_convolution = numeric && depth;
+  }
+};
+// Publish the window through inverse_high from the solved recurrence.
+inline void publish(Prepared &out, const AffineFrobeniusSeries &series,
+                    const AffineFrobeniusSeries::Expansion &physical,
+                    int inverse_high, affine_matching::detail::Budget &budget) {
+  auto &state = *out.recurrence;
+  const auto &options = budget.options;
+  const unsigned d = physical.rows, loss = state.loss;
+  int low = inverse_high;
+  const long max_shift = *std::max_element(state.shifts.begin(), state.shifts.end());
+  for (auto lower : out.row_lower_bounds) low = std::min(low, lower);
+  const long depth =
+      std::max(0L, static_cast<long>(inverse_high) + max_shift + loss);
+  if (depth + loss >= options.max_epsilon_depth ||
+      static_cast<long>(inverse_high) - low + 1 > options.max_epsilon_depth)
+    throw std::length_error(
+        "prepared affine inverse exceeds epsilon-depth budget");
+  state.advance(series, physical, depth, budget, out);
+  out.inverse = {
+      low, inverse_high,
+      std::vector(
+          d, std::vector(
+                 d, std::vector<B>(static_cast<long>(inverse_high) - low + 1,
+                                   B(0))))};
+  for (unsigned i = 0; i < d; ++i) {
+    B factor;
+    auto exponent =
+        -affine_frobenius_detail::ball(series.exponents()[i].power) * state.logarithm;
+    acb_exp(factor.raw(), exponent.raw(), B::precision());
+    for (int e = std::max(low, out.row_lower_bounds[i]); e <= inverse_high;
+         ++e) {
+      long n = static_cast<long>(e) + state.shifts[i] + loss;
+      for (unsigned j = 0; j < d; ++j)
+        out.inverse.coefficients[i][j][e - low] = factor * state.w.at(n)[i][j];
+    }
+  }
+  if (options.certify_operator_principal_part) {
+    // The certificate reads exact coefficients through depth+loss.
+    state.exact_order(series, physical, depth + loss, depth + loss, budget);
+    out.principal_part_data = std::make_shared<PrincipalPartData>(
+        PrincipalPartData{state.exact, state.row_gauge, state.shifts,
+                          state.point, budget.exact_x});
+  }
+}
 } // namespace detail
 // F = H diag(x^a eps^shift), K = R H. The same exact row normalization
 // and K recurrence solve every inverse column together; uncertain boundary
@@ -249,17 +468,28 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
           "prepared affine Wronskian prefactor contains zero");
     am::Budget budget{options};budget.specialize(point);
     out.specialized_exact_point=budget.exact_x.has_value();
-    am::ExactPointEvaluator evaluate_at(point);
-    auto shifts = series.valuation_metadata(physical).minimum_by_column;
+    ExactField field({"x", "ell"});
+    auto state = std::make_shared<detail::Recurrence>(point, Exact(field, 0));
+    state->shifts = series.valuation_metadata(physical).minimum_by_column;
+    const auto &shifts = state->shifts;
     for (auto shift : shifts)
       if (shift == AffineFrobeniusSeries::Valuations::zero_valuation)
         throw std::domain_error(
             "prepared affine inverse has an exact zero column");
-    ExactField field({"x", "ell"});
-    Exact zero(field, 0);
-    auto gauge =
-        am::adaptive_row_gauge(series, physical, shifts, point, zero, budget);
-    unsigned loss = gauge.inverse_epsilon_powers.size() - 1;
+    // Epsilon orders are converted to the exact field only when an exact zero
+    // leading row requires another shear; the first pass over the series
+    // already covers the window that a gauge without loss would need.
+    const long max_shift = *std::max_element(shifts.begin(), shifts.end());
+    const unsigned foreseen = static_cast<unsigned>(std::min<long>(
+        options.max_epsilon_depth, std::max(0L, static_cast<long>(inverse_high) + max_shift)));
+    auto gauge = am::row_gauge_coefficients(
+        d, state->zero, point, budget,
+        [&](unsigned n) -> const am::ExactMatrix & {
+          return state->exact_order(series, physical, n, foreseen, budget);
+        });
+    const unsigned loss = gauge.inverse_epsilon_powers.size() - 1;
+    state->loss = loss;
+    state->row_gauge = std::move(gauge.inverse_epsilon_powers);
     out.row_pole_loss = loss;
     out.normalization_steps = gauge.steps;
     out.determinant_valuation = gauge.sheared_rows;
@@ -272,114 +502,16 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
       return out;
     }
     out.wronskian_verified = true;
-    int low = inverse_high;
-    long max_shift = *std::max_element(shifts.begin(), shifts.end());
-    for (auto shift : shifts) {
-      int lower = am::integer(-shift - static_cast<long>(loss));
-      out.row_lower_bounds.push_back(lower);
-      low = std::min(low, lower);
-    }
-    long depth =
-        std::max(0L, static_cast<long>(inverse_high) + max_shift + loss);
-    if (depth + loss >= options.max_epsilon_depth ||
-        static_cast<long>(inverse_high) - low + 1 > options.max_epsilon_depth)
-      throw std::length_error(
-          "prepared affine inverse exceeds epsilon-depth budget");
-    // The gauge already generated (and paid for) the leading orders. Keep
-    // exactly depth+loss+1 of them: the principal-part depth test reads this size.
-    auto original = std::move(gauge.coefficients);
-    am::extend_exact_coefficients(original, series, physical, shifts,
-                                  depth + loss, zero, budget);
-    original.resize(depth + loss + 1);
-    for (unsigned q = 1; q <= loss; ++q) {
-      auto residual = fuchsify::detail::zeros(d, d, zero);
-      for (unsigned p = q; p <= loss; ++p) {
-        auto product = am::exact_product(gauge.inverse_epsilon_powers[p],
-                                         original[p - q], budget);
-        for (unsigned i = 0; i < d; ++i)
-          for (unsigned j = 0; j < d; ++j)
-            residual[i][j] = residual[i][j] + product[i][j];
-      }
-      if (!fuchsify::detail::zero(residual))
-        throw std::logic_error("prepared affine row gauge has uncertified "
-                               "negative epsilon coefficients");
-    }
-    std::vector<detail::BallMatrix> k(depth + 1, detail::zeros(d, d)),
-        r(loss + 1, detail::zeros(d, d));
+    for (auto shift : shifts)
+      out.row_lower_bounds.push_back(am::integer(-shift - static_cast<long>(loss)));
+    am::ExactPointEvaluator evaluate_at(point);
+    state->r.assign(loss + 1, detail::zeros(d, d));
     for (unsigned p = 0; p <= loss; ++p)
       for (unsigned i = 0; i < d; ++i)
         for (unsigned j = 0; j < d; ++j)
-          r[p][i][j] = evaluate_at(gauge.inverse_epsilon_powers[p][i][j]);
-    std::vector<detail::BallMatrix> h;
-    if (options.numeric_operator_convolution && depth) {
-      h.assign(depth + loss + 1, detail::zeros(d, d));
-      for (unsigned n = 1; n < h.size(); ++n)
-        for (unsigned i = 0; i < d; ++i)
-          for (unsigned j = 0; j < d; ++j)
-            h[n][i][j] = evaluate_at(original[n][i][j]);
-      out.used_numeric_convolution = true;
-    }
-    for (unsigned n = 0; n <= depth; ++n) {
-      bool exact_required = !n || !options.numeric_operator_convolution;
-      if (!exact_required) {
-        // R and H are independently evaluated enclosures. This is safe for
-        // nonnegative coefficients, whose exact zeros are not used as pivots
-        // or valuation evidence. It can widen balls when factors cancel.
-        for (unsigned p = 0; p <= loss; ++p)
-          detail::product_add(k[n], r[p], h[n + p], false, &budget);
-        exact_required = detail::convolution_needs_exact(k[n]);
-        if (exact_required) ++out.numeric_convolution_fallbacks;
-      }
-      if (exact_required) {
-        // K0 is always formed exactly to retain stable pivot/rank decisions.
-        auto exact = fuchsify::detail::zeros(d, d, zero);
-        for (unsigned p = 0; p <= loss; ++p) {
-          auto product = am::exact_product(gauge.inverse_epsilon_powers[p],
-                                           original[n + p], budget);
-          for (unsigned i = 0; i < d; ++i)
-            for (unsigned j = 0; j < d; ++j)
-              exact[i][j] = exact[i][j] + product[i][j];
-        }
-        for (unsigned i = 0; i < d; ++i)
-          for (unsigned j = 0; j < d; ++j)
-            k[n][i][j] = evaluate_at(exact[i][j]);
-      }
-    }
-    auto inverse = detail::inverse(k[0]);
-    std::vector<detail::BallMatrix> w(depth + 1, detail::zeros(d, d));
-    for (unsigned n = 0; n <= depth; ++n) {
-      auto rhs = detail::zeros(d, d);
-      if (n <= loss)
-        rhs = r[loss - n];
-      for (unsigned lag = 1; lag <= n; ++lag)
-        detail::product_add(rhs, k[lag], w[n - lag], true);
-      detail::product_add(w[n], inverse, rhs);
-    }
-    out.inverse = {
-        low, inverse_high,
-        std::vector(
-            d, std::vector(
-                   d, std::vector<B>(static_cast<long>(inverse_high) - low + 1,
-                                     B(0))))};
-    B logx;
-    acb_log(logx.raw(), point.raw(), B::precision());
-    for (unsigned i = 0; i < d; ++i) {
-      B factor;
-      auto exponent =
-          -affine_frobenius_detail::ball(series.exponents()[i].power) * logx;
-      acb_exp(factor.raw(), exponent.raw(), B::precision());
-      for (int e = std::max(low, out.row_lower_bounds[i]); e <= inverse_high;
-           ++e) {
-        long n = static_cast<long>(e) + shifts[i] + loss;
-        for (unsigned j = 0; j < d; ++j)
-          out.inverse.coefficients[i][j][e - low] = factor * w.at(n)[i][j];
-      }
-    }
-    if (options.certify_operator_principal_part)
-      out.principal_part_data = std::make_shared<PrincipalPartData>(
-          PrincipalPartData{std::move(original),
-                            std::move(gauge.inverse_epsilon_powers),
-                            std::move(shifts), point, budget.exact_x});
+          state->r[p][i][j] = evaluate_at(state->row_gauge[p][i][j]);
+    out.recurrence = std::move(state);
+    detail::publish(out, series, physical, inverse_high, budget);
     out.status = Status::Success;
   } catch (const affine_matching::detail::PrecisionNeeded &e) {
     out.status = Status::NeedMorePrecision;
@@ -389,6 +521,28 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     out.reason = e.what();
   }
   return out;
+}
+// Raise a prepared inverse to a higher epsilon order in place. Orders already
+// solved are final, so this costs the new coefficients only. A lower or equal
+// request leaves the (wider) window untouched.
+inline void extend(Prepared &prepared, const AffineFrobeniusSeries &series,
+                   const AffineFrobeniusSeries::Expansion &physical,
+                   int inverse_high, const Options &options = {}) {
+  if (!prepared.success() || inverse_high <= prepared.inverse.high) return;
+  if (!prepared.recurrence || prepared.recurrence->precision != B::precision())
+    throw std::logic_error("affine inverse extension requires the recurrence "
+                           "state at its original working precision");
+  try {
+    affine_matching::detail::Budget budget{options};
+    budget.specialize(prepared.recurrence->point);
+    detail::publish(prepared, series, physical, inverse_high, budget);
+  } catch (const affine_matching::detail::PrecisionNeeded &e) {
+    prepared.status = Status::NeedMorePrecision;
+    prepared.reason = e.what();
+  } catch (const std::exception &e) {
+    prepared.status = Status::Unsupported;
+    prepared.reason = e.what();
+  }
 }
 inline Prepared prepare(const AffineFrobeniusSeries &series, const B &point,
                         int inverse_high, const Options &options = {}) {

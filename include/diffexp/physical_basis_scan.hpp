@@ -21,11 +21,6 @@ struct Options {
   std::size_t max_candidates = 8, max_candidate_rows = 256, max_depth = 2;
   std::vector<int> epsilon_powers{-1, 0, 1};
   bool sparse_combinations = true, allow_lower_sector_mixes = true;
-  // Pure rescalings J_i=eps^p Y_i. Structural per-component child windows are
-  // invariant under every diagonal epsilon gauge, so a consumer that ranks by
-  // them gains nothing from these trials and should switch them off; they
-  // matter only to a consumer bounding all components by one common window.
-  bool epsilon_scalings = true;
   // Additional exact coordinate rows (in the ORIGINAL ordered basis).
   // These are algebraic coordinates, not claims about named IBP integrals.
   Matrix coordinate_rows;
@@ -39,7 +34,7 @@ struct Stats {
   // budget_reached also covers the deterministic trial bound; time_expired is
   // the wall-clock part alone. Only the latter makes a search incomplete in a
   // machine-dependent way, so only it forbids persisting a negative decision.
-  bool budget_reached = false, time_expired = false, exact_verified = false;
+  bool budget_reached = false, time_expired = false;
   std::string reason;
 };
 inline std::size_t expression_characters(const Matrix &a) {
@@ -50,47 +45,47 @@ inline std::size_t expression_characters(const Matrix &a) {
         count += v.str().size();
   return count;
 }
-// Strip every original x-dependent denominator divisor, including repeated
-// powers. Residual epsilon-only factors do not introduce a new x singularity.
-inline std::set<std::string>
-additional_parameter_poles(const Matrix &original,
-                           const std::vector<const Matrix *> &matrices,
-                           std::size_t xi) {
-  std::vector<Exact> denominators;
-  std::set<std::string> old_seen, checked, additional;
-  for (const auto &row : original)
-    for (const auto &v : row) {
-      auto den = v.denominator();
-      if (!den.derivative(xi).is_zero() && old_seen.insert(den.str()).second)
-        denominators.push_back(std::move(den));
-    }
-  for (const auto *matrix : matrices)
-    for (const auto &row : *matrix)
+// A coefficient introduces no new parameter singularity when, after stripping
+// every divisor it shares with the original x-dependent denominators (repeated
+// powers included), nothing x-dependent is left. Residual epsilon-only factors
+// are harmless. The original denominators enter through one common multiple,
+// and each distinct candidate denominator is decided once.
+class PoleScreen {
+  std::size_t xi_;
+  std::optional<Exact> common_;
+  std::map<std::string, bool> known_;
+
+public:
+  PoleScreen(const Matrix &original, std::size_t xi) : xi_(xi) {
+    for (const auto &row : original)
       for (const auto &v : row) {
         auto den = v.denominator();
-        if (!checked.insert(den.str()).second)
+        if (den.derivative(xi).is_zero() || !known_.emplace(den.str(), true).second)
           continue;
-        for (const auto &old : denominators) {
-          while (!den.derivative(xi).is_zero()) {
-            auto gcd = den * old / den.polynomial_lcm(old);
-            if (gcd.is_rational())
-              break;
-            auto smaller = den / gcd;
-            if (smaller == den)
-              break;
-            den = std::move(smaller);
-          }
-        }
-        if (!den.derivative(xi).is_zero())
-          additional.insert(den.str());
+        common_ = common_ ? common_->polynomial_lcm(den) : den;
       }
-  return additional;
-}
-inline bool no_new_parameter_poles(const Matrix &original,
-                                   const std::vector<const Matrix *> &matrices,
-                                   std::size_t xi) {
-  return additional_parameter_poles(original, matrices, xi).empty();
-}
+  }
+  bool admissible(const Exact &value) {
+    if (value.is_zero())
+      return true;
+    auto den = value.denominator();
+    if (den.is_rational())
+      return true;
+    auto [found, inserted] = known_.try_emplace(den.str(), false);
+    if (!inserted)
+      return found->second;
+    while (common_ && !den.derivative(xi_).is_zero()) {
+      auto gcd = den * *common_ / den.polynomial_lcm(*common_);
+      if (gcd.is_rational())
+        break;
+      auto smaller = den / gcd;
+      if (smaller == den)
+        break;
+      den = std::move(smaller);
+    }
+    return found->second = den.derivative(xi_).is_zero();
+  }
+};
 namespace detail {
 using Sector = std::vector<bool>;
 inline Sector sector(const ibp::Integral &a, std::size_t physical) {
@@ -101,20 +96,22 @@ inline Sector sector(const ibp::Integral &a, std::size_t physical) {
 }
 } // namespace detail
 
-// Local metadata is diagnostic only: no epsilon profile here certifies the
-// whole recursion's source demand, singular endpoint prescription or contour.
+// A candidate is exact by construction (a verified base times one explicit
+// row change); the consumer verifies the one it adopts. connection_characters
+// measures the transported matrix, which is what a simpler basis saves.
 struct Metadata {
   std::string provenance;
-  std::size_t depth = 0, connection_characters = 0, transform_characters = 0;
-  std::optional<std::int64_t> connection_minimum, to_basis_minimum,
-      from_basis_minimum, requested_minimum;
-  bool exact_verified = false;
+  std::size_t depth = 0, connection_characters = 0;
 };
 using DemandCost = std::vector<std::uint64_t>;
 struct Candidate {
   recursion::PhysicalBasisTransform transform;
   Metadata metadata;
   std::optional<DemandCost> demand_cost;
+  // Per-row identity of to_basis and size of the connection. A single row
+  // change touches few rows, so its successor updates these, not all d^2.
+  std::vector<std::string> row_keys;
+  std::vector<std::size_t> row_characters;
 };
 using Evaluator = std::function<std::optional<DemandCost>(const Candidate &)>;
 struct CandidateResult {
@@ -136,34 +133,11 @@ inline bool dominates(const DemandCost &a, const DemandCost &b) {
   }
   return strict;
 }
-inline Metadata metadata(const recursion::PhysicalBasisTransform &basis,
-                         const Matrix &requests, std::size_t ei,
-                         std::string provenance, std::size_t depth) {
-  Metadata m;
-  m.provenance = std::move(provenance); m.depth = depth;
-  m.connection_characters = expression_characters(basis.connection);
-  m.transform_characters = expression_characters(basis.to_basis) +
-                           expression_characters(basis.from_basis);
-  auto minimum = [ei](const Matrix &matrix) {
-    std::optional<std::int64_t> result;
-    for (const auto &row : matrix) for (const auto &value : row)
-      if (auto v = exact_epsilon_valuation(value, ei); v && (!result || *v < *result))
-        result = v;
-    return result;
-  };
-  m.connection_minimum = minimum(basis.connection);
-  m.to_basis_minimum = minimum(basis.to_basis);
-  m.from_basis_minimum = minimum(basis.from_basis);
-  if (!requests.empty())
-    m.requested_minimum = minimum(fuchsify::detail::multiply(requests, basis.from_basis));
-  m.exact_verified = true;
-  return m;
-}
-
-// Demand-first bounded discovery. Every distinct, pole-safe, exact candidate is
-// offered to evaluate BEFORE cost pruning, including larger expressions and
-// candidates with local epsilon poles. Only caller-supplied full-demand costs
-// define Pareto dominance. The beam cap is an explicit incomplete search bound.
+// Bounded discovery of exact internal bases. Every distinct, pole-safe
+// candidate is offered to evaluate BEFORE cost pruning, including larger
+// expressions and candidates with local epsilon poles. Only caller-supplied
+// costs define Pareto dominance. The beam cap is an explicit incomplete search
+// bound. Candidates are exact by construction; they are not re-verified here.
 // No new IBP generation, numerical transport or epsilon specialization occurs.
 inline CandidateResult scan_candidates(const level::Result &level,
     std::size_t physical_count, std::size_t parameter,
@@ -193,27 +167,46 @@ inline CandidateResult scan_candidates(const level::Result &level,
   recursion::PhysicalBasisTransform original{level.matrix,unit,unit,level.matrix};
   recursion::verify_physical_basis(original,level.matrix,parameter);
   result.stats.original_characters = expression_characters(level.matrix);
+  PoleScreen poles(level.matrix,parameter);
   std::set<std::string> seen;
   std::optional<std::size_t> cost_axes;
-  auto submit = [&](recursion::PhysicalBasisTransform basis, std::string why,
-                    std::size_t depth) {
+  const auto row_key = [](const std::vector<Exact> &row) {
     std::string key;
-    for (const auto &row : basis.to_basis) for (const auto &v : row) {
-      auto s = v.str(); key += std::to_string(s.size()) + ":" + s;
+    for (const auto &v : row) { auto s = v.str(); key += std::to_string(s.size()) + ":" + s; }
+    return key;
+  };
+  const auto row_size = [](const std::vector<Exact> &row) {
+    std::size_t size = 0;
+    for (const auto &v : row) if (!v.is_zero()) size += v.str().size();
+    return size;
+  };
+  const auto row_admissible = [&](const std::vector<Exact> &row) {
+    return std::all_of(row.begin(),row.end(),[&](const Exact &v){return poles.admissible(v);});
+  };
+  // The row masks name what differs from the candidate's base, whose keys,
+  // sizes and pole screening it inherits; a null mask means every row.
+  using Rows = std::vector<bool>;
+  auto submit = [&](Candidate candidate, const Rows *to_rows, const Rows *from_rows,
+                    const Rows *connection_rows) {
+    const auto changed = [](const Rows *rows, std::size_t i) { return !rows || (*rows)[i]; };
+    const auto &basis = candidate.transform;
+    candidate.row_keys.resize(d); candidate.row_characters.resize(d);
+    for (std::size_t i=0;i<d;++i) if (changed(to_rows,i)) candidate.row_keys[i] = row_key(basis.to_basis[i]);
+    std::string key;
+    for (const auto &part : candidate.row_keys) key += part;
+    if (!seen.insert(std::move(key)).second) { ++result.duplicates; return; }
+    for (std::size_t i=0;i<d;++i)
+      if ((changed(to_rows,i) && !row_admissible(basis.to_basis[i])) ||
+          (changed(from_rows,i) && !row_admissible(basis.from_basis[i])) ||
+          (changed(connection_rows,i) && !row_admissible(basis.connection[i]))) {
+        ++result.stats.new_poles; return;
+      }
+    candidate.metadata.connection_characters = 0;
+    for (std::size_t i=0;i<d;++i) {
+      if (changed(connection_rows,i)) candidate.row_characters[i] = row_size(basis.connection[i]);
+      candidate.metadata.connection_characters += candidate.row_characters[i];
     }
-    if (!seen.insert(key).second) { ++result.duplicates; return; }
-    if (!no_new_parameter_poles(level.matrix,
-        {&basis.to_basis,&basis.from_basis,&basis.connection},parameter)) {
-      ++result.stats.new_poles; return;
-    }
-    recursion::verify_physical_basis(basis,level.matrix,parameter);
-    if (!level.target_rows.empty() &&
-        multiply(multiply(level.target_rows,basis.from_basis),basis.to_basis) != level.target_rows)
-      throw std::logic_error("basis candidate requested-coordinate identity");
-    Candidate candidate{std::move(basis),{},std::nullopt};
-    candidate.metadata = metadata(candidate.transform,level.target_rows,
-        options.epsilon_variable,std::move(why),depth);
-    ++result.stats.accepted; result.stats.exact_verified = true;
+    ++result.stats.accepted;
     if (evaluate) {
       ++result.evaluated;
       candidate.demand_cost = evaluate(candidate);
@@ -243,7 +236,12 @@ inline CandidateResult scan_candidates(const level::Result &level,
       ++result.truncated;
     }
   };
-  submit(original,"original",0);
+  Candidate root{original,{"original",0},std::nullopt,{},{}};
+  for (std::size_t i=0;i<d;++i) {
+    root.row_keys.push_back(row_key(unit[i]));
+    root.row_characters.push_back(row_size(level.matrix[i]));
+  }
+  submit(root,nullptr,nullptr,nullptr);
   // A gauge is offered separately: never silently normalize away a candidate's
   // epsilon powers before the consumer can assess its interface products.
   try {
@@ -254,7 +252,7 @@ inline CandidateResult scan_candidates(const level::Result &level,
       basis.from_basis[i][i] = epsilon_gauge_detail::multiply_power(z.constant(1),options.epsilon_variable,gauge.shifts[i]);
     }
     basis.connection = std::move(gauge.matrix);
-    submit(std::move(basis),"epsilon diagonal gauge",0);
+    submit(Candidate{std::move(basis),{"epsilon diagonal gauge",0},std::nullopt,{},{}},nullptr,nullptr,nullptr);
   } catch (const UnsupportedEpsilonGauge &) { ++result.stats.failures; }
   struct Row { std::vector<Exact> values; std::string why; };
   std::vector<Row> rows;
@@ -304,35 +302,57 @@ inline CandidateResult scan_candidates(const level::Result &level,
     for(std::size_t k=0;k<a.size();++k) if(b[k]&&!a[k]) return false;
     return true;
   };
+  // J'=H J, where H is the identity except for row pos, which is q. Then
+  // to_basis changes in that row only, and the right factor H^-1 (the identity
+  // except for row pos) adds a multiple of column pos to the other columns:
+  // every product below is a rank-one update, O(d^2) exact operations.
   auto trial = [&](const Candidate &base,std::size_t pos,
                    const std::vector<Exact> &q,const std::string &why) {
     if(expired() || result.stats.trials>=options.max_trials) return;
     ++result.stats.trials;
     if(q[pos].is_zero()) { ++result.stats.singular; return; }
-    auto h=unit,hi=unit; h[pos]=q;
-    for(std::size_t k=0;k<d;++k)
-      hi[pos][k]=k==pos ? z.constant(1)/q[pos] : -q[k]/q[pos];
-    auto rhs=multiply(h,base.transform.connection);
-    for(std::size_t k=0;k<d;++k) rhs[pos][k]=rhs[pos][k]+q[k].derivative(parameter);
-    recursion::PhysicalBasisTransform next{level.matrix,
-      multiply(h,base.transform.to_basis),multiply(base.transform.from_basis,hi),multiply(rhs,hi)};
-    submit(std::move(next),base.metadata.provenance+"; "+why,base.metadata.depth+1);
+    Candidate next{base.transform,{base.metadata.provenance+"; "+why,base.metadata.depth+1},
+                   std::nullopt,base.row_keys,base.row_characters};
+    auto &basis=next.transform;
+    const auto row_times=[&](const Matrix &m) {
+      std::vector<Exact> out(d,z.constant(0));
+      for(std::size_t k=0;k<d;++k) if(!q[k].is_zero())
+        for(std::size_t j=0;j<d;++j) if(!m[k][j].is_zero()) out[j]=out[j]+q[k]*m[k][j];
+      return out;
+    };
+    std::vector<Exact> inverse_row(d,z.constant(0));
+    for(std::size_t k=0;k<d;++k) inverse_row[k]=k==pos ? z.constant(1)/q[pos] : -q[k]/q[pos];
+    const auto times_inverse=[&](Matrix &m,Rows &touched) {
+      for(std::size_t i=0;i<d;++i) {
+        const Exact pivot=m[i][pos];
+        if(pivot.is_zero()) continue;
+        touched[i]=true;
+        for(std::size_t k=0;k<d;++k)
+          if(k==pos) m[i][k]=pivot*inverse_row[k];
+          else if(!inverse_row[k].is_zero()) m[i][k]=m[i][k]+pivot*inverse_row[k];
+      }
+    };
+    Rows to_rows(d,false),from_rows(d,false),connection_rows(d,false);
+    to_rows[pos]=connection_rows[pos]=true;
+    auto connection_row=row_times(base.transform.connection);
+    for(std::size_t k=0;k<d;++k) connection_row[k]=connection_row[k]+q[k].derivative(parameter);
+    basis.to_basis[pos]=row_times(base.transform.to_basis);
+    basis.connection[pos]=std::move(connection_row);
+    times_inverse(basis.connection,connection_rows);
+    times_inverse(basis.from_basis,from_rows);
+    submit(std::move(next),&to_rows,&from_rows,&connection_rows);
   };
   // Each depth is expanded from a fixed snapshot, so accepting a candidate
   // cannot invalidate an in-flight base. Later depths permit paired changes.
-  std::vector<Candidate> bases{{original,metadata(original,level.target_rows,options.epsilon_variable,"original",0),{}}};
+  std::vector<Candidate> bases{root};
   for(std::size_t depth=0;depth<options.max_depth && !expired();++depth) {
     const auto depth_limit = std::min(options.max_trials,
         (depth+1)*(options.max_trials/options.max_depth) + options.max_trials%options.max_depth);
     for(const auto &base:bases) {
       auto available = [&] { return !expired() && result.stats.trials<depth_limit; };
-      // Cover all component rescalings before allowing a large cached-row or
-      // shear family at one position to exhaust the trial budget.
-      if(options.epsilon_scalings) for(int p:options.epsilon_powers) if(p)
-        for(std::size_t pos=0;pos<d && available();++pos) {
-          auto q=unit[pos];q[pos]=epsilon_gauge_detail::multiply_power(q[pos],options.epsilon_variable,p);
-          trial(base,pos,q,"epsilon scale row "+std::to_string(pos)+" power "+std::to_string(p));
-        }
+      // Pure rescalings J_i=eps^p Y_i are not tried: structural child windows
+      // are invariant under every diagonal epsilon gauge, and the connection
+      // only trades epsilon powers between entries.
       const auto rows_limit = result.stats.trials + (depth_limit-result.stats.trials+1)/2;
       for(const auto &row:rows) {
         if(!available() || result.stats.trials>=rows_limit) break;

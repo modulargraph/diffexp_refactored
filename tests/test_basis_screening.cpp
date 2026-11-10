@@ -13,8 +13,8 @@ int main(){try{
  // Synthetic cached coordinate, not an asserted physical integral identity:
  // U=Y/(1+x) has U'=0 while Y'=Y/(1+x).
  node.closure.requested_integrals={dotted};node.closure.target_rows={{one/(one+x)}};
- // The Direct pole is a child epsilon loss, without which no scan runs. It
- // is the same in every internal basis, so candidates tie on demand.
+ // The Direct pole is a child epsilon loss that is the same in every
+ // internal basis: the candidate must be adopted at an unchanged child window.
  const auto eps=graph.dimension.variable(1);
  node.observable_rows={{one},{one/eps}};node.operations={pullback::Plan{},pullback::Plan{}};
  node.operations[0].operation=feynman::Operation::UpperLimit;
@@ -46,24 +46,23 @@ int main(){try{
  // pullback: selecting it must not build a second pair of endpoint series.
  check(search.statistics().endpoint_series_built==original.statistics().endpoint_series_built &&
        search.statistics().endpoint_series_built==2,"basis selection rebuilt exact endpoint series");
- check(search.statistics().basis_scans==1 && search.statistics().basis_scans_skipped==0,"scan accounting");
+ check(search.statistics().basis_scans==1,"scan accounting");
  {
-   // No child epsilon loss: nothing to gain, so no discovery and no change.
+   // A smaller connection is worth adopting whatever the child window is:
+   // without any epsilon loss, and above the closed-form leaf as well.
    auto lossless=graph;lossless.nodes[0].observable_rows={{one}};lossless.nodes[0].operations.resize(1);
-   recursion::Evaluator idle(lossless,settings);(void)idle.prepare_factored_consumers(0,0);
-   check(idle.statistics().basis_scans==0 && idle.statistics().basis_scans_skipped==1 &&
-         !idle.basis_selections().at(0).accepted && idle.statistics().demand_preflights==1,
-         "basis discovery ran although the original basis loses no child order");
-   // A closed-form leaf child: its extra orders are cheaper than a discovery.
+   recursion::Evaluator plain(lossless,settings);auto adopted=plain.prepare_factored_consumers(0,0);
+   check(plain.statistics().basis_scans==1 && plain.basis_selections().at(0).accepted &&
+         plain.basis_selections().at(0).original_child_loss==0 && adopted.connection[0][0].is_zero() &&
+         plain.statistics().endpoint_series_built==2,"smaller connection not adopted at zero child loss");
    auto above_leaf=graph;above_leaf.nodes.push_back(graph.nodes[0]);above_leaf.nodes[1].scalar_leaf=true;
    auto two=settings;two.causal_prescription->levels={{1},{1}};
    recursion::Evaluator leafward(above_leaf,two);(void)leafward.prepare_factored_consumers(0,0);
-   check(leafward.statistics().basis_scans==0 && leafward.statistics().basis_scans_skipped==1 &&
-         leafward.basis_selections().at(0).reason.find("leaf")!=std::string::npos,
-         "basis discovery ran above the closed-form leaf");
+   check(leafward.statistics().basis_scans==1 && leafward.basis_selections().at(0).accepted,
+         "smaller connection not adopted above the closed-form leaf");
  }
- // v3 decisions include "original retained" entries written after a time-cut
- // or failed discovery; the pullback policy must not inherit them.
- check(recursion::basis_persistence::revision==std::string("physical-basis-demand-selection-v4"),"selection revision did not invalidate v3 decisions");
- std::cout<<"Cheap endpoint screens, exact pullback installation, upper-cut identity and v4 revision passed\n";
+ // Earlier revisions ranked by demand scores and stored undecided scans as
+ // "original retained"; the connection-size policy must not inherit them.
+ check(recursion::basis_persistence::revision==std::string("physical-basis-connection-size-v5"),"selection revision did not invalidate earlier decisions");
+ std::cout<<"Connection-size discovery, exact pullback installation, upper-cut identity and v5 revision passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

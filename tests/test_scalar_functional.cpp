@@ -67,6 +67,22 @@ int main(){try {
   feynman::CertifiedDeepestBetaOptions refined;refined.taylor_order=80;refined.working_bits=384;refined.requested_digits=28;
   auto refined_functional=feynman::certified_scalar_functional(geometry,1,2,2,Exact(field,"1/(2+x+eps)"),4,refined);
   require(native_enclosure_meets_tolerance({refined_functional.coefficients},"1/10000000000000000000000000000"),"functional must adapt step/radius independently at N80");
+  // Chart tails are Cauchy bounds, not estimates. At a low Taylor order and
+  // few requested digits they dominate every enclosure, which must still
+  // contain the high-order value; a bound that were too small would exclude it.
+  feynman::CertifiedDeepestBetaOptions coarse;coarse.taylor_order=16;coarse.requested_digits=4;coarse.working_bits=384;
+  const auto dominated=[&](const feynman::LaurentValue& low_order,const feynman::LaurentValue& reference) {
+    require(low_order.taylor_tail_certified && low_order.epsilon_low==reference.epsilon_low,"low-order functional window");
+    bool wider=false;
+    for(int k=reference.epsilon_low;k<=4;++k) {
+      require(acb_contains(low_order.at(k).raw(),reference.at(k).raw()),"low-order chart tail bound must enclose the high-order value");
+      wider|=mag_cmp(arb_radref(acb_realref(low_order.at(k).raw())),arb_radref(acb_realref(reference.at(k).raw())))>0;
+    }
+    require(wider,"low-order comparison did not exercise the tail bound");
+  };
+  dominated(feynman::certified_scalar_functional(geometry,1,2,2,Exact(field,"1/(2+x+eps)"),4,coarse),rational);
+  dominated(feynman::certified_scalar_functional(geometry,1,2,2,Exact(field,"1+x+x^2"),4,coarse),polynomial);
+  dominated(feynman::certified_scalar_functional({x,x},2,2,2,x.constant(1),4,coarse),resonant);
   for(const auto* value:{&polynomial,&rational,&shifted,&resonant,&weighted_beta})
     require(value->taylor_tail_certified && native_enclosure_meets_tolerance({value->coefficients},"1/100000000000000000000"),"scalar functional final actual tolerance");
   // Independent Euler beta identities check both singular endpoint arms,

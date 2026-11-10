@@ -3,6 +3,25 @@
 #include <flint/fmpz_poly_q.h>
 
 namespace diffexp {
+// An owned element of Z[t]. Fraction-free recurrences keep their numerators in
+// this ring and call FLINT on raw() directly; the type only manages lifetime.
+class IntegerPolynomial {
+ public:
+  IntegerPolynomial(){fmpz_poly_init(value_);}
+  explicit IntegerPolynomial(long n):IntegerPolynomial(){fmpz_poly_set_si(value_,n);}
+  IntegerPolynomial(const IntegerPolynomial& other):IntegerPolynomial(){fmpz_poly_set(value_,other.value_);}
+  IntegerPolynomial(IntegerPolynomial&& other)noexcept:IntegerPolynomial(){fmpz_poly_swap(value_,other.value_);}
+  IntegerPolynomial& operator=(IntegerPolynomial other)noexcept{fmpz_poly_swap(value_,other.value_);return *this;}
+  ~IntegerPolynomial(){fmpz_poly_clear(value_);}
+  fmpz_poly_struct* raw(){return value_;}
+  const fmpz_poly_struct* raw()const{return value_;}
+  bool zero()const{return fmpz_poly_is_zero(value_);}
+  bool one()const{return fmpz_poly_is_one(value_);}
+  // Lowest exponent with a nonzero coefficient; the value must be nonzero.
+  slong valuation()const{slong k=0;while(fmpz_is_zero(value_->coeffs+k))++k;return k;}
+ private:
+  fmpz_poly_t value_;
+};
 // A coefficient domain for exact recurrences after the path variable has been
 // expanded. Dense univariate FLINT arithmetic avoids repeated multivariate
 // deflation/inflation and uses the polynomial multiplication algorithms for Q(t).
@@ -23,7 +42,9 @@ class UnivariateRational {
     // A Rational is always canonical, which is the fmpz_poly_q normal form of a constant.
     UnivariateRational out;fmpz_poly_set_fmpz(out.value_->num,fmpq_numref(value.raw()));fmpz_poly_set_fmpz(out.value_->den,fmpq_denref(value.raw()));return out;
   }
-  Exact exact(const Exact& sample,std::size_t variable)const{return sample.from_univariate_polynomials(value_->num,value_->den,variable);}
+  Exact exact(const Exact& sample,std::size_t variable)const{return sample.from_reduced_univariate_polynomials(value_->num,value_->den,variable);}
+  UnivariateRational& operator+=(const UnivariateRational& b){fmpz_poly_q_add(value_,value_,b.value_);return *this;}
+  UnivariateRational& operator-=(const UnivariateRational& b){fmpz_poly_q_sub(value_,value_,b.value_);return *this;}
   friend UnivariateRational operator+(const UnivariateRational& a,const UnivariateRational& b){UnivariateRational out;fmpz_poly_q_add(out.value_,a.value_,b.value_);return out;}
   friend UnivariateRational operator-(const UnivariateRational& a,const UnivariateRational& b){UnivariateRational out;fmpz_poly_q_sub(out.value_,a.value_,b.value_);return out;}
   friend UnivariateRational operator-(const UnivariateRational& a){UnivariateRational out;fmpz_poly_q_neg(out.value_,a.value_);return out;}

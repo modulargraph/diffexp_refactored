@@ -29,7 +29,7 @@ int main(int argc,char** argv){try{
  for(unsigned node_index=0;node_index<graph.nodes.size();++node_index){
  auto& node=graph.nodes[node_index];if(node.closure.matrix.empty())continue;
  auto epsg=epsilon_diagonal_gauge(node.closure.matrix,1);auto fuchs=fuchsify::prepare(epsg.matrix,0);if(!fuchs.success)throw std::runtime_error(fuchs.reason);
- AffineFrobeniusSeries::Options options;options.max_dimension=256;options.finite_lag_recurrence=true;options.finite_lag_cost_fallback=order>8;
+ AffineFrobeniusSeries::Options options;options.max_dimension=256;options.finite_lag_recurrence=true;
  auto begin=std::chrono::steady_clock::now();
  auto finite=AffineFrobeniusSeries::prepare(fuchs.matrix,0,1,order,options);
  auto middle=std::chrono::steady_clock::now();

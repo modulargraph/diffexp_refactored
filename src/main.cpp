@@ -48,22 +48,8 @@ int main(int argc, char** argv) {
       for(int i=3;i<argc;++i)if(std::string(argv[i])=="--json")json_mode=true;
       auto& progress=json_mode?std::cerr:std::cout;
       if(argc<3)throw std::invalid_argument(command+" requires a family configuration JSON file");
-      // A configuration read from a file or stdin is parsed here, so that the
-      // presence of its optional epsilon_order key is known. A bare example
-      // name carries the template's value, which is a default, not a request.
-      const std::string source=argv[2];bool epsilon_order_given=false;
-      diffexp::family_config::Configuration configuration;
-      if(source=="-" || std::filesystem::exists(source)) {
-        std::ifstream file;if(source!="-"){file.open(source);if(!file)throw std::runtime_error("cannot open family configuration: "+source);}
-        auto& input=source=="-"?std::cin:file;std::string text;char block[4096];
-        while(input.read(block,sizeof(block))||input.gcount()) {
-          text.append(block,static_cast<std::size_t>(input.gcount()));
-          if(text.size()>16*1024*1024)throw std::invalid_argument("family configuration exceeds 16 MiB");
-        }
-        const auto document=boost::json::parse(text);
-        configuration=diffexp::family_config::parse(document);
-        epsilon_order_given=document.is_object() && document.as_object().contains("epsilon_order");
-      } else configuration=diffexp::family_config::load(source);
+      auto configuration=diffexp::family_config::load(argv[2]);
+      bool epsilon_order_given=configuration.epsilon_order_given;
       auto options=configuration.preparation;
       auto numerical=configuration.numerical;
       const auto preparation_start=std::chrono::steady_clock::now();
@@ -274,7 +260,7 @@ int main(int argc, char** argv) {
         report["timings"].as_object()["endpoint_operator_seconds"]=stats.endpoint_operator_seconds;
         report["timings"].as_object()["basis_selection_seconds"]=stats.basis_selection_seconds;
         report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
-        report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},{"scans_skipped",stats.basis_scans_skipped},
+        report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
           {"endpoint_series_reused",stats.endpoint_series_reused},{"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
@@ -282,9 +268,9 @@ int main(int argc, char** argv) {
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; verified series reused "<<stats.endpoint_series_reused<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
           <<"Ordinary continuation: "<<stats.ordinary_checkpoints.loaded<<" saved arms resumed, "<<stats.ordinary_checkpoints.completed_reused
-          <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved.\n"
+          <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
           <<"Child-window preflights "<<stats.demand_preflights<<"; local operator reuses "<<stats.local_operator_reuses<<".\n"
-          <<"Basis scans "<<stats.basis_scans<<" ("<<stats.basis_scans_skipped<<" skipped); selections "<<stats.basis_selections<<".\n"
+          <<"Basis scans "<<stats.basis_scans<<"; selections "<<stats.basis_selections<<".\n"
           <<"Seconds: endpoint series "<<stats.endpoint_series_seconds<<", endpoint operators "<<stats.endpoint_operator_seconds
           <<", basis selection "<<stats.basis_selection_seconds<<", leaf "<<stats.leaf_seconds<<", ordinary transport "<<stats.ordinary_seconds<<".\n"
           <<"Centered chart actions "<<conditioning.centered_charts<<"; conditioning subdivisions "<<conditioning.conditioning_subdivisions<<".\n"
@@ -401,7 +387,7 @@ int main(int argc, char** argv) {
       std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
       std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT ordinary solver: --ft-transport auto|spectral|taylor|ultraspherical (default auto); --ft-transport-digits N overrides the local spectral accuracy target (default leaf digits + 12). FT execution: --method adjoint|factored|auto|values (default adjoint).\n";
       std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";
-      std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds the search for an internal master basis with a smaller child epsilon window; 0 disables it. The search is skipped where it cannot pay off (no epsilon loss, or a closed-form leaf child).\n";
+      std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds, per level, the search for an internal master basis with a smaller exact connection (cheaper transport) that does not widen the child epsilon window; 0 disables it.\n";
       std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the exact endpoint-series cache (affine-series), the persisted internal-basis choice stored beside it, and the ordinary-transport checkpoints; all three are then recomputed on every run.\n";
       std::cout << "IBP cache: verified level closures under --cache are reused whatever --ibp-provider/--ibp-dots/--ibp-numerators say; such reuse is reported on stderr and in the JSON field ibp_cache.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";

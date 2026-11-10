@@ -174,6 +174,17 @@ class Exact {
     fmpz_mpoly_set_fmpz_poly(fmpz_mpoly_q_denref(out.value_),denominator,variable,ctx_->raw);
     fmpz_mpoly_q_canonicalise(out.value_,ctx_->raw);return out;
   }
+  // The pair must already be in lowest terms with a positive leading
+  // denominator coefficient (the FLINT fmpz_poly_q normal form, which is then
+  // also the normal form here): no gcd is repeated.
+  Exact from_reduced_univariate_polynomials(const fmpz_poly_t numerator,const fmpz_poly_t denominator,std::size_t variable)const {
+    if(variable>=variable_count())throw std::out_of_range("univariate coefficient variable");
+    if(fmpz_poly_is_zero(denominator)||fmpz_sgn(fmpz_poly_lead(denominator))<0)throw std::domain_error("univariate denominator is not in normal form");
+    Exact out(ctx_);
+    fmpz_mpoly_set_fmpz_poly(fmpz_mpoly_q_numref(out.value_),numerator,variable,ctx_->raw);
+    fmpz_mpoly_set_fmpz_poly(fmpz_mpoly_q_denref(out.value_),denominator,variable,ctx_->raw);
+    return out;
+  }
   Exact pow(unsigned long n) const {
     Exact a(*this), out = constant(1);
     while (n) { if (n & 1) out = out*a; n >>= 1; if (n) a = a*a; }

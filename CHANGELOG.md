@@ -6,11 +6,12 @@
   Taylor tail and halve a step whose polynomial has not converged at the
   designed rate; `max_truncation_halvings` bounds it. Adjoint checkpoint
   identities advance, so earlier numerical checkpoints are not reused.
-- The physical-basis scan is skipped when the child loss is already zero or the
-  child is the scalar leaf, a chosen basis is installed by exact pullback
-  instead of rebuilding endpoint series, and the adjoint path requests the
-  per-column structural child window. `epsilon_low` can rise where a leading
-  order was an exact structural zero. Basis cache revision v4.
+- The physical-basis scan ranks candidates by the size of their exact
+  connection (the child window may not widen), a chosen basis is installed by
+  exact pullback instead of rebuilding endpoint series, endpoint operators are
+  prepared once per level and extended in epsilon, and the adjoint path
+  requests the per-column structural child window. `epsilon_low` can rise
+  where a leading order was an exact structural zero. Basis cache revision v5.
 - Endpoint constants and divergent-mode constraints fail with a clear error
   when the endpoint x order does not reach the fixed sector, instead of being
   silently truncated.

@@ -14,35 +14,36 @@ int main(){try{
     {B(1),B(0),B(0),B(0)},{B(0),B(0),B(0),B(0)}};
   for(bool uncertain:{false,true}){
    if(uncertain)arb_add_error_2exp_si(acb_realref(input[0][0].raw()),-bits+20);
-   rc::Options scalar,dot;scalar.grouped_dot=false;dot.grouped_dot=true;
-   auto plain=rc::prepare(rc::compile(entries,4,0,1,3,20,scalar),center,20);
-   auto grouped=rc::prepare(rc::compile(entries,4,0,1,3,20,dot),center,20);
-   rc::Statistics a,b;auto expected=rc::chart(plain,input,h,&a),got=rc::chart(grouped,input,h,&b);
-   check(a.addmul_operations==b.addmul_operations,"dot changed executed term count");
-   check(b.dot_products>0 && a.dot_products==0,"dot call count missing");
-   check(b.live_cells-a.live_cells==2*grouped.data().dot_capacity+1,"dot scratch accounting mismatch");
+   // The pooled dot products against the independent full convolution of
+   // the epsilon-expanded coefficients, at a complex centre and step.
+   std::vector<RationalLineEntry> expanded;
+   for(const auto& entry:entries){auto cs=feynman::scalar_functional_detail::epsilon_series(entry.coefficient,1,3-entry.epsilon);
+     for(unsigned k=0;k<cs.size();++k)if(!cs[k].is_zero())expanded.push_back({entry.row,entry.column,k+entry.epsilon,cs[k]});}
+   auto grouped=rc::prepare(rc::compile(entries,4,0,1,3,20),center,20);
+   rc::Statistics b;auto expected=rational_chart(expanded,input,center,h,20),got=rc::chart(grouped,input,h,&b);
+   check(b.dot_products>0 && b.addmul_operations>=b.dot_products,"dot call count missing");
+   check(b.live_cells<=grouped.data().live_cells,"dot scratch accounting mismatch");
    for(unsigned i=0;i<input.size();++i)for(unsigned k=0;k<input[0].size();++k){
-    check(acb_overlaps(got[i][k].raw(),expected[i][k].raw()),"dot/scalar disjoint enclosures");close(got[i][k],expected[i][k],bits);
+    check(acb_overlaps(got[i][k].raw(),expected[i][k].raw()),"dot/convolution disjoint enclosures");close(got[i][k],expected[i][k],bits);
    }
    for(auto&v:got.back())check(v.is_zero(),"dot activated unreachable source");
   }
-  rc::Options dot;dot.grouped_dot=true;
   // Independent finite coefficient oracle: source forcing (1+x^7)/(1-x).
-  auto forcing=rc::compile({{0,1,0,e("(1+x^7)/(1-x)")}},2,0,1,0,20,dot);
+  auto forcing=rc::compile({{0,1,0,e("(1+x^7)/(1-x)")}},2,0,1,0,20);
   auto value=rc::chart(forcing,{{B(0)},{B(1)}},B(0),h,20);B oracle(0),power=h;
   for(unsigned n=1;n<=20;++n){oracle+=power*B(n>=8?2:1)/B(n);power*=h;}
   close(value[0][0],oracle,bits);
   // Signed epsilon window lower=-3: e^(eps*h)*eps^-3, no omitted
   // coefficients contribute to these four powers at spatial order >=3.
-  auto shifted=rc::compile({{0,0,0,e("eps")}},1,0,1,3,8,dot);
+  auto shifted=rc::compile({{0,0,0,e("eps")}},1,0,1,3,8);
   auto shiftvalue=rc::chart(shifted,{{B(1),B(0),B(0),B(0)}},B(0),h,8);B coefficient(1);
   for(unsigned k=0;k<4;++k){close(shiftvalue[0][k],coefficient,bits);coefficient=coefficient*h/B(k+1);}
   // Q has only epsilon lag: dot subtraction must subtract the whole sum
   // from Y, including higher powers generated at the same Taylor degree.
-  auto eps=rc::compile({{0,1,0,e("1/(1-eps-eps^2)")}},2,0,1,5,3,dot);
+  auto eps=rc::compile({{0,1,0,e("1/(1-eps-eps^2)")}},2,0,1,5,3);
   auto epsvalue=rc::chart(eps,{{B(0),B(0),B(0),B(0),B(0),B(0)},
     {B(1),B(0),B(0),B(0),B(0),B(0)}},B(0),h,3);
   int fib[]={1,1,2,3,5,8};for(unsigned k=0;k<6;++k)close(epsvalue[0][k],h*B(fib[k]),bits);
  }
- std::cout<<"Grouped quotient/numerator dots, scalar enclosures, ring alias/lags, Laurent offsets and independent finite oracles passed\n";
+ std::cout<<"Pooled quotient/numerator dots against the convolution reference, ring alias/lags, Laurent offsets and independent finite oracles passed\n";
 }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

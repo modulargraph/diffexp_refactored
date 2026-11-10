@@ -11,6 +11,9 @@ struct Configuration {
   recursion::Options preparation;
   recursion::NumericalOptions numerical;
   unsigned epsilon_order=0,ibp_dots=1,ibp_numerators=2;
+  // The document itself named epsilon_order. A bare example name carries the
+  // template's value, which is a default and not a request.
+  bool epsilon_order_given=false;
   std::string ibp_provider="auto";
 };
 inline bool same_geometry(const feynman::ExampleFamily& a,const feynman::ExampleFamily& b) {
@@ -72,7 +75,7 @@ inline Configuration parse(const json::value& value) {
     indices.resize(slots,0);c.integrals.push_back(std::move(indices));
   }
   if(c.integrals.size()>5000)throw std::invalid_argument("integral request count exceeds 5000");
-  if(auto p=o.if_contains("epsilon_order"))c.epsilon_order=integer(*p,0,100,"epsilon order");
+  if(auto p=o.if_contains("epsilon_order")){c.epsilon_order=integer(*p,0,100,"epsilon order");c.epsilon_order_given=true;}
   if(auto p=o.if_contains("preparation")) {
     const auto& a=p->as_object();known_keys(a,{"anchors","merges","total_seconds","level_seconds","fire_seconds","max_sources_per_level","ibp_provider","ibp_dots","ibp_numerators"},"preparation");
     if(auto v=a.if_contains("ibp_provider")){c.ibp_provider=std::string(v->as_string());if(c.ibp_provider!="auto"&&c.ibp_provider!="ibp-solver"&&c.ibp_provider!="fire"&&c.ibp_provider!="fire-modular")throw std::invalid_argument("unknown IBP provider");}
@@ -143,7 +146,7 @@ inline Configuration load(const std::string& path) {
   if(path!="-" && !std::filesystem::exists(path)) {
     if(path.find('/')!=std::string::npos || path.ends_with(".json"))throw std::runtime_error("cannot open family configuration: "+path);
     // Kept for command-line convenience; the generic parser never dispatches by name.
-    return parse(describe(feynman::example_family(path)));
+    auto built_in=parse(describe(feynman::example_family(path)));built_in.epsilon_order_given=false;return built_in;
   }
   std::ifstream file;if(path!="-"){file.open(path);if(!file)throw std::runtime_error("cannot open family configuration");}
   auto& input=path=="-"?std::cin:file;std::string text;char block[4096];

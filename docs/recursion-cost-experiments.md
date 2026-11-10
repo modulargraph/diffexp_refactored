@@ -2,8 +2,10 @@
 
 Measurements made for 2.2.0 on a 4-core x86-64 Linux container (GCC 13, FLINT
 3.4.0), prompted by the two-loop double pentagon, whose numerical recursion
-runs for hours. Two candidate remedies were tested and neither is a large
-win; the cost model that explains why is at the end. Timings taken while
+runs for hours. Changing the working precision is no remedy. Epsilon sampling
+does not pay for the smaller families but does for the double pentagon, where
+one sample completes in 23 minutes and samples run in parallel; the cost
+model at the end explains both. Timings taken while
 another job shared the machine are marked "shared".
 
 ## Threads (adopted)
@@ -56,7 +58,7 @@ samples at +-k/400, against the reference 39.655526834297652...:
 | 6 | 1.8e-8 |
 | 8 | 3.3e-11 |
 
-It is not faster. One banana4 sample costs 65 s (shared) against 279 s for
+For the smaller families it is not faster. One banana4 sample costs 65 s (shared) against 279 s for
 the whole expanded run: the transport drops from 238 s to 20 s, but the exact
 endpoint series (21 s) and the matching do not shrink. The series in epsilon
 has a small radius of convergence (the first-order coefficient is -439), so
@@ -66,7 +68,32 @@ For the box, ten samples take 5.6 s against 0.1 s.
 
 The reason is the cost model below: the expanded transport is already linear
 in the number of epsilon orders, so one sample costs about one order, and
-more samples are needed than orders are carried.
+more samples are needed than orders are carried. Samples are independent, so
+with one core per sample the wall time is that of one sample.
+
+For the double pentagon the balance is different, because its inner levels
+carry epsilon through 12 to 16 and their legs slow down far more than
+linearly. One sample at epsilon = 1/100 (four threads, 384 bits, leaf digits
+12) completed the whole seven-level recursion in 1360 s: the first complete
+numerical evaluation of this family. Its value is
+-74166278.2233783249 - 17089677.0664946935 i with radius 6e-11.
+
+| Leg | Expanded recursion | One sample |
+| --- | ---: | ---: |
+| Level 4, lower / upper | 26.8 / 19.4 s | 6.0 / 5.0 s |
+| Level 3, lower / upper | 107 / 784 s | 24.7 / 70.0 s |
+| Level 2, lower | 1790 s | 61.2 s |
+| Level 2, upper | hours (not finished) | 163.5 s |
+| Level 1, lower / upper | not reached | 21.3 / 60.9 s |
+
+Of the 1360 s, transport is 413 s and the exact endpoint series 462 s; most
+of the rest is endpoint matching. The endpoint work is done in exact
+arithmetic with the shifted rationals and is slower than in the expanded
+recursion (945 s to reach the leaf, against 467 s), so numeric endpoint
+series are the obvious next gain. The Laurent coefficients need about ten
+samples at a spacing near 1/1000 (the leading pole is epsilon^-4, so more
+working bits as well): about one sample's wall time with ten machines, four
+to six hours on the four cores used here.
 
 ## Cost model
 

@@ -4,9 +4,9 @@
 Each sample runs `diffexp ft CONFIG --epsilon-order 0 --epsilon-shift Q`, which
 evaluates the integral in d0-2Q dimensions; the samples at Q=+-step, +-2 step,
 ... are fitted by the polynomial through eps^poles * I(eps). This is the
-experiment recorded in docs/performance-experiments.md: it reproduces the
-expanded recursion, but needs about one sample per 1.4 digits and is not
-faster. Only the standard library is used.
+experiment recorded in docs/recursion-cost-experiments.md: it reproduces the
+expanded recursion and needs about one sample per 1.4 digits. Samples are
+independent (--jobs). Only the standard library is used.
 
     epsilon_sampling.py examples/feynman/box.json --poles 2 --samples 10
 """

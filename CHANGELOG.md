@@ -19,8 +19,10 @@
   counts and time in the progress output.
 - Experimental `diffexp ft --epsilon-shift Q` evaluates the recursion expanded
   around epsilon = Q, and `tools/experiments/epsilon_sampling.py` fits Laurent
-  coefficients from such samples. It reproduces the expanded recursion but is
-  not faster; see `docs/recursion-cost-experiments.md`, which also records the
+  coefficients from such samples. It reproduces the expanded recursion; it is
+  slower for small families and much faster per sample for the double
+  pentagon (one complete sample in 23 minutes); see
+  `docs/recursion-cost-experiments.md`, which also records the
   precision experiments and the cost model of a transport leg.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the
   master basis the reduction selected moves to the simplest regular rational

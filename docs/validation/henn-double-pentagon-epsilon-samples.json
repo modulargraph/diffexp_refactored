@@ -1,0 +1,87 @@
+{
+ "schema": "DiffExp.EpsilonSamples/v1",
+ "family": "henn_double_pentagon_x0",
+ "command": "tools/experiments/epsilon_sampling.py examples/feynman/henn_double_pentagon_x0.json --poles 4 --orders 2 --samples 12 --step 1/400 --jobs 4 -- --leaf-digits 12",
+ "note": "Scalar integral of the family in d=4-2*epsilon dimensions at each epsilon: midpoints of the reported balls, 40 significant digits. One thread per sample, four samples at a time, 384 bits.",
+ "fit": {
+  "eps^-4": "-7/9 to 1e-14",
+  "eps^-3": "-0.71244912607989874 - 17.453292519943297 i",
+  "eps^-2": "436.218113787 - 5.202032870 i",
+  "eps^-1": "-88.950617318 + 4207.353609604 i",
+  "eps^0": "-29747.6631 - 3507.3533 i"
+ },
+ "samples": [
+  {
+   "epsilon": "1/400",
+   "real": "-19886978195.498354236984923004966723993",
+   "imaginary": "-1116164014.838648261505217387861542413",
+   "numerical_seconds": 505.0
+  },
+  {
+   "epsilon": "-1/400",
+   "real": "-19795713716.714651858270465007904177733",
+   "imaginary": "1114492352.08366143662616578078318204",
+   "numerical_seconds": 535.5
+  },
+  {
+   "epsilon": "1/200",
+   "real": "-1232742663.07008436914774285704976937437",
+   "imaginary": "-138997260.16881004391964074244524513211",
+   "numerical_seconds": 519.5
+  },
+  {
+   "epsilon": "-1/200",
+   "real": "-1221308236.35624886333917392847038294041",
+   "imaginary": "138574092.71016845078171546653106478611",
+   "numerical_seconds": 514.8
+  },
+  {
+   "epsilon": "3/400",
+   "real": "-239791279.3015322977531477614544747995731",
+   "imaginary": "-40906973.6676827967616348558196701477676",
+   "numerical_seconds": 518.0
+  },
+  {
+   "epsilon": "-3/400",
+   "real": "-236390531.4989450539921621316778858095086",
+   "imaginary": "40715020.0084332072434540896882208330511",
+   "numerical_seconds": 553.7
+  },
+  {
+   "epsilon": "1/100",
+   "real": "-74166278.2233783249488679471740617059504",
+   "imaginary": "-17089677.066494693487211912805755690985",
+   "numerical_seconds": 509.9
+  },
+  {
+   "epsilon": "-1/100",
+   "real": "-72724267.7783419405048320286158830325906",
+   "imaginary": "16978661.176699102391433710902858809089",
+   "numerical_seconds": 536.4
+  },
+  {
+   "epsilon": "1/80",
+   "real": "-29467085.02754417191493895365791206826106",
+   "imaginary": "-8638280.06932316722031473361452041442119",
+   "numerical_seconds": 534.9
+  },
+  {
+   "epsilon": "-1/80",
+   "real": "-28724151.34113594326981804747263797406977",
+   "imaginary": "8564740.97821659300216761487958455409053",
+   "numerical_seconds": 532.4
+  },
+  {
+   "epsilon": "3/200",
+   "real": "-13670871.07143324896122674277047536571952",
+   "imaginary": "-4919851.701336307758115234011649176467266",
+   "numerical_seconds": 513.2
+  },
+  {
+   "epsilon": "-3/200",
+   "real": "-13237832.88999957390165803035276018636057",
+   "imaginary": "4866685.384477652371379604052361705605615",
+   "numerical_seconds": 538.4
+  }
+ ]
+}

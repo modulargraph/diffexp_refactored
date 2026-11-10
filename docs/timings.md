@@ -18,13 +18,14 @@ same machine at the start of the transport and recursion rework (commit
 | `box_triangle` | 17.2 s | 3.20 s | 1.88 / 1.31 s |
 | `banana` | 30.1 s | 4.24 s | 0.48 / 3.74 s |
 | `banana_unequal` | 50.7 s | 6.25 s | 0.63 / 5.59 s |
-| `kite` | failed | 10.9 s | 0.9 / 9.9 s |
-| `double_box_planar` | not run | 30.2 s | 5.3 / 24.7 s |
-| `banana4` (four loops, equal masses) | not run | 311 s | 31.5 / 279 s |
+| `kite` | failed | 9.7 s | 0.9 / 8.8 s |
+| `double_box_planar` | not run | 29.4 s | 5.3 / 24.1 s |
+| `banana4` (four loops, equal masses) | not run | 85 s | 30.5 / 53.9 s |
 | `banana4_unequal` (four loops, four masses) | not run | 940 s | 33.5 / 906 s |
 
-`kite` and `double_box_planar` were measured after the threaded chart
-expansion went in; the rows above them, and the four-loop bananas, before.
+`kite`, `double_box_planar` and `banana4` were measured with the threaded
+chart expansion and probe propagation of uncertainty (four threads); the rows
+above them, and `banana4_unequal`, before.
 The `banana4_unequal` run shared the machine with two other jobs. Its finite
 part and that of `banana4` reproduce the stored acceptance references
 (28.647167500233570163... and 39.655526834297652529...).
@@ -32,10 +33,12 @@ part and that of `banana4` reproduce the stored acceptance references
 `henn_double_pentagon_x0` (two loops, eight propagators, experimental): the
 exact preparation of all seven levels takes 299 s cold with the settings in
 its family file (level 1: 69 masters, 153 s; before, it did not get past
-level 1). The numerical recursion completed levels 7 to 3 in 24 minutes on
-four threads; levels 2 and 1 run for hours and were not waited for.
-[What limits the recursion](recursion-cost-experiments.md) records the
-experiments on precision and epsilon sampling made to speed it up.
+level 1). The epsilon-expanded numerical recursion completed levels 7 to 3 in
+24 minutes on four threads; levels 2 and 1 run for hours. By epsilon sampling
+the family completes: one sample takes 227 s on four threads, and twelve
+samples (four at a time) gave its Laurent coefficients through epsilon^0 in
+48 minutes. [What limits the recursion](recursion-cost-experiments.md) has
+the method, the measurements and the coefficients.
 
 Nonzero coefficients of the nine examples that ran before agree between the
 two versions to 1e-33 relative or better. The JSON report splits the

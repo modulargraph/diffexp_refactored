@@ -15,13 +15,27 @@
   bit-identical for any thread count.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
+- Uncertainty propagation in the recursion's transports. A chart that would
+  wrap its inherited uncertainty used to be evaluated through the chart map,
+  one expansion per master. The recursion now transports midpoints from the
+  first such chart of a leg and follows the size of the discarded radii along
+  two probe rows (`--uncertainty probe`, default): an estimate, not an
+  enclosure. `--uncertainty map` restores the rigorous map, which remains the
+  default of `transport_adjoint_rows` itself. The four-loop banana drops from
+  168 s to 54 s of numerical time with an unchanged result; JSON reports the
+  mode as `ft_transport.uncertainty`.
+- `--epsilon-shift Q` with `--epsilon-order 0` specialises every level above
+  the leaf to the dimension d0-2Q: one sample of the four-loop banana takes
+  14 s instead of 64 s, one of the double pentagon under four minutes instead
+  of 23.
+- `--transport-bits N` sets the Taylor tail admitted per chart.
 - Each adjoint transport leg reports its rows, masters, epsilon window, chart
-  counts and time in the progress output.
+  counts and its compile, prepare and recurrence time in the progress output.
 - Experimental `diffexp ft --epsilon-shift Q` evaluates the recursion expanded
   around epsilon = Q, and `tools/experiments/epsilon_sampling.py` fits Laurent
-  coefficients from such samples. It reproduces the expanded recursion; it is
-  slower for small families and much faster per sample for the double
-  pentagon (one complete sample in 23 minutes); see
+  coefficients from such samples (complex values, `--jobs` samples in
+  parallel). It reproduces the expanded recursion; it is slower for small
+  families and the practical route for the double pentagon; see
   `docs/recursion-cost-experiments.md`, which also records the
   precision experiments and the cost model of a transport leg.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the

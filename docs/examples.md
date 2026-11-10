@@ -23,8 +23,16 @@ of these runs automatically.
 
 `examples/feynman/henn_double_pentagon_x0.json` is experimental and has no
 acceptance reference. `diffexp prepare` completes its exact recursion in about
-five minutes; `diffexp ft` then runs for hours (it reports the position of each
-long transport once a minute, and resumes from the checkpoints under `--cache`).
+five minutes. The epsilon-expanded `diffexp ft` then runs for hours; the
+practical route is sampling,
+
+```sh
+tools/experiments/epsilon_sampling.py examples/feynman/henn_double_pentagon_x0.json \
+  --poles 4 --samples 12 --step 1/400 --jobs 4 --cache /path/to/cache -- --leaf-digits 12
+```
+
+which takes about 50 minutes on four cores
+([details](recursion-cost-experiments.md)).
 
 ## Original DiffExp examples
 

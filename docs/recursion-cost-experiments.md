@@ -4,8 +4,8 @@ Measurements made for 2.2.0 on a 4-core x86-64 Linux container (GCC 13, FLINT
 3.4.0), prompted by the two-loop double pentagon, whose numerical recursion
 runs for hours. Changing the working precision is no remedy. Epsilon sampling
 does not pay for the smaller families but does for the double pentagon, where
-one sample completes in 23 minutes and samples run in parallel; the cost
-model at the end explains both. Timings taken while
+one sample now completes in under four minutes and samples run in parallel;
+the cost model at the end explains both. Timings taken while
 another job shared the machine are marked "shared".
 
 ## Threads (adopted)
@@ -73,12 +73,11 @@ with one core per sample the wall time is that of one sample.
 
 For the double pentagon the balance is different, because its inner levels
 carry epsilon through 12 to 16 and their legs slow down far more than
-linearly. One sample at epsilon = 1/100 (four threads, 384 bits, leaf digits
-12) completed the whole seven-level recursion in 1360 s: the first complete
-numerical evaluation of this family. Its value is
--74166278.2233783249 - 17089677.0664946935 i with radius 6e-11.
+linearly. The first complete sample (epsilon = 1/100, four threads, 384 bits,
+leaf digits 12) took 1360 s; its value is
+-74166278.2233783249 - 17089677.0664946935 i.
 
-| Leg | Expanded recursion | One sample |
+| Leg | Expanded recursion | First sample |
 | --- | ---: | ---: |
 | Level 4, lower / upper | 26.8 / 19.4 s | 6.0 / 5.0 s |
 | Level 3, lower / upper | 107 / 784 s | 24.7 / 70.0 s |
@@ -86,14 +85,80 @@ numerical evaluation of this family. Its value is
 | Level 2, upper | hours (not finished) | 163.5 s |
 | Level 1, lower / upper | not reached | 21.3 / 60.9 s |
 
-Of the 1360 s, transport is 413 s and the exact endpoint series 462 s; most
-of the rest is endpoint matching. The endpoint work is done in exact
-arithmetic with the shifted rationals and is slower than in the expanded
-recursion (945 s to reach the leaf, against 467 s), so numeric endpoint
-series are the obvious next gain. The Laurent coefficients need about ten
-samples at a spacing near 1/1000 (the leading pole is epsilon^-4, so more
-working bits as well): about one sample's wall time with ten machines, four
-to six hours on the four cores used here.
+## Making a sample cheap
+
+Three changes followed, each measured on four threads (numerical seconds).
+
+| | Four-loop banana, expanded | Four-loop banana, one sample | Double pentagon, one sample |
+| --- | ---: | ---: | ---: |
+| Start | 168.4 | 63.9 | 1360 |
+| Levels specialised to the numeric dimension | 168.4 | 28.0 | 296 |
+| Probe propagation of uncertainty | 53.9 | 14.4 | 227 |
+
+**Specialising.** Order zero of a recursion expanded around a generic
+epsilon = Q depends only on the equations at that dimension. Every level
+above the scalar leaf therefore substitutes epsilon = Q outright, and its
+endpoint series, matching and transport handle rational functions of x with
+no epsilon polynomials. The endpoint work of a double-pentagon sample fell
+from about 945 s to about 35 s. One rule needed care: once epsilon is a
+number, the dimensionally regulated endpoint sectors x^(a+b*epsilon) are no
+longer marked by a slope. At a generic Q they are exactly the non-integer
+powers, and the endpoint series labels them so. Values are unchanged to
+every printed digit.
+
+**Probes.** At a numeric dimension the connection has pairs of nearly
+coincident poles with large opposite exponents (the moving poles of the
+master basis, 1/Q apart in exponent). A chart's Taylor recurrence then
+amplifies interval radii by 2^100 and more, although the linear map itself
+is harmless, and the transport fell back to "midpoint plus chart map times
+uncertainty": one expansion per master on nearly every chart. The same
+happens at the one-row top level of the expanded four-loop banana, which
+spent 118 of its 168 s there. The recursion now transports midpoints from the
+first such chart of a leg and follows the size of the discarded radii along
+two extra homogeneous rows (`--uncertainty probe`, the default;
+`--uncertainty map` restores the map). The radii this produces are estimates
+along two directions, not enclosures. On the examples they are of the size
+of the rigorous ones or smaller, and all twelve acceptance families pass
+their independent references.
+
+**What did not help.** Plain interval transport with shorter steps loses
+everything (radius 1e114): the growth is cumulative. Lower working precision
+does not speed the recurrence up, because the time is in the bookkeeping of
+`acb_dot`, not in the limb products. The forward ("factored") method is 1.4
+times faster on a double-pentagon sample (164 s) because it moves one column
+per leaf integral instead of 69 rows, but it runs toward the singular
+endpoints and returned radius 1e41 at 384 bits; it needs 640. A looser
+Taylor tail (`--transport-bits 120` instead of 160) removes a fifth of the
+charts at an error near 1e-33.
+
+Of a 227 s double-pentagon sample, 192 s is transport and about 150 s of
+that the Taylor recurrences of the 69-row and 33-row levels.
+
+## The double pentagon, end to end
+
+With a sample at 227 s on four threads the whole family is within reach of
+one machine: twelve samples at epsilon = +-k/400, four at a time on one
+thread each, took 48 minutes of wall time (6312 s of CPU), after the
+five-minute exact preparation. The fit of epsilon^4 times the scalar
+integral gives
+
+| Order | Value | Change from the last two samples |
+| --- | --- | ---: |
+| epsilon^-4 | -0.77777777777777779 + 0 i | 1e-14 |
+| epsilon^-3 | -0.71244912607989874 - 17.453292519943297 i | 3e-14 |
+| epsilon^-2 | 436.218113787 - 5.202032870 i | 2e-9 |
+| epsilon^-1 | -88.950617318 + 4207.353609604 i | 6e-9 |
+| epsilon^0 | -29747.6631 - 3507.3533 i | 1e-4 |
+
+There is no independent reference for this integral in the repository (the
+published boundary values are for a canonical basis whose top-sector members
+carry numerators), so this is not an accepted result. Its leading terms have
+the structure they must have: the epsilon^-4 coefficient is -7/9 to 14
+digits with no imaginary part, and the epsilon^-3 coefficient matches
+-1 - (5/9) log 3 + (14/9) gamma_E - (50/9) pi i to 16 digits, with the
+14/9 = -2 * (-7/9) that a two-loop integral in this normalisation carries
+and s12 = 3 the only invariant that is not +-1. The sample values are in
+[validation/henn-double-pentagon-epsilon-samples.json](validation/henn-double-pentagon-epsilon-samples.json).
 
 ## Cost model
 

@@ -26,7 +26,8 @@ def sample(arguments, shift):
     report = json.loads(done.stdout.strip().splitlines()[-1])
     if "coefficients" not in report:
         raise RuntimeError(f"sample {shift}: {report.get('message')}")
-    return shift, midpoint(report["coefficients"][0][-report["epsilon_low"]]["real"]), report["timings"]["numerical_seconds"]
+    value = report["coefficients"][0][-report["epsilon_low"]]
+    return shift, (midpoint(value["real"]), midpoint(value["imaginary"])), report["timings"]["numerical_seconds"]
 
 def fit(points, poles):
     """Coefficients of the polynomial through (x, x^poles*y): exact Newton form."""
@@ -52,6 +53,7 @@ def main():
     parser.add_argument("--poles", type=int, default=0, help="order of the leading epsilon pole")
     parser.add_argument("--orders", type=int, default=2, help="coefficients to print beyond the pole terms")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--save", default=None, help="write the sample values to this JSON file")
     parser.add_argument("extra", nargs="*", help="further diffexp ft options, after --")
     arguments = parser.parse_args()
     holder = None
@@ -62,11 +64,17 @@ def main():
     first = sample(arguments, nodes[0])  # fills the exact cache once
     with concurrent.futures.ThreadPoolExecutor(arguments.jobs) as pool:
         results = [first] + list(pool.map(lambda q: sample(arguments, q), nodes[1:]))
-    points = [(q, value) for q, value, _ in results]
-    print(f"{len(points)} samples, numerical seconds: {sum(t for *_, t in results):.1f} in total")
-    final, previous = fit(points, arguments.poles), fit(points[:-2], arguments.poles)
-    for index in range(min(len(previous), arguments.poles + arguments.orders)):
-        print(f"eps^{index - arguments.poles:+d}: {float(final[index]):.17g}   (change from the last two samples {abs(float(final[index] - previous[index])):.2e})")
+    if arguments.save:
+        with open(arguments.save, "w") as out:
+            json.dump([[str(q), str(v[0]), str(v[1]), t] for q, v, t in results], out)
+    print(f"{len(results)} samples, numerical seconds: {sum(t for *_, t in results):.1f} in total")
+    for part, name in ((0, "real"), (1, "imaginary")):
+        points = [(q, value[part]) for q, value, _ in results]
+        if not any(y for _, y in points):
+            continue
+        final, previous = fit(points, arguments.poles), fit(points[:-2], arguments.poles)
+        for index in range(min(len(previous), arguments.poles + arguments.orders)):
+            print(f"{name:9s} eps^{index - arguments.poles:+d}: {float(final[index]):.17g}   (change from the last two samples {abs(float(final[index] - previous[index])):.2e})")
 
 if __name__ == "__main__":
     sys.exit(main())

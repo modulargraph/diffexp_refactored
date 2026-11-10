@@ -365,18 +365,71 @@ int main(int argc, char** argv) {
       information["transport_schema"]="DiffExp.Transport/v1";
       std::cout<<boost::json::serialize(information)<<'\n';
     } else if (command == "--help") {
-      std::cout << "Usage: diffexp --version | backend-info | series FILE_OR_MINUS | transport FILE_OR_MINUS | singular-endpoint | henn-nonplanar DATA [ORDER] | planar DATA FAMILY | mpl [--short] | banana-equal ORIGINAL_DIR | banana-unequal ORIGINAL_DIR | bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | family-template NAME | prepare CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] | ft CONFIGURATION [--fire PATH] [--cache DIRECTORY] [--henn-basis FILE] [--epsilon-order N] [--endpoint-order N] [--ordinary-order N] [--precision-bits N] [--leaf-digits N] [--basis-scan-seconds N] [--no-numerical-cache]\n";
-      std::cout << "Use --json with prepare/ft for one JSON response; progress is written to stderr.\nPreparation budgets for prepare/ft: --fire-seconds N --level-seconds N --total-seconds N.\n";
-      std::cout << "IBP preparation: --ibp-provider auto|ibp-solver|fire|fire-modular (auto selects ibp-solver unless an explicit FIRE executable is supplied). Native seed controls: --ibp-dots N --ibp-numerators N. --ibp-validation anchored|strict (default anchored: held-out points eliminate the pilot's dependency subset of original equations, with one complete elimination per attempt; strict eliminates every equation at every point).\n";
-      std::cout << "Modular preparation: --fire-prime /path/to/FIRE7p; durable samples under --cache, no symbolic fallback.\n";
-      std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto (default adjoint). Ordinary transport is by Taylor charts; --ft-transport, --ft-transport-digits and --method values were removed.\n";
-      std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";
-      std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds, per level, the search for an internal master basis with a smaller exact connection (cheaper transport) that does not widen the child epsilon window; 0 disables it.\n";
-      std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the persisted internal-basis choice (physical-bases) and the ordinary-transport checkpoints (ordinary-transport). Endpoint series are never cached: recomputing them is faster than verifying a stored copy.\n";
-      std::cout << "IBP cache: verified level closures under --cache are reused whatever --ibp-provider/--ibp-dots/--ibp-numerators say; such reuse is reported on stderr and in the JSON field ibp_cache.\n";
-      std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";
-      std::cout << "Original equal banana: --route real|contour (default real; local +i0 singular matching); --to ENDPOINT (default 20; real route supports endpoints >=20, including historical 32).\n";
-      std::cout << "Original unequal banana: --route momentum-first|mass-first (default momentum-first).\n";
+      std::cout << R"(Usage: diffexp COMMAND [ARGUMENTS]
+
+General
+  --version | --help | backend-info
+  series FILE|-                   exact regular-series coefficients of a JSON request
+  transport FILE|-                numerical transport of a JSON request (docs/transport-protocol.md)
+
+Feynman-trick recursion
+  family-template NAME            print an editable family configuration
+  prepare CONFIGURATION [OPTIONS] exact IBP preparation only
+  ft CONFIGURATION [OPTIONS]      full calculation
+  Use --json with prepare/ft for one JSON response; progress is written to stderr.
+
+  --cache DIRECTORY               exact level closures and numerical checkpoints
+                                  (default: diffexp-exact-cache in the temporary directory)
+  --epsilon-order N               0..100 (default: the configuration's epsilon_order)
+  --endpoint-order N              1..1000 (default 32)
+  --ordinary-order N              8..1000 (default 80)
+  --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis)
+  --leaf-digits N                 1..100000 (default 28)
+  --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
+  --basis-scan-seconds N          0..60 (default 30): per level, the search for an internal master
+                                  basis with a smaller exact connection (cheaper transport) that does
+                                  not widen the child epsilon window; 0 disables it
+  --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the
+                                  persisted internal-basis choice (physical-bases) and the
+                                  ordinary-transport checkpoints (ordinary-transport)
+  --henn-basis FILE               project onto a published canonical basis (Henn X0 geometry only)
+  These ranges are checked before the IBP preparation starts. Ordinary transport is by Taylor charts;
+  --ft-transport, --ft-transport-digits and --method values were removed. Endpoint series are never
+  cached: recomputing them is faster than verifying a stored copy.
+
+IBP preparation (prepare/ft)
+  --ibp-provider auto|ibp-solver|fire|fire-modular
+                                  auto selects the built-in ibp-solver unless --fire names a FIRE
+                                  executable
+  --ibp-dots N --ibp-numerators N seed controls of the built-in solver
+  --ibp-validation anchored|strict
+                                  anchored (default): held-out points eliminate the pilot's
+                                  dependency subset of original equations, with one complete
+                                  elimination per attempt; strict eliminates every equation at
+                                  every point
+  --fire-seconds N                one IBP elimination or FIRE call (default 60)
+  --level-seconds N               one recursion level (default 180)
+  --total-seconds N               the whole preparation (default 600)
+  --fire PATH | --fire-prime PATH FIRE executable | FIRE7p for fire-modular (durable samples under
+                                  --cache, no symbolic fallback)
+  --fire-threads N --fire-simplifier-threads N
+                                  FIRE workers (default 1 each)
+  --fire-memory-mib N             memory budget of one reduction, either provider (default 4096)
+  The same budgets can be set per family as preparation.fire_seconds, level_seconds and
+  total_seconds. Verified level closures under --cache are reused whatever
+  --ibp-provider/--ibp-dots/--ibp-numerators say; such reuse is reported on stderr and in the JSON
+  field ibp_cache.
+
+Built-in checks and original DiffExp examples
+  bubble | sunrise [EPSILON_ORDER] | banana4-oracle [equal|unequal] | mpl [--short]
+  singular-endpoint               JSON chart, sectors, endpoint and plot samples
+  henn-nonplanar DATA [ORDER] | planar DATA 1loop|zmz|mzz|zzz
+  banana-equal ORIGINAL_DIR [--route real|contour] [--to ENDPOINT]
+                                  default route real (local +i0 singular matching) and endpoint 20;
+                                  the real route supports endpoints >= 20, including the historical 32
+  banana-unequal ORIGINAL_DIR [--route momentum-first|mass-first]
+                                  default momentum-first
+)";
     } else {
       std::cerr << "Unknown command: " << command << '\n';
       return 2;

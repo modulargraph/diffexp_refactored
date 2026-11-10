@@ -45,6 +45,10 @@ struct Compiled {
   mutable slong finite_lag_bits=0;
   mutable std::shared_ptr<const FiniteLagPlan> finite_lag;
   mutable std::string finite_lag_reason;
+  // Numerator/denominator polynomials of each rational physical-basis entry,
+  // parallel to numerical_entries(); empty where a coefficient is algebraic.
+  mutable std::shared_ptr<const std::vector<std::pair<std::vector<B>,std::vector<B>>>> rational_entries;
+  mutable slong rational_entries_bits=0;
   ExactField field;
   std::vector<Exact> squares,root_derivatives;
   std::vector<Entry> entries;
@@ -317,11 +321,35 @@ struct Chart {Boundary values,errors,truncation_errors;json::object saved;bool c
 #include "diffexp/detail/finite_lag.ipp"
 #include "diffexp/detail/spectral.ipp"
 namespace diffexp::transport {
+// A rational coefficient a=P/Q turns each product f=a*y into the finite-lag
+// recurrence Q f = P y, whose cost per Taylor order is deg P + deg Q instead
+// of the order itself. Polynomials are extracted once per connection.
+inline const std::vector<std::pair<std::vector<B>,std::vector<B>>>& rational_entry_polynomials(const Compiled& c) {
+  if(!c.rational_entries || c.rational_entries_bits!=B::precision()) {
+    auto out=std::make_shared<std::vector<std::pair<std::vector<B>,std::vector<B>>>>();
+    std::set<std::pair<unsigned,std::string>> seen;
+    for(const auto& e:c.entries) {
+      if(!seen.emplace(e.epsilon,e.coefficient.str()).second)continue;
+      std::pair<std::vector<B>,std::vector<B>> polynomials;
+      if(c.finite_lag_enabled && c.squares.empty()) {
+        try {
+          polynomials={finite_lag_detail::polynomial(e.coefficient.numerator()),finite_lag_detail::polynomial(e.coefficient.denominator())};
+          if(polynomials.first.size()+polynomials.second.size()>66)polynomials={};
+        } catch(const std::runtime_error&) {polynomials={};}
+      }
+      out->push_back(std::move(polynomials));
+    }
+    c.rational_entries=std::move(out);c.rational_entries_bits=B::precision();
+  }
+  return *c.rational_entries;
+}
 // Taylor coefficients of one chart about its centre. The step enters only the
 // final polynomial evaluation, so an accuracy refinement re-evaluates this
 // expansion at a shorter step instead of repeating the recurrence.
 struct SeriesExpansion {
   unsigned order=0,d=0,w=0,columns=1;
+  // Rational entries advanced by the finite-lag product recurrence.
+  unsigned lag_entries=0;
   bool centered=false;
   slong stride=0;
   B center;
@@ -337,7 +365,7 @@ struct SeriesExpansion {
 };
 inline SeriesExpansion series_expand(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
     const std::vector<B>& root_values,const B& center,unsigned order,
-    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true) {
+    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,const B* longest_step=nullptr) {
   const auto bits=B::precision();const unsigned d=c.dimension,w=c.epsilon_order+1;
   // Separate inherited uncertainty before the recurrence can repeatedly use it.
   // This selector changes only the enclosing arithmetic, never accuracy controls.
@@ -362,7 +390,40 @@ inline SeriesExpansion series_expand(const Compiled& c,const std::vector<Numeric
   if(c.canonical) {
     for(unsigned l=0;l<c.letters.size();++l){auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=c.letter_forms[l]?letter:letter.derivative()/letter;
       for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+l*order+n,value.raw());}}
-  } else for(unsigned e=0;e<entries.size();++e) {auto jet=evaluate(entries[e].coefficient,x,vars);for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+e*order+n,value.raw());}}
+  }
+  // Rational entries whose translated denominator keeps a contracting scaled
+  // feedback, sum |Q_m h^m| < |Q_0|, use the finite-lag product recurrence.
+  // Every column of a chart starts from its own input, so a bounded feedback
+  // cannot compound; other entries keep the enclosing dot convolution.
+  struct LagEntry {std::vector<B> p,q;std::vector<unsigned> sources;std::vector<std::vector<unsigned>> rows;std::unique_ptr<AcbArray> history;unsigned depth=0;};
+  std::vector<std::unique_ptr<LagEntry>> lag(c.canonical?0:entries.size());
+  if(!c.canonical && longest_step && order>=8) {
+    const auto& polynomials=rational_entry_polynomials(c);
+    if(polynomials.size()==entries.size())for(unsigned e=0;e<entries.size();++e) {
+      const auto& [p0,q0]=polynomials[e];
+      if(p0.empty() || q0.empty() || 2*(p0.size()+q0.size())>order)continue;
+      auto item=std::make_unique<LagEntry>();
+      item->p=finite_lag_detail::shifted(p0,center);item->q=finite_lag_detail::shifted(q0,center);
+      if(item->q[0].contains_zero())continue;
+      B feedback,power(1);
+      for(unsigned m=1;m<item->q.size();++m){power=power*(*longest_step);feedback+=magnitude(item->q[m]*power);}
+      if(!arb_le(acb_realref(feedback.raw()),acb_realref((magnitude(item->q[0])*B::from_strings("15/16")).raw())))continue;
+      std::map<unsigned,unsigned> ids;
+      for(const auto& [i,j]:entries[e].positions) {
+        auto [it,added]=ids.try_emplace(j,item->sources.size());
+        if(added){item->sources.push_back(j);item->rows.emplace_back();}
+        item->rows[it->second].push_back(i);
+      }
+      item->depth=item->q.size();
+      const std::uint64_t cells=static_cast<std::uint64_t>(item->sources.size())*columns*w*item->depth;
+      // A fixed bound on ring buffers, independent of the map workspace, so
+      // the centered and whole-input variants advance the same recurrence.
+      if(cells>10000000)continue;
+      item->history=std::make_unique<AcbArray>(static_cast<slong>(cells));
+      lag[e]=std::move(item);++out.lag_entries;
+    }
+  }
+  if(!c.canonical)for(unsigned e=0;e<entries.size();++e)if(!lag[e]) {auto jet=evaluate(entries[e].coefficient,x,vars);for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+e*order+n,value.raw());}}
   const slong stride=static_cast<slong>(columns)*d*w;out.stride=stride;
   const auto at=[&](unsigned n,unsigned column,unsigned i,unsigned e){return values.p+n*stride+(static_cast<slong>(column)*d+i)*w+e;};
   for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e) {
@@ -381,7 +442,11 @@ inline SeriesExpansion series_expand(const Compiled& c,const std::vector<Numeric
     auto [it,inserted]=pair_ids.try_emplace({e.letter,e.column},pair_ids.size());entry_pairs.push_back(it->second);
   }
   AcbArray convolutions(pair_ids.size()*w);std::vector<int> convolution_order(pair_ids.size()*w,-1);
+  // The homogeneous map only multiplies the small input deviation. A short
+  // mantissa keeps its enclosure rigorous at a fraction of the cost.
+  const slong full_bits=bits,map_bits=std::min<slong>(full_bits,128);
   for(unsigned n=0;n<order;++n)for(unsigned column=0;column<columns;++column) {
+    const slong bits=column?map_bits:full_bits;
     if(c.canonical) {
       for(unsigned p=0;p<c.canonical_entries.size();++p) {const auto& entry=c.canonical_entries[p];for(unsigned e=1;e<w;++e){
         acb_srcptr convolution;
@@ -398,8 +463,25 @@ inline SeriesExpansion series_expand(const Compiled& c,const std::vector<Numeric
         }
         acb_addmul(at(n+1,column,entry.row,e),convolution,weights[p].raw(),bits);
       }}
-    } else for(unsigned p=0;p<entries.size();++p)for(const auto& [i,j]:entries[p].positions)for(unsigned e=entries[p].epsilon;e<w;++e) {
-      auto target=at(n+1,column,i,e);acb_dot(sum.raw(),target,0,coeffs.p+p*order,1,at(n,column,j,e-entries[p].epsilon),-stride,n+1,bits);acb_swap(target,sum.raw());
+    } else for(unsigned p=0;p<entries.size();++p) {
+      if(lag[p]) {
+        const auto& item=*lag[p];const unsigned depth=item.depth,shift=entries[p].epsilon;
+        for(unsigned source=0;source<item.sources.size();++source)for(unsigned e=shift;e<w;++e) {
+          auto f=item.history->p+((static_cast<slong>(source)*columns+column)*w+e)*depth;
+          acb_zero(sum.raw());
+          for(unsigned m=0;m<item.p.size()&&m<=n;++m)if(!item.p[m].is_zero())
+            acb_addmul(sum.raw(),item.p[m].raw(),at(n-m,column,item.sources[source],e-shift),bits);
+          for(unsigned m=1;m<depth&&m<=n;++m)if(!item.q[m].is_zero())
+            acb_submul(sum.raw(),item.q[m].raw(),f+(n-m)%depth,bits);
+          acb_div(sum.raw(),sum.raw(),item.q[0].raw(),bits);
+          acb_set(f+n%depth,sum.raw());
+          for(auto i:item.rows[source])acb_add(at(n+1,column,i,e),at(n+1,column,i,e),sum.raw(),bits);
+        }
+        continue;
+      }
+      for(const auto& [i,j]:entries[p].positions)for(unsigned e=entries[p].epsilon;e<w;++e) {
+        auto target=at(n+1,column,i,e);acb_dot(sum.raw(),target,0,coeffs.p+p*order,1,at(n,column,j,e-entries[p].epsilon),-stride,n+1,bits);acb_swap(target,sum.raw());
+      }
     }
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e)acb_div_ui(at(n+1,column,i,e),at(n+1,column,i,e),n+1,bits);
   }
@@ -475,7 +557,7 @@ inline Expansion expand(const Compiled& c,const std::vector<NumericalEntry>& ent
     }}
     catch(const std::runtime_error&) { /* Singular/unsupported chart retains the series solver. */ }
   }
-  out.series=series_expand(c,entries,initial,root_values,center,order,center_uncertainty,map_cell_budget,share_canonical);
+  out.series=series_expand(c,entries,initial,root_values,center,order,center_uncertainty,map_cell_budget,share_canonical,use_finite_lag?&step:nullptr);
   first=series_evaluate(*out.series,step,save,digits);
   return out;
 }

@@ -175,6 +175,44 @@ int main() {
     throw std::runtime_error("domain clipping removed a genuine endpoint pole");
   rejected=false;try{transport::run(endpoint_ghost);}catch(const std::runtime_error&){rejected=true;}
   if(!rejected)throw std::runtime_error("genuine singular endpoint accepted after ghost filtering");
+  // Rational physical-basis entries use the finite-lag product recurrence
+  // Q f = P y. It must enclose the same retained polynomial as the dot
+  // convolution, for exact and for uncertain (centered) input.
+  {
+    auto coupled=j::parse(R"JSON({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":1,"column":0,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":0,"column":0,"epsilon":1,"variable":"t","expression":"(3+t)/((2-t)*(5+t^2))"},{"row":1,"column":0,"epsilon":1,"variable":"t","expression":"(3+t)/((2-t)*(5+t^2))"}]})JSON");
+    B::set_precision(384);
+    auto system=transport::compile(coupled.as_object(),2,1,384);auto system_entries=transport::numerical_entries(system);
+    const B quarter=B::from_strings("1/4");
+    for(bool wide:{false,true}) {
+      Boundary start{{B(1),B(0)},{B(0),B(0)}};
+      if(wide)arb_add_error_2exp_si(acb_realref(start[0][0].raw()),-100);
+      transport::Chart lag_chart,dot_chart;
+      auto lagged=transport::expand(system,system_entries,start,{},B(0),quarter,48,false,120,lag_chart);
+      auto dotted=transport::expand(system,system_entries,start,{},B(0),quarter,48,false,120,dot_chart,true,10000000,true,false);
+      if(!lagged.series || lagged.series->lag_entries!=2 || dotted.series->lag_entries!=0)throw std::runtime_error("rational entries did not select the finite-lag product recurrence");
+      if(lag_chart.centered!=wide || dot_chart.centered!=wide)throw std::runtime_error("finite-lag products changed the uncertainty selector");
+      for(unsigned i=0;i<2;++i)for(unsigned e=0;e<2;++e) {
+        if(!acb_overlaps(lag_chart.values[i][e].raw(),dot_chart.values[i][e].raw()))throw std::runtime_error("finite-lag product recurrence disagrees with the convolution");
+        const double lag_radius=mag_get_d(arb_radref(acb_realref(lag_chart.values[i][e].raw()))),dot_radius=mag_get_d(arb_radref(acb_realref(dot_chart.values[i][e].raw())));
+        if(lag_radius>1e3*dot_radius+1e-100)throw std::runtime_error("finite-lag product recurrence lost its enclosure quality");
+      }
+      // y0 +/- y1 = (1+t)^(+/-1) at epsilon^0. The chart is the retained
+      // order-48 polynomial, so compare within its 4^-48 truncation.
+      const auto near=[](const B& value,const B& expected) {
+        return arb_lt(acb_realref(transport::magnitude(value-expected).raw()),acb_realref(B::from_strings("1e-25").raw()));
+      };
+      const B up=B::from_strings("5/4"),down=B::from_strings("4/5");
+      if(!near(lag_chart.values[0][0],(up+down)/B(2)) || !near(lag_chart.values[1][0],(up-down)/B(2)))
+        throw std::runtime_error("finite-lag product recurrence missed the exact solution");
+      auto shorter=transport::evaluate_expansion(system,lagged,B::from_strings("1/8"),false,120);
+      if(!shorter || !near(shorter->values[0][0],(B::from_strings("9/8")+B::from_strings("8/9"))/B(2)))
+        throw std::runtime_error("finite-lag product expansion could not be re-evaluated");
+    }
+    // A denominator whose scaled feedback is not contracting keeps the convolution.
+    transport::Chart guarded;
+    auto far=transport::expand(system,system_entries,{{B(1),B(0)},{B(0),B(0)}},{},B(0),B::from_strings("19/20"),48,false,120,guarded);
+    if(far.series->lag_entries!=1)throw std::runtime_error("finite-lag feedback guard");
+  }
   // A pole on the open path is reported at once, with its location, instead
   // of after the chart clearance has shrunk through the refinement budget.
   auto crossing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"accuracy_goal":20,"paths":{"t":"2*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");

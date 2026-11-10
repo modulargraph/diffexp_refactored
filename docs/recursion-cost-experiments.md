@@ -87,13 +87,15 @@ leaf digits 12) took 1360 s; its value is
 
 ## Making a sample cheap
 
-Three changes followed, each measured on four threads (numerical seconds).
+Three changes followed, each measured on four threads (numerical seconds;
+the banana sample is at epsilon = 1/50 except in the last row, 1/400).
 
 | | Four-loop banana, expanded | Four-loop banana, one sample | Double pentagon, one sample |
 | --- | ---: | ---: | ---: |
 | Start | 168.4 | 63.9 | 1360 |
 | Levels specialised to the numeric dimension | 168.4 | 28.0 | 296 |
 | Probe propagation of uncertainty | 53.9 | 14.4 | 227 |
+| Taylor tail 2^-128 per chart for samples | 53.9 | 10.2 | 181 |
 
 **Specialising.** Order zero of a recursion expanded around a generic
 epsilon = Q depends only on the equations at that dimension. Every level

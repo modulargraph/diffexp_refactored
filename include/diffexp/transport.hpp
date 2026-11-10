@@ -840,7 +840,9 @@ inline json::value run(const json::value& input) {
   if(spectral_candidate && !spectral_requested) {
     const auto forecast=spectral_detail::node_forecast(c,goal);
     if(std::isfinite(forecast))spectral_diagnostic["forecast_nodes"]=forecast;
-    if(forecast>256) {
+    // The refinement ladder stops at 128 nodes and needs three levels to
+    // estimate a tail; a forecast far above that is a wasted attempt.
+    if(forecast>160) {
       spectral_candidate=false;spectral_diagnostic["reason"]="nearby singularities favor local series";
     }
   }

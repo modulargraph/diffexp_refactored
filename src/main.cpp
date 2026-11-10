@@ -169,6 +169,9 @@ int main(int argc, char** argv) {
           // equations with one complete elimination as anchor per attempt.
           // "strict" eliminates every generated equation at every point.
           native.closure_parameter=parameter;
+          // One finite-field elimination may take as long as one provider call:
+          // --fire-seconds bounds it for the built-in solver as it does for FIRE.
+          native.probe_timeout_seconds=options.reduction.provider.timeout_seconds;
           if(ibp_validation!="strict"){native.selected_source_rows=true;native.complete_validation_anchor=true;}
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};

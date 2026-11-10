@@ -15,11 +15,12 @@ struct VerificationLimits {
   bool dense_epsilon_polynomials=false;
   // Cumulative conservative monomial-product estimate, not elapsed CPU work.
   std::function<void(unsigned,unsigned,std::size_t)> column_progress;
-  // Stored columns that contradict the exact verifier are a hard error by
-  // default (fail closed). When set, such records are discarded for this call
-  // and the series is recomputed without reading any checkpoint; the result is
-  // verified like any other, so no unverified coefficient is ever returned.
-  bool recompute_rejected_checkpoints=false;
+  // Stored columns that contradict the exact verifier are never used. By
+  // default they are discarded for this call and the series is recomputed
+  // without reading any checkpoint; the result is verified like any other, so
+  // no unverified coefficient is returned and a damaged cache entry cannot
+  // block its key permanently. Clear this to make such a record a hard error.
+  bool recompute_rejected_checkpoints=true;
 };
 struct Result {
   Series series;
@@ -358,7 +359,10 @@ inline json::object column_payload(unsigned column,std::span<const Series::Term>
 inline std::vector<Series::Term> decode_column(const json::value& value,const Exact& sample,unsigned d,
     unsigned n,unsigned column,std::size_t term_limit) {
   const auto& o=value.as_object();artifacts::detail::keys(o,{"schema","column","terms"});
-  require(artifacts::detail::string(o.at("schema"))=="DiffExp3.ExactAffineFrobeniusColumn/v1" &&
+  // A record stored under this column's identity that describes another
+  // column, or indexes outside the system, contradicts its identity just as a
+  // wrong coefficient does: it is a rejected checkpoint, not a resource limit.
+  matches(artifacts::detail::string(o.at("schema"))=="DiffExp3.ExactAffineFrobeniusColumn/v1" &&
     artifacts::detail::integer(o.at("column"))==column,"cached affine column schema/index mismatch");
   const auto& terms=o.at("terms").as_array();require(terms.size()<=term_limit,"cached affine column term budget exhausted");
   std::map<std::string,Exact> variables;for(unsigned j=0;j<sample.variable_count();++j)variables.emplace(sample.variables()[j],sample.variable(j));
@@ -366,7 +370,7 @@ inline std::vector<Series::Term> decode_column(const json::value& value,const Ex
   for(const auto& entry:terms) {
     const auto& t=entry.as_object();artifacts::detail::keys(t,{"row","column","log_degree","power","slope","coefficient"});
     const auto row=artifacts::detail::integer(t.at("row")),c=artifacts::detail::integer(t.at("column")),l=artifacts::detail::integer(t.at("log_degree"));
-    require(row>=0 && row<d && c==column && l>=0 && static_cast<std::size_t>(l)<=static_cast<std::size_t>(d)*(n+1),"cached affine column term index/log budget");
+    matches(row>=0 && row<d && c==column && l>=0 && static_cast<std::size_t>(l)<=static_cast<std::size_t>(d)*(n+1),"cached affine column term index/log budget");
     auto coefficient=evaluate_exact(data::Reader(artifacts::detail::string(t.at("coefficient"))).read(),sample,variables);
     require(!coefficient.is_zero(),"cached affine column zero term");
     result.push_back({static_cast<unsigned>(row),column,static_cast<unsigned>(l),

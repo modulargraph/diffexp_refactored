@@ -92,4 +92,54 @@ string(JSON probes GET "${resumed}" ibp_statistics fresh_probes)
 if(NOT status EQUAL 0 OR reused LESS 1 OR NOT probes EQUAL 0)
   message(FATAL_ERROR "Native IBP closure cache was not reused")
 endif()
+# A reused closure ignores the IBP provider and seed options. That must be
+# visible, on stderr and in the report, and absent on the cold run.
+string(JSON cold_ignored GET "${native}" ibp_cache provider_options_ignored)
+string(JSON warm_ignored GET "${resumed}" ibp_cache provider_options_ignored)
+string(JSON warm_reused GET "${resumed}" ibp_cache systems_reused)
+if(cold_ignored OR NOT warm_ignored OR NOT warm_reused EQUAL reused OR
+    NOT errors MATCHES "reused from the verified cache" OR NOT errors MATCHES "did not apply")
+  message(FATAL_ERROR "IBP cache reuse did not report the ignored provider options: ${errors} ${resumed}")
+endif()
+# The phases preceding transport are reported separately.
+string(JSON series_seconds GET "${native}" timings endpoint_series_seconds)
+string(JSON operator_seconds GET "${native}" timings endpoint_operator_seconds)
+string(JSON selection_seconds GET "${native}" timings basis_selection_seconds)
+string(JSON skipped_scans GET "${native}" basis_selection scans_skipped)
+if(series_seconds LESS 0 OR operator_seconds LESS 0 OR selection_seconds LESS 0 OR skipped_scans LESS 0)
+  message(FATAL_ERROR "FT phase timings missing: ${native}")
+endif()
 file(REMOVE_RECURSE "${ibp_cache}")
+
+# Numerical options are rejected before the exact preparation starts: no IBP
+# output, and not even the cache directory, may precede the error.
+foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--ordinary-order;4")
+  execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+    ${invalid} --cache "${ibp_cache}-invalid" --no-numerical-cache --json
+    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+  string(JSON error_status GET "${output}" status)
+  if(status EQUAL 0 OR NOT error_status STREQUAL "error" OR errors MATCHES "IBP solver" OR EXISTS "${ibp_cache}-invalid")
+    message(FATAL_ERROR "Invalid FT option ${invalid} was not rejected before preparation: ${errors} ${output}")
+  endif()
+endforeach()
+# The command line accepts every ordinary solver the configuration accepts.
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
+  --epsilon-order 0 --ft-transport ultraspherical --no-numerical-cache --cache "${transient_cache}" --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON completed GET "${output}" status)
+if(NOT status EQUAL 0 OR NOT completed STREQUAL "completed")
+  message(FATAL_ERROR "--ft-transport ultraspherical rejected: ${errors} ${output}")
+endif()
+# An executable the selected provider never runs is reported, not ignored silently.
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
+  --epsilon-order 0 --fire /nonexistent/FIRE --ibp-provider ibp-solver --no-numerical-cache --cache "${transient_cache}" --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT errors MATCHES "--fire is ignored")
+  message(FATAL_ERROR "Ignored --fire was not reported: ${errors} ${output}")
+endif()
+file(REMOVE_RECURSE "${transient_cache}")
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --help OUTPUT_VARIABLE output RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT output MATCHES "--basis-scan-seconds" OR NOT output MATCHES "--no-numerical-cache keeps only the exact IBP level closures" OR
+    NOT output MATCHES "ultraspherical")
+  message(FATAL_ERROR "FT help omits documented options: ${output}")
+endif()

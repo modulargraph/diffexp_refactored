@@ -54,23 +54,30 @@ int main(){try{
     ar::Store corrupt(path/("tamper"+std::to_string(++test)));std::vector<std::string> contents;
     for(unsigned c=0;c<3;++c){auto id=ca::column_identity(base,c);auto record=store.read(id,manifest.parent_content_ids[c]);if(c==1)alter(record.payload.as_object());contents.push_back(corrupt.put(id,demand,record.payload,record.certificate).content_id);}
     if(publish_manifest)corrupt.put(key,demand,manifest.payload,manifest.certificate,contents);
-    rejects([&]{ca::prepare(a,0,1,n,options,corrupt);},why);
+    // A valid-hash record that contradicts the verifier must never reach the
+    // result. Fail-closed mode reports it; the default discards it, recomputes
+    // and returns the independently verified direct recurrence.
+    ca::VerificationLimits strict;strict.recompute_rejected_checkpoints=false;
+    rejects([&]{ca::prepare(a,0,1,n,options,corrupt,strict);},why);
+    auto recovered=ca::prepare(a,0,1,n,options,corrupt);
+    require(!recovered.cache_hit && recovered.columns_rejected>0 && ca::detail::payload(recovered.series)==ca::detail::payload(direct),why);
   };
   tamper([](auto& p){p.at("terms").as_array().back().as_object()["coefficient"]="123";},true,"valid-hash coefficient corruption passed manifest verification");
   tamper([](auto& p){p.at("terms").as_array().back().as_object()["coefficient"]="123";},false,"valid-hash unverified column corruption passed resumed verification");
   tamper([](auto& p){p["column"]=0;},true,"wrong column payload accepted");
   tamper([](auto& p){p.at("terms").as_array().front().as_object()["column"]=0;},false,"wrong column term accepted");
   tamper([](auto& p){p.at("terms").as_array().push_back(p.at("terms").as_array().front());},true,"duplicate column term accepted");
-  // Opt-in recovery from a column checkpoint the verifier rejects. The default
-  // stays fail-closed; with the policy set the stored columns are discarded
-  // and recomputed, and a receiving limit never counts as such a rejection.
+  // Recovery from a column checkpoint the verifier rejects: the stored columns
+  // are discarded and recomputed, the recomputed series supersedes them, and
+  // a receiving limit never counts as such a rejection.
   for(bool resumed:{false,true}) {
     ar::Store healing(path/(resumed?"heal-resumed":"heal-manifest"));
     for(unsigned c=0;c<3;++c){auto id=ca::column_identity(base,c);auto record=store.read(id,manifest.parent_content_ids[c]);
       if(c==1)record.payload.as_object().at("terms").as_array().back().as_object()["coefficient"]="123";healing.put(id,demand,record.payload,record.certificate);}
     // Without this first call only the column checkpoints exist (resumed path);
     // with it an unverified manifest binds them (manifest path).
-    if(!resumed)rejects([&]{ca::prepare(a,0,1,n,options,healing);},"rejected column checkpoint accepted by default");
+    ca::VerificationLimits closed;closed.recompute_rejected_checkpoints=false;
+    if(!resumed)rejects([&]{ca::prepare(a,0,1,n,options,healing,closed);},"rejected column checkpoint accepted in fail-closed mode");
     unsigned solved=0;auto counting=options;counting.column_progress=[&](unsigned,unsigned){++solved;};
     ca::VerificationLimits heal;heal.recompute_rejected_checkpoints=true;
     if(!resumed){auto tight=heal;tight.max_term_products=1;

@@ -9,7 +9,6 @@
 #include <functional>
 
 namespace diffexp {
-namespace cached_affine { struct StateAccess; }
 namespace affine_frobenius_detail {
 using Matrix = fuchsify::Matrix;
 using Poly = std::vector<Exact>;
@@ -735,12 +734,6 @@ public:
     // every lag instead; both feed the same fraction-free recurrence.
     bool finite_lag_recurrence = true;
     unsigned max_clearing_degree = 32;
-    // Accepted for source compatibility only: there is one recurrence and one
-    // projection, so these select nothing.
-    bool univariate_epsilon_recurrence = false;
-    bool univariate_epsilon_projection = false;
-    bool cleared_epsilon_projection = false;
-    bool finite_lag_projection = false;
     std::size_t max_projection_products=100000000;
     std::function<void(unsigned,unsigned)> column_progress;
   };
@@ -792,15 +785,11 @@ public:
   static AffineFrobeniusSeries prepare(const Matrix &a, std::size_t xi,
                                        std::size_t ei, unsigned n,
                                        const Options &options) {
-    return prepare_impl(a,xi,ei,n,options,nullptr);
+    return prepare_impl(a,xi,ei,n,options);
   }
 private:
-  struct ColumnCallbacks {
-    std::function<std::optional<std::vector<Term>>(unsigned)> load;
-    std::function<void(unsigned,std::span<const Term>)> save;
-  };
   static AffineFrobeniusSeries prepare_impl(const Matrix &a,std::size_t xi,
-      std::size_t ei,unsigned n,const Options &options,const ColumnCallbacks* columns) {
+      std::size_t ei,unsigned n,const Options &options) {
     using namespace affine_frobenius_detail;
     using namespace fuchsify::detail;
     if (a.empty() || a[0].empty() || a.size() > options.max_dimension ||
@@ -945,16 +934,6 @@ private:
     const IntegerRecurrence recurrence(g, derivative_lags, out.frame_, ei);
     IntegerPolynomial numerator, denominator, shared, divisor;
     for (unsigned column = 0; column < d; ++column) {
-      if(columns&&columns->load)if(auto restored=columns->load(column)) {
-        if(restored->size()>options.max_terms-out.expansion_.terms.size())throw std::length_error("affine column checkpoint term budget exhausted");
-        for(auto& term:*restored) {
-          if(term.column!=column||term.row>=d||term.coefficient.is_zero())throw std::invalid_argument("affine column checkpoint coordinate mismatch");
-          out.expansion_.terms.push_back(std::move(term));
-        }
-        if(options.column_progress)options.column_progress(column+1,d);
-        continue;
-      }
-      const auto first_term=out.expansion_.terms.size();
       // Columns are independent. Orders beyond this column's absolute
       // frontier cannot contribute to any retained coefficient.
       const auto cutoff=out.frontiers_[column]-out.eigen_[column].power;
@@ -989,7 +968,6 @@ private:
             if (out.expansion_.terms.size() > options.max_terms)
               throw std::length_error("affine Frobenius term budget exhausted");
           });
-      if(columns&&columns->save)columns->save(column,std::span<const Term>(out.expansion_.terms).subspan(first_term));
       if(options.column_progress)options.column_progress(column+1,d);
     }
     return out;
@@ -1374,7 +1352,6 @@ public:
   }
 
 private:
-  friend struct cached_affine::StateAccess;
   Exact zero_;
   unsigned d_ = 0, n_ = 0, finite_lag_rows_ = 0;
   std::size_t xi_ = 0, ei_ = 0;

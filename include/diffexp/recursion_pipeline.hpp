@@ -7,7 +7,7 @@
 #include "diffexp/adjoint_transport.hpp"
 #include "diffexp/affine_operator.hpp"
 #include "diffexp/linear_boundary.hpp"
-#include "diffexp/cached_affine.hpp"
+#include "diffexp/geometry.hpp"
 #include "diffexp/factored_transport.hpp"
 #include "diffexp/adjoint_checkpoint.hpp"
 #include "diffexp/direct_adjoint_endpoint.hpp"
@@ -53,14 +53,13 @@ struct NumericalOptions {
   // Optional read-only diagnostics on completed coefficient maps. This lets
   // callers locate arithmetic loss without materializing the shared source.
   std::function<void(std::size_t,const std::string&,const LaurentRows&)> operator_observer;
-  std::filesystem::path endpoint_cache_directory;
-  // Empty derives endpoint_cache_directory/physical-bases-v1. This persists
-  // exact automatic choices only; explicit physical_bases always take priority.
+  // Persists the exact automatic internal-basis choice of every level, so a
+  // resumed run transports in the same coordinates as its checkpoints. Empty
+  // disables it; explicit physical_bases always take priority.
   std::filesystem::path basis_cache_directory;
   std::filesystem::path ordinary_cache_directory;
   std::size_t ordinary_cache_max_bytes=64*1024*1024;
-  std::size_t endpoint_cache_max_bytes=64*1024*1024;
-  cached_affine::VerificationLimits endpoint_cache_verification;
+  std::size_t basis_cache_max_bytes=64*1024*1024;
   affine_matching::Options matching=[] {affine_matching::Options value;value.max_dimension=256;value.max_epsilon_depth=512;value.numeric_operator_convolution=true;return value;}();
   AffineFrobeniusSeries::Options endpoint=[] {AffineFrobeniusSeries::Options value;value.max_dimension=256;return value;}();
   fuchsify::Options fuchsification=[] {fuchsify::Options value;value.max_dimension=256;return value;}();
@@ -77,7 +76,7 @@ struct NumericalStatistics {
   std::size_t basis_scans=0,basis_selections=0,basis_cache_hits=0,basis_cache_writes=0;
   adjoint_checkpoint::Statistics ordinary_checkpoints;
   std::size_t exact_plans=0,leaf_evaluations=0,numeric_evaluations=0,refinements=0,cache_hits=0;
-  std::size_t endpoint_series_built=0,endpoint_series_reused=0;
+  std::size_t endpoint_series_built=0;
   std::size_t direct_endpoints=0;
   std::size_t adjoint_selections=0,factored_selections=0;
   std::size_t demand_preflights=0,local_operator_reuses=0;
@@ -154,11 +153,6 @@ namespace json=boost::json;
 inline constexpr const char* revision="physical-basis-connection-size-v5";
 inline constexpr const char* verifier="physical-basis-two-inverses-and-gauge-v1";
 inline constexpr const char* scope="exact_physical_basis_change";
-inline std::filesystem::path directory(const NumericalOptions& options) {
-  if(!options.basis_cache_directory.empty())return options.basis_cache_directory;
-  return options.endpoint_cache_directory.empty()?std::filesystem::path{}:
-    options.endpoint_cache_directory/"physical-bases-v1";
-}
 inline artifacts::Identity identity(const Graph& graph,std::size_t depth,
     std::size_t xi,std::size_t ei,const causal::Prescription& prescription) {
   const auto& node=graph.nodes.at(depth);
@@ -324,11 +318,8 @@ class Evaluator {
       throw std::invalid_argument("recursive numerical dimension must be d0-2eps");
     prescription_=options_.causal_prescription?*options_.causal_prescription:example_prescription();
     prescription_.validate(graph_.nodes.size());
-    if(!options_.endpoint_cache_directory.empty())
-      endpoint_store_=std::make_unique<artifacts::Store>(options_.endpoint_cache_directory,options_.endpoint_cache_max_bytes);
-    const auto basis_directory=basis_persistence::directory(options_);
-    if(options_.automatic_basis_scan && !basis_directory.empty())
-      basis_store_=std::make_unique<artifacts::Store>(basis_directory,options_.endpoint_cache_max_bytes);
+    if(options_.automatic_basis_scan && !options_.basis_cache_directory.empty())
+      basis_store_=std::make_unique<artifacts::Store>(options_.basis_cache_directory,options_.basis_cache_max_bytes);
   }
   const NumericalStatistics& statistics()const{return statistics_;}
   const std::vector<BasisSelection>& basis_selections()const{return basis_selections_;}
@@ -485,7 +476,7 @@ class Evaluator {
   const Graph& graph_;NumericalOptions options_;std::size_t xi_,ei_;int d0_;
   causal::Prescription prescription_;
   NumericalStatistics statistics_;
-  std::unique_ptr<artifacts::Store> endpoint_store_,basis_store_;
+  std::unique_ptr<artifacts::Store> basis_store_;
   std::vector<std::unique_ptr<Plan>> plans_;
   std::vector<BasisSelection> basis_selections_;
   std::vector<std::optional<LaurentBoundary>> cache_;
@@ -603,22 +594,7 @@ class Evaluator {
       report(depth,side+" exact endpoint columns "+std::to_string(completed)+"/"+std::to_string(total),high);
     };
     auto series=[&] {
-      Seconds timer{statistics_.endpoint_series_seconds};
-      if(endpoint_store_) {
-        auto verification=options_.endpoint_cache_verification;
-        const auto caller_verification=verification.column_progress;
-        verification.column_progress=[&,caller_verification](unsigned completed,unsigned total,std::size_t products){
-          if(caller_verification)caller_verification(completed,total,products);
-          report(depth,side+" verified endpoint columns "+std::to_string(completed)+"/"+std::to_string(total)+
-            "; polynomial product estimate "+std::to_string(products),high);
-        };
-        auto cached=cached_affine::prepare(fuchs.matrix,xi_,ei_,options_.endpoint_order,endpoint_options,
-            *endpoint_store_,verification);
-        if(cached.cache_hit)++statistics_.endpoint_series_reused;else ++statistics_.endpoint_series_built;
-        report(depth,side+(cached.cache_hit?" endpoint series verified from cache":" endpoint series verified and saved"),high);
-        return std::move(cached.series);
-      }
-      ++statistics_.endpoint_series_built;
+      Seconds timer{statistics_.endpoint_series_seconds};++statistics_.endpoint_series_built;
       return AffineFrobeniusSeries::prepare(fuchs.matrix,xi_,ei_,options_.endpoint_order,endpoint_options);
     }();
     auto physical_gauge=fuchsify::detail::multiply(diagonal,fuchs.transform);

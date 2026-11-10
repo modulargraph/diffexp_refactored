@@ -12,7 +12,7 @@ into an error certificate.
 | Family preparation | `families.hpp`, `ibp.hpp`, `fire.hpp`, `fire_modular.hpp` | Quadratic families, exact IBP witnesses and external C++ reduction |
 | Recursive integration | `merge_pullback.hpp`, `recursion_graph.hpp`, `recursion_pipeline.hpp` | Feynman merging, beta/endpoint functionals and recursive evaluation |
 | Numerical transport | `adjoint_transport.hpp`, `factored_transport.hpp`, `affine_matching.hpp` | Continuation and matching of retained series |
-| Durable work | `artifact_store.hpp`, `level_cache.hpp`, `cached_affine.hpp` | Bounded, verified reuse of exact and numerical artifacts |
+| Durable work | `artifact_store.hpp`, `level_cache.hpp`, `adjoint_checkpoint.hpp` | Bounded, verified reuse of exact and numerical artifacts |
 | User interfaces | `src/main.cpp`, `Mathematica/DiffExp.wl` | CLI and one-process JSON calls |
 
 Feynman recursion distinguishes beta integrals, endpoint limits and direct

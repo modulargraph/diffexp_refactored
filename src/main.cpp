@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
         std::cerr<<"diffexp: warning: --fire-prime is ignored because the IBP provider is "<<ibp_provider<<"; pass --ibp-provider fire-modular to use it\n";
       options.reduction.batch_cache_directory=cache/"fire-batches";
       options.reduction.pending_cache_directory=cache/"fire-pending";
-      if(numerical_cache){numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
+      if(numerical_cache){numerical.basis_cache_directory=cache/"physical-bases";numerical.ordinary_cache_directory=cache/"ordinary-transport";}
       auto requested=configuration.integrals;
       std::optional<diffexp::henn::CanonicalBasis> canonical_basis;
       if(!henn_basis.empty()) {
@@ -255,10 +255,10 @@ int main(int argc, char** argv) {
         report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
         report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
-          {"endpoint_series_reused",stats.endpoint_series_reused},{"child_window_preflights",stats.demand_preflights},
+          {"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
           {"structural_zero_conflicts",stats.structural_zero_conflicts}};
-        progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; verified series reused "<<stats.endpoint_series_reused<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
+        progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
           <<"Ordinary continuation: "<<stats.ordinary_checkpoints.loaded<<" saved arms resumed, "<<stats.ordinary_checkpoints.completed_reused
           <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
@@ -381,7 +381,7 @@ int main(int argc, char** argv) {
       std::cout << "Provider resources: --fire-threads N --fire-simplifier-threads N --fire-memory-mib N. FT execution: --method adjoint|factored|auto (default adjoint). Ordinary transport is by Taylor charts; --ft-transport, --ft-transport-digits and --method values were removed.\n";
       std::cout << "FT ranges: --epsilon-order 0..100, --endpoint-order 1..1000, --ordinary-order 8..1000, --precision-bits 64..1000000 (64..4096 with --henn-basis), --leaf-digits 1..100000. They are checked before the IBP preparation starts.\n";
       std::cout << "FT internal basis: --basis-scan-seconds N (0..60, default 30) bounds, per level, the search for an internal master basis with a smaller exact connection (cheaper transport) that does not widen the child epsilon window; 0 disables it.\n";
-      std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the exact endpoint-series cache (affine-series), the persisted internal-basis choice stored beside it, and the ordinary-transport checkpoints; all three are then recomputed on every run.\n";
+      std::cout << "FT caches: --no-numerical-cache keeps only the exact IBP level closures under --cache. It disables the persisted internal-basis choice (physical-bases) and the ordinary-transport checkpoints (ordinary-transport). Endpoint series are never cached: recomputing them is faster than verifying a stored copy.\n";
       std::cout << "IBP cache: verified level closures under --cache are reused whatever --ibp-provider/--ibp-dots/--ibp-numerators say; such reuse is reported on stderr and in the JSON field ibp_cache.\n";
       std::cout << "Direct singular example: singular-endpoint (JSON chart, sectors, endpoint and plot samples).\n";
       std::cout << "Original equal banana: --route real|contour (default real; local +i0 singular matching); --to ENDPOINT (default 20; real route supports endpoints >=20, including historical 32).\n";

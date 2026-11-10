@@ -46,7 +46,7 @@ int main(int argc,char** argv) {
     const bool all=std::string(argv[1])=="all",cache_only=std::string(argv[3])=="-";
     const bool native_ibp=std::string(argv[3])=="ibp-solver";
     json::object settings;if(argc>9)settings=json::parse(fire::read_text(argv[9])).as_object();
-    const std::set<std::string> allowed{"endpoint_order","ordinary_order","working_bits","leaf_digits","canonical_high","specialize_exact_point","prepare_only","ibp_numerators","ibp_dots","ibp_max_degree","dense_endpoint_verification","univariate_endpoint_projection","cleared_endpoint_projection","finite_lag_endpoint_projection","preflight_depth","evaluate_depth","evaluate_high","direct_endpoint_functionals","transport_capture_directory","transport_capture_stop_after"};
+    const std::set<std::string> allowed{"endpoint_order","ordinary_order","working_bits","leaf_digits","canonical_high","specialize_exact_point","prepare_only","ibp_numerators","ibp_dots","ibp_max_degree","preflight_depth","evaluate_depth","evaluate_high","direct_endpoint_functionals","transport_capture_directory","transport_capture_stop_after"};
     for(const auto& item:settings)if(!allowed.contains(std::string(item.key())) &&
         item.key()!="basis_scan_artifacts" && item.key()!="epsilon_demand_depths" &&
         item.key()!="automatic_basis_scan" &&
@@ -153,21 +153,12 @@ int main(int argc,char** argv) {
     if(!cache_only&&!native_ibp)exact.reduction.provider.executable=argv[3];
     exact.reduction.batch_cache_directory=cache/"fire-batches";
     exact.reduction.pending_cache_directory=cache/"fire-pending";
-    numerical.endpoint_cache_directory=cache/"affine-series";numerical.ordinary_cache_directory=cache/"ordinary-transport";numerical.adjoint.conditioning_stats=&conditioning;
+    numerical.basis_cache_directory=cache/"physical-bases";numerical.ordinary_cache_directory=cache/"ordinary-transport";numerical.adjoint.conditioning_stats=&conditioning;
     if(settings.contains("ordinary_cache_directory"))
       numerical.ordinary_cache_directory=artifacts::detail::string(settings.at("ordinary_cache_directory"));
-    numerical.endpoint.univariate_epsilon_recurrence=true;
-    numerical.endpoint.finite_lag_projection=settings.contains("finite_lag_endpoint_projection")&&settings.at("finite_lag_endpoint_projection").as_bool();
-    numerical.endpoint.cleared_epsilon_projection=settings.contains("cleared_endpoint_projection")&&settings.at("cleared_endpoint_projection").as_bool();
-    numerical.endpoint.univariate_epsilon_projection=settings.contains("univariate_endpoint_projection")&&settings.at("univariate_endpoint_projection").as_bool();
-    // The 69-column N32 endpoint exceeds the generic two-billion-product
-    // receiving cap. This finite resource budget keeps every exact check.
-    numerical.endpoint_cache_verification.dense_epsilon_polynomials=settings.contains("dense_endpoint_verification")&&settings.at("dense_endpoint_verification").as_bool();
-    numerical.endpoint_cache_verification.max_term_products=20000000000ULL;
     report["resources"]=json::object{{"endpoint_order",numerical.endpoint_order},{"ordinary_order",numerical.ordinary_order},
       {"working_bits",numerical.working_bits},{"leaf_digits",numerical.leaf_digits},
-      {"endpoint_coefficient_domain","exact univariate rational epsilon"},{"endpoint_cache_layout","incremental columns v1; legacy read compatibility"},
-      {"endpoint_verification_product_budget",numerical.endpoint_cache_verification.max_term_products},
+      {"endpoint_coefficient_domain","exact univariate rational epsilon"},
       {"physical_endpoint_constraint_tolerance",numerical.endpoint_constraint_tolerance.str()},
       {"endpoint_projection_product_budget",numerical.endpoint.max_projection_products},
       {"endpoint_limit_projection","fixed nonpositive-power sectors; full configured-order series retained for integration"},
@@ -369,7 +360,7 @@ int main(int argc,char** argv) {
       {"functional_reduction_certificates",s.functional_reduction_certificates},
       {"basis_scans",s.basis_scans},{"basis_selections",s.basis_selections},{"basis_cache_hits",s.basis_cache_hits},{"basis_cache_writes",s.basis_cache_writes},
       {"leaf_evaluations",s.leaf_evaluations},{"direct_endpoints",s.direct_endpoints},{"refinements",s.refinements},{"endpoint_series_built",s.endpoint_series_built},
-      {"endpoint_series_reused",s.endpoint_series_reused},{"demand_preflights",s.demand_preflights},{"local_operator_reuses",s.local_operator_reuses},
+{"demand_preflights",s.demand_preflights},{"local_operator_reuses",s.local_operator_reuses},
       {"adjoint_selections",s.adjoint_selections},{"factored_selections",s.factored_selections},
       {"conditioning_method_fallbacks",s.conditioning_method_fallbacks},
       {"endpoint_constraint_rows",s.endpoint_constraint_rows},{"endpoint_constraint_coefficients",s.endpoint_constraint_coefficients},

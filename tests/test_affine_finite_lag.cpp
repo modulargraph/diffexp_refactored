@@ -1,4 +1,4 @@
-#include "diffexp/cached_affine.hpp"
+#include "affine_series_verifier.hpp"
 #include <iostream>
 using namespace diffexp;
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
@@ -44,7 +44,7 @@ int main(){try{
     // Both row forms feed one fraction-free recurrence, so their agreement
     // alone would not test it: the independent verifier checks the polynomial
     // ODE residual, the resonant constants and the Wronskian of the result.
-    cached_affine::detail::verify(matrix,0,1,n,enabled,cached_affine::detail::decode(cached_affine::detail::payload(finite),matrix[0][0],matrix.size(),n,enabled));
+    affine_series_verifier::verify(matrix,0,1,finite,enabled);
     auto fallback=old;fallback.finite_lag_recurrence=true;fallback.max_clearing_degree=0;
     equal(reference,AffineFrobeniusSeries::prepare(matrix,0,1,n,fallback));
   }

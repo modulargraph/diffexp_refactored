@@ -85,8 +85,7 @@ int main(){try{
   const auto cache=std::filesystem::temp_directory_path()/("de3-factored-continuation-"+std::to_string(::getpid()));
   struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code ec;std::filesystem::remove_all(path,ec);}} cleanup{cache};
   // Explicitly exercise local-chart interruption and exact resumption.
-  settings.ordinary_method=recursion::OrdinaryMethod::taylor;
-  settings.endpoint_cache_directory=cache/"endpoints";settings.ordinary_cache_directory=cache/"ordinary";
+  settings.ordinary_cache_directory=cache/"ordinary";
   settings.progress=[](std::size_t,const std::string& phase,int) {
     if(phase=="middle factored transport")throw std::runtime_error("intentional factored interruption");
   };
@@ -100,7 +99,7 @@ int main(){try{
   require(upper(cancellation.values[0][-cancellation.low]-actual.values[0][-actual.low])<1e-14,
       "factored recursion lost correlated child-source cancellation");
   require(shared.statistics().factored_selections>0,"correlated regression bypassed factored integration");
-  settings.ordinary_cache_directory.clear();settings.endpoint_cache_directory.clear();
+  settings.ordinary_cache_directory.clear();
   // A cost estimate can select a poorly conditioned direction. Inject that
   // bounded failure after its lower transport, with a completed cached leaf.
   // Automatic mode must recover once; forced mode and unrelated errors must

@@ -66,7 +66,7 @@ string(JSON persistent GET "${output}" persistent_numerical_cache)
 if(NOT status EQUAL 0 OR persistent OR NOT cached_coefficients STREQUAL transient_coefficients)
   message(FATAL_ERROR "Transient FT mode changed the result: ${errors} ${output}")
 endif()
-if(EXISTS "${transient_cache}/affine-series" OR EXISTS "${transient_cache}/ordinary-transport")
+if(EXISTS "${transient_cache}/physical-bases" OR EXISTS "${transient_cache}/ordinary-transport")
   message(FATAL_ERROR "Transient FT mode created numerical checkpoint directories")
 endif()
 file(REMOVE_RECURSE "${transient_cache}")
@@ -122,14 +122,18 @@ foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--
     message(FATAL_ERROR "Invalid FT option ${invalid} was not rejected before preparation: ${errors} ${output}")
   endif()
 endforeach()
-# The command line accepts every ordinary solver the configuration accepts.
-execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
-  --epsilon-order 0 --ft-transport ultraspherical --no-numerical-cache --cache "${transient_cache}" --json
-  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
-string(JSON completed GET "${output}" status)
-if(NOT status EQUAL 0 OR NOT completed STREQUAL "completed")
-  message(FATAL_ERROR "--ft-transport ultraspherical rejected: ${errors} ${output}")
-endif()
+# Removed options are named as removed, not reported as unknown, and fail
+# before any preparation.
+foreach(removed "--ft-transport;taylor" "--ft-transport-digits;40" "--method;values")
+  execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
+    --epsilon-order 0 ${removed} --no-numerical-cache --cache "${ibp_cache}-invalid" --json
+    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+  string(JSON error_status GET "${output}" status)
+  string(JSON error_message GET "${output}" message)
+  if(status EQUAL 0 OR NOT error_status STREQUAL "error" OR NOT error_message MATCHES "was removed" OR EXISTS "${ibp_cache}-invalid")
+    message(FATAL_ERROR "Removed FT option ${removed} was not rejected as removed: ${errors} ${output}")
+  endif()
+endforeach()
 # An executable the selected provider never runs is reported, not ignored silently.
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/bubble.json"
   --epsilon-order 0 --fire /nonexistent/FIRE --ibp-provider ibp-solver --no-numerical-cache --cache "${transient_cache}" --json
@@ -140,6 +144,6 @@ endif()
 file(REMOVE_RECURSE "${transient_cache}")
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --help OUTPUT_VARIABLE output RESULT_VARIABLE status)
 if(NOT status EQUAL 0 OR NOT output MATCHES "--basis-scan-seconds" OR NOT output MATCHES "--no-numerical-cache keeps only the exact IBP level closures" OR
-    NOT output MATCHES "ultraspherical")
+    NOT output MATCHES "Taylor charts")
   message(FATAL_ERROR "FT help omits documented options: ${output}")
 endif()

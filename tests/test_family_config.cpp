@@ -16,16 +16,25 @@ int main(int argc,char** argv) {
   o["name"]="a-family-never-registered";o["external_gram"]=boost::json::array{boost::json::array{"-3"}};
   for(auto& line:o.at("propagators").as_array())line.as_object()["mass_squared"]="2";
   o["epsilon_order"]=0;o["integrals"]=boost::json::array{boost::json::array{1,1}};
-  o.at("numerical").as_object()["transport"]="spectral";
-  o.at("numerical").as_object()["transport_digits"]=32;
+  o.at("numerical").as_object()["transport"]="taylor";
   o["preparation"]=boost::json::object{{"ibp_provider","ibp-solver"},{"ibp_dots",2},{"ibp_numerators",3}};
   auto config=family_config::parse(document);
   if(config.ibp_provider!="ibp-solver"||config.ibp_dots!=2||config.ibp_numerators!=3)throw std::runtime_error("IBP provider configuration forwarding");
-  if(config.numerical.ordinary_method!=recursion::OrdinaryMethod::spectral || config.numerical.spectral.accuracy_goal!=32)throw std::runtime_error("FT solver configuration forwarding");
-  auto coefficient_document=document;
-  coefficient_document.as_object().at("numerical").as_object()["transport"]="ultraspherical";
-  if(family_config::parse(coefficient_document).numerical.ordinary_method!=recursion::OrdinaryMethod::ultraspherical)
-    throw std::runtime_error("ultraspherical configuration forwarding");
+  // Removed backends and methods are named in the error, never silently
+  // mapped to something else; "taylor" and the old default "auto" still parse.
+  const auto removed=[&](const char* key,boost::json::value value,const char* expected) {
+    auto changed=document;changed.as_object().at("numerical").as_object()[key]=std::move(value);
+    try{family_config::parse(changed);}catch(const std::invalid_argument& error) {
+      if(std::string(error.what()).find(expected)!=std::string::npos)return;
+      throw std::runtime_error(std::string("unhelpful rejection of removed numerical setting: ")+error.what());
+    }
+    throw std::runtime_error(std::string("removed numerical setting accepted: ")+key);
+  };
+  removed("transport","spectral","Taylor transport is the only ordinary method");
+  removed("transport","ultraspherical","Taylor transport is the only ordinary method");
+  removed("transport_digits",32,"Taylor transport is the only ordinary method");
+  removed("method","values","was removed");
+  {auto old_default=document;old_default.as_object().at("numerical").as_object()["transport"]="auto";(void)family_config::parse(old_default);}
   auto graph=recursion::prepare(config.family,config.integrals,config.preparation);
   auto result=recursion::Evaluator(graph,config.numerical).evaluate(0);
   using B=kernel::ComplexBall;B::set_precision(384);B root,argument,atanh;

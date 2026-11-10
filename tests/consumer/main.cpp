@@ -3,7 +3,6 @@
 #include <diffexp/system.hpp>
 #include <diffexp/deepest_beta.hpp>
 #include <diffexp/recursion_leaf.hpp>
-#include <diffexp/cached_affine.hpp>
 #include <diffexp/recursion_pipeline.hpp>
 #include <diffexp/family_config.hpp>
 #include <diffexp/transport.hpp>
@@ -40,11 +39,6 @@ int main() {
   if(std::abs(std::stod(std::string(midpoint))-2)>1e-14)return 1;
   const auto directory=std::filesystem::temp_directory_path()/("diffexp-installed-cache-"+std::to_string(::getpid()));
   struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code error;std::filesystem::remove_all(path,error);}} cleanup{directory};
-  artifacts::Store store(directory);
-  AffineFrobeniusSeries::Matrix endpoint{{Exact(field,"eps/x")}};
-  auto fresh=cached_affine::prepare(endpoint,0,1,4,{},store);
-  auto hit=cached_affine::prepare(endpoint,0,1,4,{},store);
-  if(fresh.cache_hit || !hit.cache_hit || fresh.content_id!=hit.content_id)return 1;
   const auto zero=x.constant(0),one=x.constant(1);
   const auto rows=exact_laurent_rows({{one}},zero,0);
   adjoint_checkpoint::Statistics ordinary_stats;

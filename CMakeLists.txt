@@ -55,8 +55,8 @@ if(BUILD_TESTING)
       gaussian_boundary level_cache scalar_functional recursion_leaf fire_session recursion_pipeline fire_batch_cache)
     list(APPEND native_tests box_oracle henn_boundary causal causal_contour pentagon_oracle affine_operator adjoint_transport linear_boundary
       henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
-      endpoint_gauge scalar_accumulator affine_large fire_backward_checkpoint affine_finite_lag conditioned_adjoint cached_affine
-      factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational cached_affine_columns affine_endpoint_domain)
+      endpoint_gauge scalar_accumulator affine_large fire_backward_checkpoint affine_finite_lag conditioned_adjoint
+      factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational affine_endpoint_domain)
     # Explicit acceptance runner: large FT examples are opt-in, with a caller
     # supplied durable cache and finite preparation budget.
     add_executable(diffexp_check_ft_laptop tools/check_ft_laptop.cpp)
@@ -65,14 +65,6 @@ if(BUILD_TESTING)
     target_link_libraries(diffexp_ft_examples PRIVATE DiffExp::core)
     add_executable(diffexp_henn_ft tools/check_henn_ft.cpp)
     target_link_libraries(diffexp_henn_ft PRIVATE DiffExp::core)
-    add_executable(diffexp_benchmark_affine_domain tools/benchmark_affine_domain.cpp)
-    target_link_libraries(diffexp_benchmark_affine_domain PRIVATE DiffExp::core)
-    add_executable(diffexp_verify_affine_cache tools/verify_affine_cache.cpp)
-    target_link_libraries(diffexp_verify_affine_cache PRIVATE DiffExp::core)
-    add_executable(diffexp_diagnose_endpoint_sectors tools/diagnose_endpoint_sectors.cpp)
-    target_link_libraries(diffexp_diagnose_endpoint_sectors PRIVATE DiffExp::core)
-    add_executable(diffexp_affine_finite_lag_cached tests/test_affine_finite_lag_cached.cpp)
-    target_link_libraries(diffexp_affine_finite_lag_cached PRIVATE DiffExp::core)
     add_executable(diffexp_probe_recursion_stage tools/probe_recursion_stage.cpp)
     target_link_libraries(diffexp_probe_recursion_stage PRIVATE DiffExp::core)
     add_executable(diffexp_replay_adjoint_stage tools/replay_adjoint_stage.cpp)

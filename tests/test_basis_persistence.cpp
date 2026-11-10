@@ -19,10 +19,7 @@ int main(){try{
   causal::Prescription prescription;prescription.f_rim=-1;prescription.levels={{1}};prescription.provenance="synthetic exact cache test";
   recursion::NumericalOptions options;options.endpoint_order=4;options.working_bits=192;
   options.basis_scan_seconds=0.001;options.causal_prescription=prescription;
-  options.endpoint_cache_directory=root/"endpoints";
-  require(bp::directory(options)==options.endpoint_cache_directory/"physical-bases-v1","derived basis directory");
   options.basis_cache_directory=root/"selected";
-  require(bp::directory(options)==options.basis_cache_directory,"explicit basis directory");
   auto id=bp::identity(graph,0,0,1,prescription);
   artifacts::Store store(options.basis_cache_directory);
   require(!bp::load(store,id,node.closure.matrix,0),"unexpected initial cache hit");

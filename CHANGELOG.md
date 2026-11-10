@@ -2,9 +2,36 @@
 
 ## Unreleased
 
+- Feynman-trick pipeline cleanup. Removed: the FT spectral and ultraspherical
+  transport backends (`ft_spectral*.hpp`, `ft_ultraspherical*.hpp`,
+  `diagonal_log_gauge.hpp`; Taylor charts were as fast or faster on every
+  measured leg), the legacy "values" method, the on-disk endpoint-series cache
+  (`cached_affine.hpp`; recomputing is faster than verifying a stored series),
+  the endpoint principal-part plumbing and the tools-only epsilon-basis
+  optimiser of the evaluator, and four no-op endpoint options
+  (`univariate_epsilon_recurrence`, `univariate_epsilon_projection`,
+  `cleared_epsilon_projection`, `finite_lag_projection`).
+- CLI and configuration: `--ft-transport`, `--ft-transport-digits` and
+  `--method values` (config: `numerical.transport` other than
+  `"taylor"`/`"auto"`, `numerical.transport_digits`, `numerical.method:
+  "values"`) are rejected with a "removed" message. JSON: `ft_transport` is now
+  `{method, direct_endpoints}`; `timings.spectral_seconds`,
+  `basis_selection.scans_skipped` and `basis_selection.endpoint_series_reused`
+  are gone. The cache directory holds `physical-bases` (was
+  `affine-series/physical-bases-v1`) and `ordinary-transport`;
+  `--no-numerical-cache` disables these two.
+- The physical-basis scan runs at every level (the two skip rules are gone: a
+  smaller connection pays for the scan there as well), no longer tries pure
+  epsilon rescalings, and builds candidates by rank-one updates.
+- Removed tools: `profile_accepted_chart`, `import_centered_checkpoint`,
+  `benchmark_circuit_source`, `benchmark_adjoint_dot`, `benchmark_affine_domain`,
+  `verify_affine_cache`, `diagnose_endpoint_sectors`, and the
+  `tools/performance` experiments built on removed kernels. The series
+  verifier of the former cache is kept as a test oracle
+  (`tests/affine_series_verifier.hpp`).
 - Feynman-trick charts (`rational_line`, the adjoint executors) estimate their
   Taylor tail and halve a step whose polynomial has not converged at the
-  designed rate; `max_truncation_halvings` bounds it. Adjoint checkpoint
+  designed rate. Adjoint checkpoint
   identities advance, so earlier numerical checkpoints are not reused.
 - The physical-basis scan ranks candidates by the size of their exact
   connection (the child window may not widen), a chosen basis is installed by
@@ -15,23 +42,16 @@
 - Endpoint constants and divergent-mode constraints fail with a clear error
   when the endpoint x order does not reach the fixed sector, instead of being
   silently truncated.
-- A stored endpoint-series column rejected by the verifier is discarded and
-  recomputed by default; fail-closed remains selectable.
 - Built-in IBP preparation plans the derivative closure first, validates
   held-out points on the pilot's dependency subset of original equations with
   one complete elimination per attempt (`--ibp-validation strict` restores a
   complete elimination at every point), skips and records exceptional sample
   points, and continues primal-only when a trace exceeds its budget.
-- Spectral FT transport no longer subdivides on inherited input uncertainty,
-  retries an exhausted coupled-block level by subdivision, honours
-  `matrix_bits`, and pivots in the ultraspherical factorization. The two FT
-  spectral backends share one driver.
 - Generic transport accumulates omitted-tail estimates beside the balls for
   systems with epsilon-zero feedback. Mathematica `ToPiecewise` evaluates saved
   Taylor segments on undeformed paths instead of replaying the transport.
-- CLI: numerical options are validated before IBP preparation, `--ft-transport
-  ultraspherical` is accepted, ignored `--fire` paths and reused level closures
-  are reported, and the JSON report gains per-phase timings, `ibp_cache` and
+- CLI: numerical options are validated before IBP preparation, ignored
+  `--fire` paths and reused level closures are reported, and the JSON report gains per-phase timings, `ibp_cache` and
   `basis_selection`.
 
 - Generic transport reuses a chart's Taylor coefficients when an accuracy

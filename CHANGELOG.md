@@ -6,6 +6,13 @@
   `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.
 - `--fire-seconds` also bounds one elimination of the built-in IBP solver
   (it was fixed at 20 s).
+- A requested recursive anchor (`preparation.anchors`) that is singular in the
+  master basis the reduction selected moves to the simplest regular rational
+  within 3/20 of it, and the progress output says so; it used to abort. The
+  family-name anchor table is gone: ladders live in the family file.
+- The built-in IBP solver reconstructs rational coefficients with up to 32
+  primes (was 8). A preparation that runs out of time names the three budgets
+  in force and how to raise them.
 - Removed the inherited prepared-input compatibility runtime (`src/kernel`,
   `tests/kernel`, the `kernel` command and `DIFFEXP_BUILD_KERNEL_RUNTIME`).
   The exact `series` command now uses a direct recurrence; it also corrects

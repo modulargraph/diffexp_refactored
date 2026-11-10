@@ -9,13 +9,13 @@ int main(int argc,char** argv){try {
     std::vector<std::vector<Exact>> matrix{{Exact(field,"eps/(x-1/3+eps)")}};
     require(!recursion::regular_anchor(matrix,0,1,Rational("1/3")),"higher epsilon coefficients forbid a hidden singular anchor");
     require(recursion::regular_anchor(matrix,0,1,Rational("1/2")),"regular anchor remains available");
-    auto chosen=recursion::select_regular_anchor(matrix,{},0,1,Rational("1/3"),true);
+    auto chosen=recursion::select_regular_anchor(matrix,{},0,1,Rational("1/3"));
     require(chosen!=Rational("1/3")&&recursion::regular_anchor(matrix,0,1,chosen),"automatic anchor moves before child preparation");
-    bool rejected=false;
-    try{recursion::select_regular_anchor(matrix,{},0,1,Rational("1/3"),false);}catch(const std::domain_error&){rejected=true;}
-    require(rejected,"explicit singular anchor fails with its mathematical reason");
-    auto henn=recursion::default_anchors("henn_double_pentagon_x0",7);
-    require(henn.front()==Rational("1/5")&&henn.back()==Rational("4/5")&&std::set<Rational>(henn.begin(),henn.end()).size()==7,"Henn preserves its distinct prescribed anchors");
+    // A requested ladder keeps its other rungs free: 1/2 is skipped, and the
+    // simplest regular rational within reach of 1/3 is 1/4.
+    require(recursion::select_regular_anchor(matrix,{},0,1,Rational("1/3"),{Rational("1/3"),Rational("1/2")})==Rational("1/4"),
+      "a singular requested anchor moves to the simplest regular neighbour");
+    require(recursion::select_regular_anchor(matrix,{},0,1,Rational("2/5"),{Rational("2/5")})==Rational("2/5"),"a regular requested anchor is kept");
   }
   recursion::Options options;
   auto bubble=recursion::prepare(feynman::example_family("bubble"),{},options);

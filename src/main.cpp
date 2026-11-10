@@ -187,13 +187,28 @@ int main(int argc, char** argv) {
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
-      auto graph=diffexp::recursion::prepare(configuration.family,std::move(requested),options,provider,
-        [&](const auto& event) {
-          progress<<"Level "<<event.depth<<": "<<event.physical_propagators<<" propagators; ";
-          if(event.scalar_leaf)progress<<"analytic scalar boundary";
-          else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
-          progress<<"; elapsed "<<event.elapsed_seconds<<" s\n"<<std::flush;
-        });
+      // A spent time budget names the three knobs that bound the preparation.
+      auto graph=[&] {
+        try {
+          return diffexp::recursion::prepare(configuration.family,std::move(requested),options,provider,
+            [&](const auto& event) {
+              progress<<"Level "<<event.depth<<": "<<event.physical_propagators<<" propagators; ";
+              if(event.scalar_leaf)progress<<"analytic scalar boundary";
+              else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
+              progress<<"; elapsed "<<event.elapsed_seconds<<" s\n";
+              if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
+                <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
+              progress<<std::flush;
+            });
+        } catch(const std::runtime_error& error) {
+          const std::string message=error.what();
+          if(message.find("time budget")==std::string::npos && message.find("exhausted reconstruction budget")==std::string::npos)throw;
+          throw std::runtime_error(message+". Preparation budgets in force: --fire-seconds "+std::to_string(options.reduction.provider.timeout_seconds)
+            +" (one IBP elimination), --level-seconds "+std::to_string(options.reduction.total_timeout_seconds)
+            +", --total-seconds "+std::to_string(options.total_timeout_seconds)
+            +"; they can also be set as preparation.fire_seconds, level_seconds and total_seconds in the family file");
+        }
+      }();
       progress<<"Exact recursion prepared: "<<graph.nodes.size()<<" levels, "<<built<<" systems built, "<<reused<<" systems reused.\n"
         <<"Verified cache: "<<std::filesystem::absolute(cache)<<"\n";
       boost::json::object report{{"schema","DiffExp.FeynmanTrick/v1"},{"family",configuration.family.name},

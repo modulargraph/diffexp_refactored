@@ -20,6 +20,8 @@ struct Options {
   // per-variable boxes have a separate cap: a coefficient of low degree in
   // epsilon may need a high degree in the merge parameter alone.
   unsigned max_degree=16,max_variable_degree=64,max_primes=8,probe_timeout_seconds=20;
+  // Primes modulus() can supply; two beyond the reconstruction primes validate.
+  unsigned prime_count=16;
   std::size_t max_samples_per_prime=512;
   std::size_t sample_checkpoint_interval=1;
   // A sample point may be exceptional for reasons unrelated to the reduction: a
@@ -102,7 +104,7 @@ class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||!options_.max_variable_degree||options_.max_variable_degree>256||options_.max_primes<2||options_.max_primes>14||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||!options_.max_variable_degree||options_.max_variable_degree>256||options_.max_primes<2||options_.prime_count<4||options_.max_primes>options_.prime_count-ordinals::validation_primes||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
     if(!options_.sample_checkpoint_interval||options_.sample_checkpoint_interval>4096)throw std::invalid_argument("modular checkpoint interval must be 1..4096");
     if(options_.max_skipped_samples>64)throw std::invalid_argument("modular exceptional-sample budget must be 0..64");
@@ -142,7 +144,7 @@ class Session {
         if(artifacts::detail::string(saved.at("identity"))!=identity||artifacts::detail::string(saved.at("verification"))!="fresh-two-primes-three-points-and-applicable-native-IBPs")throw std::runtime_error("modular completion identity or verification mismatch");
         result.reductions=load_rows(saved);result.success=true;fire_batch::validate(result,basis_,dimension_,requested);
         const auto used=saved.at("reconstruction_primes").to_number<unsigned>();
-        if(used<2||used>14||saved.at("validation_samples").as_array().size()!=ordinals::validation_primes*ordinals::validation_points)throw std::runtime_error("modular completion lacks independent validation samples");
+        if(used<2||used>options_.prime_count-ordinals::validation_primes||saved.at("validation_samples").as_array().size()!=ordinals::validation_primes*ordinals::validation_points)throw std::runtime_error("modular completion lacks independent validation samples");
         std::size_t check_index=0;
         for(unsigned pi=used+1;pi<=used+ordinals::validation_primes;++pi)for(std::size_t j=0;j<ordinals::validation_points;++j) {
           const auto ordinal=ordinals::validation_point(used,j);

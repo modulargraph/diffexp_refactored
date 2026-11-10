@@ -2,6 +2,7 @@
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/merge_pullback.hpp"
+#include <algorithm>
 #include <numeric>
 #include <limits>
 
@@ -19,6 +20,7 @@ struct Event {
   std::size_t requests,sources,masters,provider_passes;
   double elapsed_seconds;
   bool scalar_leaf;
+  Rational requested_anchor,anchor;
 };
 using PrepareLevel=std::function<level::Result(const ibp::PropagatorBasis&,const Exact&,
   const ExactField&,std::size_t,const std::vector<ibp::Integral>&,const level::Options&)>;
@@ -41,17 +43,6 @@ struct Graph {
   std::optional<feynman::ExampleFamily> definition;
 };
 
-inline std::vector<Rational> default_anchors(const std::string& family,unsigned levels) {
-  // Published Henn ladder data: equal anchors hit the x2=x1 singularity.
-  // See Examples/FeynmanTrick/HennDoublePentagonBoundary.wl fixedParameterValues.
-  if(family=="henn_double_pentagon_x0") {
-    if(levels!=7)throw std::invalid_argument("Henn example requires seven recursive levels");
-    return {Rational("1/5"),Rational("3/10"),Rational("2/5"),Rational("1/2"),
-      Rational("3/5"),Rational("7/10"),Rational("4/5")};
-  }
-  return std::vector<Rational>(levels,Rational("1/3"));
-}
-
 // Test the denominator's leading epsilon coefficient, before specializing the
 // rational function. For example eps/(x-a+eps) still forbids an anchor at a:
 // its epsilon-zero value alone would hide the pole of higher coefficients.
@@ -69,12 +60,33 @@ inline bool regular_anchor(const std::vector<std::vector<Exact>>& matrix,
   return true;
 }
 
+// A requested anchor that meets a pole of the closed system is moved to a
+// regular point within 3/20 of it: which points are singular depends on the
+// master basis the reduction selected, which the request cannot know in
+// advance. Small denominators come first, because the anchor enters the
+// kinematics of every deeper level and its height multiplies through their
+// reductions; the other requested anchors are left to their own levels.
 inline Rational select_regular_anchor(const std::vector<std::vector<Exact>>& connection,
     const std::vector<std::vector<Exact>>& observables,std::size_t parameter,std::size_t epsilon,
-    const Rational& preferred,bool allow_alternative) {
+    const Rational& preferred,const std::vector<Rational>& requested={}) {
   const auto regular=[&](const Rational& at){return regular_anchor(connection,parameter,epsilon,at)&&regular_anchor(observables,parameter,epsilon,at);};
   if(regular(preferred))return preferred;
-  if(!allow_alternative)throw std::domain_error("requested recursive anchor "+preferred.str()+" is singular in a connection or observable epsilon coefficient");
+  if(!requested.empty()) {
+    const Rational reach("3/20");
+    for(unsigned denominator=2;denominator<=20;++denominator) {
+      std::vector<std::pair<Rational,Rational>> row;
+      for(unsigned numerator=1;numerator<denominator;++numerator) {
+        if(std::gcd(numerator,denominator)!=1)continue;
+        const auto candidate=Rational(numerator)/Rational(denominator);
+        const auto distance=candidate<preferred?preferred-candidate:candidate-preferred;
+        if(distance>reach||std::find(requested.begin(),requested.end(),candidate)!=requested.end())continue;
+        row.emplace_back(distance,candidate);
+      }
+      std::sort(row.begin(),row.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+      for(const auto& [distance,candidate]:row)if(regular(candidate))return candidate;
+    }
+    throw std::domain_error("requested recursive anchor "+preferred.str()+" and the simple rationals within 3/20 of it are singular in a connection or observable epsilon coefficient");
+  }
   unsigned attempts=0;
   for(unsigned denominator=2;attempts<64;++denominator)for(unsigned numerator=1;numerator<denominator&&attempts<64;++numerator) {
     if(std::gcd(numerator,denominator)!=1)continue;
@@ -168,7 +180,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
         }
         node.observable_rows.push_back(std::move(row));
       }
-      anchor=select_regular_anchor(node.closure.matrix,node.observable_rows,0,1,anchor,options.anchors.empty());
+      anchor=select_regular_anchor(node.closure.matrix,node.observable_rows,0,1,anchor,options.anchors);
       node.anchor=anchor;
       requested=node.closure.ordered_basis;
       // This is the only numerical anchor substitution in exact preparation.
@@ -176,7 +188,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     }
     const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     Event event{depth+1,static_cast<unsigned>(node.merged.physical_count),node.requested.size(),
-      node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf};
+      node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf,anchors[depth],anchor};
     const bool done=node.scalar_leaf || node.closure.ordered_basis.empty();
     graph.nodes.push_back(std::move(node));graph.events.push_back(event);if(progress)progress(event);
     // The total budget gates the START of a level (top of this loop). A level

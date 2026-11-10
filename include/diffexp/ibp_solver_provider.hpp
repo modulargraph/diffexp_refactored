@@ -7,7 +7,7 @@ namespace diffexp::ibp_solver {
 // DiffExp. No momentum reconstruction, renamed family, or new ISP completion.
 struct Options {
   std::filesystem::path cache_directory;
-  unsigned dots=1,numerators=2,max_degree=16,max_variable_degree=64,max_primes=8,probe_timeout_seconds=20;
+  unsigned dots=1,numerators=2,max_degree=16,max_variable_degree=64,max_primes=32,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   // Ordinary samples are recomputed from their deterministic points in a few
   // milliseconds, so only every n-th is made durable; held-out validation
@@ -33,9 +33,11 @@ struct Statistics {
   double generation_seconds=0,elimination_seconds=0,full_solve_seconds=0,trace_learning_seconds=0,trace_replay_seconds=0;
   double selected_solve_seconds=0;
 };
+// Descending primes below 2^61; two beyond the reconstruction primes validate.
+inline constexpr unsigned prime_count=64;
 inline modular::Word prime(unsigned index) {
-  if(index<1||index>16)throw std::invalid_argument("IBP solver prime index must be 1..16");
-  static const auto values=[] {std::array<modular::Word,16> out{};out[0]=2305843009213693951ULL;
+  if(index<1||index>prime_count)throw std::invalid_argument("IBP solver prime index must be 1.."+std::to_string(prime_count));
+  static const auto values=[] {std::array<modular::Word,prime_count> out{};out[0]=2305843009213693951ULL;
     for(unsigned i=1;i<out.size();++i){auto p=out[i-1]-2;while(!n_is_prime(p))p-=2;out[i]=p;}return out;}();
   return values[index-1];
 }
@@ -263,7 +265,7 @@ class Session {
     if(o.selected_source_rows)out.provider_identity+="-fresh-original-row-subset-validation-v1";
     const bool anchored=o.selected_source_rows&&o.complete_validation_anchor;
     if(anchored)out.provider_identity+="-complete-anchor-v1";
-    out.prime_table="descending-61-bit-primes-v1";out.sparse_lifting=true;out.degree_slices=o.degree_slices;
+    out.prime_table="descending-61-bit-primes-v1";out.prime_count=prime_count;out.sparse_lifting=true;out.degree_slices=o.degree_slices;
     out.sample_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits);};
     out.validation_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true);};
     if(anchored)out.anchor_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true,true);};

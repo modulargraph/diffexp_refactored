@@ -19,6 +19,13 @@ same machine at the start of the transport and recursion rework (commit
 | `banana` | 30.1 s | 4.24 s | 0.48 / 3.74 s |
 | `banana_unequal` | 50.7 s | 6.25 s | 0.63 / 5.59 s |
 | `kite` | failed | 13.7 s | 1.00 / 12.6 s |
+| `double_box_planar` | not run | 48.5 s | 5.49 / 42.9 s |
+| `banana4` (four loops, equal masses) | not run | 311 s | 31.5 / 279 s |
+| `banana4_unequal` (four loops, four masses) | not run | 940 s | 33.5 / 906 s |
+
+The `banana4_unequal` run shared the machine with two other jobs. Its finite
+part and that of `banana4` reproduce the stored acceptance references
+(28.647167500233570163... and 39.655526834297652529...).
 
 Nonzero coefficients of the nine examples that ran before agree between the
 two versions to 1e-33 relative or better. The JSON report splits the

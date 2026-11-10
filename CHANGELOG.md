@@ -15,6 +15,13 @@
   bit-identical for any thread count.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
+- Each adjoint transport leg reports its rows, masters, epsilon window, chart
+  counts and time in the progress output.
+- Experimental `diffexp ft --epsilon-shift Q` evaluates the recursion expanded
+  around epsilon = Q, and `tools/experiments/epsilon_sampling.py` fits Laurent
+  coefficients from such samples. It reproduces the expanded recursion but is
+  not faster; see `docs/recursion-cost-experiments.md`, which also records the
+  precision experiments and the cost model of a transport leg.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the
   master basis the reduction selected moves to the simplest regular rational
   within 3/20 of it that has no other real singular point of the level in

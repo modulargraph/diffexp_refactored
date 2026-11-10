@@ -43,7 +43,37 @@ struct Graph {
   std::vector<Node> nodes;
   std::vector<Event> events;
   std::optional<feynman::ExampleFamily> definition;
+  // The epsilon variable of every exact coefficient is epsilon_total minus
+  // this shift: the dimension is d0-2*(epsilon_shift+eps). See shift_epsilon.
+  Rational epsilon_shift=Rational(0);
 };
+
+// The same prepared recursion expanded around epsilon_total=shift instead of
+// zero. At a generic shift nothing is singular at eps=0: no level has epsilon
+// poles, so the order-zero coefficient of a numerical evaluation is the value
+// of the integral in d0-2*shift dimensions and needs only the order-zero
+// coefficients of every deeper level. Sampling several shifts and fitting the
+// Laurent coefficients replaces the widening epsilon windows of the expanded
+// recursion.
+inline Graph shift_epsilon(Graph graph,const Rational& shift) {
+  const auto names=graph.dimension.variables();
+  const auto found=std::find(names.begin(),names.end(),"eps");
+  if(found==names.end())throw std::invalid_argument("epsilon shift needs the eps variable");
+  const std::size_t epsilon=found-names.begin();
+  std::vector<Exact> point;
+  for(std::size_t i=0;i<graph.dimension.variable_count();++i)point.push_back(graph.dimension.variable(i));
+  point[epsilon]=point[epsilon]+graph.dimension.constant(shift);
+  const auto move=[&](Exact& value){if(!value.is_zero())value=value.substitute(point);};
+  move(graph.dimension);
+  for(auto& node:graph.nodes) {
+    for(auto* matrix:{&node.closure.matrix,&node.closure.target_rows,&node.observable_rows})
+      for(auto& row:*matrix)for(auto& value:row)move(value);
+    for(auto& operation:node.operations)for(auto& [integral,value]:operation.source_row)move(value);
+    for(auto& identity:node.closure.source_identities)for(auto& [integral,value]:identity)move(value);
+  }
+  graph.epsilon_shift=graph.epsilon_shift+shift;
+  return graph;
+}
 
 // Test the denominator's leading epsilon coefficient, before specializing the
 // rational function. For example eps/(x-a+eps) still forbids an anchor at a:

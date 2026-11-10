@@ -4,7 +4,7 @@ All four examples completed and passed independent numerical checks. These are f
 
 ## Cold timings
 
-The table below is the original measurement with FIRE. The current code with the built-in IBP solver is faster on all four (3.2 s, 3.2 s, 6.3 s and 49 s on a 4-core Linux container); see [timings](timings.md).
+The table below is the original measurement with FIRE. The current code with the built-in IBP solver is faster on all four (3.2 s, 3.2 s, 6.3 s and 30 s on a 4-core Linux container); see [timings](timings.md).
 
 Apple M4, macOS ARM64, Release C++20 build, FLINT 3.4.0. Runs were sequential, with one FIRE worker and one simplifier worker, fresh exact caches, endpoint order 32, ordinary order 80 and 384 working bits. The outer process-group limit was 600 seconds per integral, including preparation. No precision or order was reduced to make a run fit.
 

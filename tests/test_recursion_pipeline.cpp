@@ -129,6 +129,22 @@ int main(){try {
   auto reference=oracle::equal_banana_bessel(2).value;
   require(upper(result.values[0][-result.low]-reference)<1e-20,"generic sunrise FT recursion disagrees with independent Bessel oracle");
   for(int k=result.low;k<0;++k)require(upper(result.values[0][k-result.low])<1e-20,"physical sunrise spurious Laurent poles must cancel");
+  {
+    // The same recursion expanded around epsilon=1/64: its order-zero value is
+    // the Laurent series at epsilon=0 summed at 1/64, and no level needs more
+    // than order zero of its child.
+    recursion::NumericalOptions plain;plain.working_bits=384;
+    recursion::Evaluator series_solver(graph,plain);const auto series=series_solver.evaluate(10);
+    const Rational shift("1/64");
+    const auto shifted_graph=recursion::shift_epsilon(graph,shift);
+    auto shifted_options=plain;shifted_options.shifted_leaf_orders=24;
+    recursion::Evaluator shifted_solver(shifted_graph,shifted_options);const auto sample=shifted_solver.evaluate(0);
+    require(sample.low==0 && sample.high()==0,"a shifted recursion has no epsilon poles and needs no wider window");
+    B sum(0),power(1),at=B::from_strings(shift.str());
+    for(int k=series.low;k<0;++k)power=power/at;
+    for(int k=series.low;k<=series.high();++k){sum=sum+series.values[0][k-series.low]*power;power=power*at;}
+    require(upper(sample.values[0][0]-sum)<1e-15,"shifted-epsilon sunrise disagrees with its summed Laurent series");
+  }
   // A second, independent linear route: the forward (factored) maps must
   // reproduce the adjoint result for scalar, dotted and endpoint requests.
   recursion::NumericalOptions adjoint;

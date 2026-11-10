@@ -8,6 +8,7 @@
 #include "diffexp/affine_operator.hpp"
 #include "diffexp/linear_boundary.hpp"
 #include "diffexp/geometry.hpp"
+#include <sstream>
 #include "diffexp/factored_transport.hpp"
 #include "diffexp/adjoint_checkpoint.hpp"
 #include "diffexp/direct_adjoint_endpoint.hpp"
@@ -32,6 +33,9 @@ struct NumericalOptions {
   std::map<std::size_t,PhysicalBasisTransform> physical_bases;
   slong working_bits=384;
   unsigned endpoint_order=32,ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
+  // Orders of the leaf's Laurent series at epsilon=0 summed beyond the
+  // requested top when the recursion is expanded around a shifted epsilon.
+  unsigned shifted_leaf_orders=40;
   Rational overlap{Rational("1/16")},contour_height{Rational("1/10")};
   unsigned leaf_digits=28;
   // Consistency of retained physical endpoint constraints, not a proof about
@@ -311,10 +315,12 @@ class Evaluator {
     for(const auto& [depth,basis]:options_.physical_bases)
       if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf)
         throw std::invalid_argument("general physical basis requires a nonleaf depth");
-    auto d=graph_.dimension.substitute(exact_point(graph_.dimension,ei_,graph_.dimension.constant(0))).rational();
+    auto d=graph_.dimension.substitute(exact_point(graph_.dimension,ei_,graph_.dimension.constant(0))).rational()
+      +Rational(2)*graph_.epsilon_shift;
     if(d.str().find('/')!=std::string::npos)throw std::invalid_argument("recursive numerical base dimension must be integral");
     d0_=std::stoi(d.str());
-    if(!(graph_.dimension==graph_.dimension.constant(d0_)-graph_.dimension.constant(2)*graph_.dimension.variable(ei_)))
+    if(!(graph_.dimension==graph_.dimension.constant(d0_)-graph_.dimension.constant(2)*
+        (graph_.dimension.variable(ei_)+graph_.dimension.constant(graph_.epsilon_shift))))
       throw std::invalid_argument("recursive numerical dimension must be d0-2eps");
     prescription_=options_.causal_prescription?*options_.causal_prescription:example_prescription();
     prescription_.validate(graph_.nodes.size());
@@ -400,7 +406,7 @@ class Evaluator {
       feynman::CertifiedDeepestBetaOptions leaf;leaf.working_bits=options_.working_bits;
       leaf.f_rim=prescription_.f_rim;
       leaf.requested_digits=options_.leaf_digits;leaf.taylor_order=options_.ordinary_order;
-      auto value=[&]{Seconds timer{statistics_.leaf_seconds};return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);}();
+      auto value=[&]{Seconds timer{statistics_.leaf_seconds};return shifted_leaf(node,desired_top,leaf);}();
       ++statistics_.leaf_evaluations;
       auto result=LaurentBoundary{value.epsilon_low,std::move(value.values),value.taylor_tail_certified};
       expressions_[depth]=linear_boundary::identity(std::make_shared<const LaurentBoundary>(result),
@@ -500,6 +506,51 @@ class Evaluator {
     auto result=adjoint_checkpoint::transport(matrix,std::move(initial),forcing,vertices,observed,
       {options_.ordinary_cache_directory,options_.ordinary_cache_max_bytes,&statistics_.ordinary_checkpoints});
     if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);
+    return result;
+  }
+  // The scalar leaf is a closed form whose Laurent series at epsilon_total=0
+  // the leaf integrator provides to any order. Around a shifted point its
+  // Taylor coefficients follow by re-expansion: (shift+eps)^k contributes
+  // binomial(k,m)*shift^(k-m) to eps^m, for negative k as well. The series is
+  // cut where the retained terms have decayed below the working precision or
+  // at the epsilon budget.
+  LeafBoundary shifted_leaf(const Node& node,unsigned desired_top,const feynman::CertifiedDeepestBetaOptions& leaf) {
+    if(graph_.epsilon_shift.is_zero())return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);
+    const auto epsilon=graph_.dimension.variable(ei_),shift=graph_.dimension.constant(graph_.epsilon_shift);
+    const auto back=exact_point(graph_.dimension,ei_,epsilon-shift);
+    Node unshifted=node;
+    for(auto& operation:unshifted.operations)for(auto& [integral,value]:operation.source_row)if(!value.is_zero())value=value.substitute(back);
+    const auto dimension=graph_.dimension.constant(d0_)-graph_.dimension.constant(2)*epsilon;
+    const unsigned top=std::min<unsigned>(options_.max_epsilon,desired_top+options_.shifted_leaf_orders);
+    // The leaf integrator applies its absolute tolerance to every order of the
+    // wide series, although order k enters weighted by shift^k: a deep family
+    // may need fewer leaf digits here than in the unshifted recursion.
+    const auto wide=[&] {
+      try{return evaluate_leaf(unshifted,dimension,d0_,top,leaf,options_.gaussian);}
+      catch(const std::runtime_error& error) {
+        throw std::runtime_error(std::string(error.what())+" (the shifted recursion sums the leaf series through order "
+          +std::to_string(top)+": lower the leaf digits or raise the Taylor order)");
+      }
+    }();
+    const slong bits=B::precision();
+    B at;{arb_set_fmpq(acb_realref(at.raw()),graph_.epsilon_shift.raw(),bits);}
+    LeafBoundary result{0,Boundary(wide.values.size(),std::vector<B>(desired_top+1,B(0))),false};
+    for(std::size_t row=0;row<wide.values.size();++row)for(unsigned m=0;m<=desired_top;++m) {
+      auto& sum=result.values[row][m];
+      for(std::size_t index=0;index<wide.values[row].size();++index) {
+        const long k=wide.epsilon_low+static_cast<long>(index);
+        if(wide.values[row][index].is_zero())continue;
+        // binomial(k,m)=k(k-1)...(k-m+1)/m!, exact for every integer k.
+        fmpq_t binomial;fmpq_init(binomial);fmpq_one(binomial);
+        for(unsigned j=0;j<m;++j){fmpq_t factor;fmpq_init(factor);fmpq_set_si(factor,k-static_cast<long>(j),static_cast<ulong>(j)+1);fmpq_mul(binomial,binomial,factor);fmpq_clear(factor);}
+        B term,power;
+        acb_set_fmpq(term.raw(),binomial,bits);fmpq_clear(binomial);
+        if(term.is_zero())continue;
+        acb_pow_si(power.raw(),at.raw(),k-static_cast<long>(m),bits);
+        acb_mul(term.raw(),term.raw(),power.raw(),bits);
+        acb_addmul(sum.raw(),term.raw(),wide.values[row][index].raw(),bits);
+      }
+    }
     return result;
   }
   causal::Prescription example_prescription()const {
@@ -1194,9 +1245,26 @@ class Evaluator {
         const int high=checked(needed_operator+prepared.largest_shift);
         auto stage=adjoint_stage(depth,prepared,high);
         auto settings=options_.adjoint;settings.taylor_order=options_.ordinary_order;
-        report(depth,"lower adjoint transport",high);auto left=ordinary_transport(stage.connection,std::move(stage.lower_endpoint),stage.lower_forcing,stage.lower_path,settings);
+        // What a leg cost and why: its size, path and chart counts.
+        const auto summarized=[&](const char* side,LaurentRows input,const Matrix& forcing,const std::vector<Exact>& vertices) {
+          const auto* stats=settings.conditioning_stats;
+          const AdjointConditioningStats before=stats?*stats:AdjointConditioningStats{};
+          const auto rows=input.coefficients.size(),columns=input.coefficients.empty()?0:input.coefficients[0].size();
+          const int low=input.low,top=input.high;
+          const auto began=std::chrono::steady_clock::now();
+          auto result=ordinary_transport(stage.connection,std::move(input),forcing,vertices,settings);
+          std::ostringstream text;
+          text<<side<<" adjoint transport done: "<<rows<<" rows x "<<columns<<" masters, epsilon "<<low<<".."<<top
+              <<", "<<vertices.size()-1<<" path legs";
+          if(stats)text<<", "<<stats->charts-before.charts<<" charts ("<<stats->centered_charts-before.centered_charts
+              <<" centred, "<<stats->conditioning_subdivisions-before.conditioning_subdivisions<<" halved)";
+          text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
+          report(depth,text.str(),high);
+          return result;
+        };
+        report(depth,"lower adjoint transport",high);auto left=summarized("lower",std::move(stage.lower_endpoint),stage.lower_forcing,stage.lower_path);
         observe_operator(depth,"lower transported operator",left);
-        report(depth,"upper adjoint transport",high);auto right=ordinary_transport(stage.connection,std::move(stage.upper_endpoint),stage.upper_forcing,stage.upper_path,settings);
+        report(depth,"upper adjoint transport",high);auto right=summarized("upper",std::move(stage.upper_endpoint),stage.upper_forcing,stage.upper_path);
         observe_operator(depth,"upper transported operator",right);
         auto transported=add_laurent_rows(left,right);
         if(prepared.has_physical_basis) {

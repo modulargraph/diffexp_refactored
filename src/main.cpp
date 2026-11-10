@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
       bool numerical_cache=true;
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
-      std::string henn_basis;
+      std::string henn_basis,epsilon_shift;
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
@@ -93,6 +93,7 @@ int main(int argc, char** argv) {
         else if(option=="--fire-prime"){fire_prime=option_value;fire_prime_given=true;}
         else if(option=="--cache")cache=option_value;
         else if(option=="--henn-basis")henn_basis=option_value;
+        else if(command=="ft" && option=="--epsilon-shift")epsilon_shift=option_value;
         else if(option=="--fire-seconds" || option=="--level-seconds" || option=="--total-seconds" ||
             option=="--fire-threads" || option=="--fire-simplifier-threads" || option=="--fire-memory-mib") {
           const std::string value=option_value;unsigned number=0;
@@ -244,6 +245,13 @@ int main(int argc, char** argv) {
           progress<<"  adjoint transport at "<<static_cast<int>(100*fraction)<<"% of its path; elapsed "
             <<std::chrono::duration<double>(now-start).count()<<" s\n"<<std::flush;
         };
+        // Experimental: expand around epsilon=shift; coefficient k of the
+        // result then multiplies (epsilon-shift)^k.
+        if(!epsilon_shift.empty()) {
+          if(canonical_basis)throw std::invalid_argument("--epsilon-shift cannot be combined with --henn-basis");
+          graph=diffexp::recursion::shift_epsilon(std::move(graph),diffexp::Rational(epsilon_shift));
+          report["epsilon_shift"]=epsilon_shift;
+        }
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
@@ -415,6 +423,9 @@ Feynman-trick recursion
                                   persisted internal-basis choice (physical-bases) and the
                                   ordinary-transport checkpoints (ordinary-transport)
   --henn-basis FILE               project onto a published canonical basis (Henn X0 geometry only)
+  --epsilon-shift Q               experimental: expand around epsilon=Q (a rational); coefficient k
+                                  then multiplies (epsilon-Q)^k, and order 0 is the integral in
+                                  d0-2Q dimensions (docs/recursion-cost-experiments.md)
   These ranges are checked before the IBP preparation starts. Ordinary transport is by Taylor charts;
   --ft-transport, --ft-transport-digits and --method values were removed. Endpoint series are never
   cached: recomputing them is faster than verifying a stored copy.

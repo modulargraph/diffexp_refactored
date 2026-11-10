@@ -1,9 +1,20 @@
 #pragma once
-#include "diffexp/certified_deepest_beta.hpp"
+#include "diffexp/deepest_beta.hpp"
+#include "diffexp/certified_tail.hpp"
 #include "diffexp/epsilon_gauge.hpp"
-#include "diffexp/certified_rational_transport.hpp"
+#include <optional>
 
 namespace diffexp::feynman {
+struct CertifiedDeepestBetaOptions {
+  slong working_bits=256;
+  unsigned requested_digits=20;
+  unsigned taylor_order=112;
+  unsigned max_charts=512;
+  unsigned max_disk_attempts=32;
+  std::string initial_radius="1/4";
+  int f_rim=1;
+  std::string scalar_split_anchor="1/2";
+};
 namespace scalar_functional_detail {
 struct Weight {
   int x_power,epsilon_power;
@@ -67,16 +78,137 @@ inline std::vector<Exact> epsilon_series(const Exact& rational,std::optional<std
   }
   return result;
 }
+using B=Jet::Ball;using M=NativeTailMagnitude;
+// A rational function of x alone, kept as its two polynomials.
+struct Fraction {data::Expr numerator,denominator;unsigned numerator_degree,denominator_degree;};
+inline Fraction compile_fraction(const Exact& value,std::size_t variable) {
+  const auto degree=[&](const std::vector<Exact::Term>& terms) {
+    unsigned long d=0;for(const auto& term:terms)d=std::max(d,term.powers.at(variable));
+    if(d>100000)throw std::invalid_argument("scalar functional polynomial degree budget");
+    return static_cast<unsigned>(d);
+  };
+  return {data::Reader(value.numerator().str()).read(),data::Reader(value.denominator().str()).read(),
+    degree(value.numerator_terms()),degree(value.denominator_terms())};
+}
+// Both polynomials Taylor-shifted to a chart centre. The shift is exact
+// polynomial arithmetic on balls, so evaluating the shifted coefficients on
+// |z|<=R encloses the function on the whole disk without the dependency of an
+// unshifted evaluation, and the same coefficients give the quotient's series.
+struct Local {
+  Jet numerator,denominator;B centre_value,enclosure;
+  Jet series(unsigned length)const {
+    const auto resized=[&](const Jet& p){Jet out(0,length,p.bits());for(unsigned n=0;n<std::min(length,p.length());++n)out.set(n,p.at(n));return out;};
+    return resized(numerator)/resized(denominator);
+  }
+};
+inline Local localize(const Fraction& f,const B& centre,const B& disk,slong bits) {
+  const auto shifted=[&](const data::Expr& polynomial,unsigned degree) {
+    Jet x(0,std::max(degree+1,2u),bits);x.set(0,centre);x.set(1,B(1));return evaluate(polynomial,x,{{"x",x}});
+  };
+  auto numerator=shifted(f.numerator,f.numerator_degree),denominator=shifted(f.denominator,f.denominator_degree);
+  const auto bound=denominator.evaluate_polynomial(disk);
+  if(bound.contains_zero())throw std::domain_error("scalar functional disk meets a pole");
+  auto enclosure=numerator.evaluate_polynomial(disk)/bound;native_tail_detail::require_finite(enclosure);
+  auto centre_value=numerator.at(0)/denominator.at(0);
+  return {std::move(numerator),std::move(denominator),std::move(centre_value),std::move(enclosure)};
+}
+inline B ball_power(const B& value,long power) {
+  if(power<0 && value.contains_zero())throw std::domain_error("scalar functional disk meets a zero");
+  B out;acb_pow_si(out.raw(),value.raw(),power,B::precision());native_tail_detail::require_finite(out);return out;
+}
+inline B ball_log(const B& value) {
+  if(!native_tail_detail::avoids_principal_cut(value))throw std::domain_error("scalar functional disk leaves the principal logarithmic sheet");
+  B out;acb_log(out.raw(),value.raw(),B::precision());native_tail_detail::require_finite(out);return out;
+}
+// With U=x^p*u, F=x^r*f and weight=eps^s*x^t*W the integrand about a centre
+// c is, exactly,
+//   T_c(eps) * c^t * X^(q+slope*eps) * ur^C * fr^(-A) * exp(eps*L) * W,
+// where T_c is the gamma boundary at c (at the origin: of the regular parts),
+// X=(c+z)/c, ur=u(c+z)/u(c), fr=f(c+z)/f(c), L=(loops+1)*log(ur)-loops*log(fr)
+// and q=C*p-A*r+t. Integer C,A and principal logarithms of ratios equal to one
+// at the centre make every factor single valued on a disk where the ratios
+// avoid the cut; on the real segment through c this is the selected F rim.
+// At the origin X^(q+slope*eps) is kept symbolic by the caller.
+struct Integrand {
+  Fraction u,f;std::vector<Fraction> weights;
+  long c,a,q,slope;unsigned loops;
+};
+// Whole-disk proof of one chart. bounds[k] majorizes on |z|<=R the
+// coefficient of eps^k (counted from the lowest source order) of the analytic
+// factor above, so Cauchy's inequality bounds its Taylor coefficients.
+struct Chart {
+  Local u,f;std::vector<Local> weights;B centre;bool monomial;std::vector<M> bounds;
+};
+inline Chart prove(const Integrand& g,const std::vector<B>& gamma,const B& centre,bool monomial,
+    const M& radius,unsigned depth,slong bits) {
+  B disk(0);radius.add_error_to(disk);
+  Chart chart{localize(g.u,centre,disk,bits),localize(g.f,centre,disk,bits),{},centre,monomial,{}};
+  const auto ur=chart.u.enclosure/chart.u.centre_value,fr=chart.f.enclosure/chart.f.centre_value;
+  auto prefactor=ball_power(ur,g.c)*ball_power(fr,-g.a);
+  auto logarithm=B(static_cast<long>(g.loops)+1)*ball_log(ur)-B(static_cast<long>(g.loops))*ball_log(fr);
+  if(monomial) {
+    const auto ratio=B(1)+disk/centre;
+    prefactor=prefactor*ball_power(ratio,g.q);
+    if(g.slope)logarithm=logarithm+B(g.slope)*ball_log(ratio);
+  }
+  const auto p=M::upper_abs(prefactor),l=M::upper_abs(logarithm);
+  // source[k]=sum_{j+m=k} |gamma_j| p l^m/m!
+  std::vector<M> source(depth+1);M power=M::one();
+  for(unsigned m=0;m<=depth;++m) {
+    for(unsigned j=0;j+m<=depth && j<gamma.size();++j)source[j+m]+=p*power*M::upper_abs(gamma[j]);
+    power=power*l/M::lower_abs(B(static_cast<long>(m)+1));
+  }
+  chart.bounds.assign(depth+1,M());
+  for(unsigned e=0;e<=depth && e<g.weights.size();++e) {
+    chart.weights.push_back(localize(g.weights[e],centre,disk,bits));
+    const auto w=M::upper_abs(chart.weights.back().enclosure);
+    for(unsigned k=e;k<=depth;++k)chart.bounds[k]+=w*source[k-e];
+  }
+  for(const auto& bound:chart.bounds)if(!bound.is_finite())throw std::domain_error("nonfinite scalar functional disk majorant");
+  return chart;
+}
+// Taylor series about the chart centre of the same analytic factor.
+inline std::vector<Jet> expand(const Integrand& g,const Chart& chart,const std::vector<B>& gamma,
+    unsigned depth,unsigned length,slong bits) {
+  const Jet zero(0,length,bits);
+  const auto constant=[&](const B& value){auto j=zero;j.set(0,value);return j;};
+  auto ur=chart.u.series(length)*constant(B(1)/chart.u.centre_value),fr=chart.f.series(length)*constant(B(1)/chart.f.centre_value);
+  auto prefactor=ur.pow(g.c)*fr.pow(-g.a);
+  auto logarithm=constant(B(static_cast<long>(g.loops)+1))*ur.log()-constant(B(static_cast<long>(g.loops)))*fr.log();
+  if(chart.monomial) {
+    auto ratio=constant(B(1));ratio.set(1,B(1)/chart.centre);
+    prefactor=prefactor*ratio.pow(g.q);
+    if(g.slope)logarithm=logarithm+constant(B(g.slope))*ratio.log();
+  }
+  // source[k]=sum_{j+m=k} gamma_j prefactor logarithm^m/m!
+  std::vector<Jet> source(depth+1,zero);auto power=prefactor;
+  for(unsigned m=0;m<=depth;++m) {
+    for(unsigned j=0;j+m<=depth && j<gamma.size();++j)source[j+m]=source[j+m]+power*constant(gamma[j]);
+    if(m<depth)power=power*logarithm*constant(B(1)/B(static_cast<long>(m)+1));
+  }
+  std::vector<Jet> out(depth+1,zero);
+  for(unsigned e=0;e<chart.weights.size();++e) {
+    if(chart.weights[e].enclosure.is_zero())continue;
+    const auto weight=chart.weights[e].series(length);
+    for(unsigned k=e;k<=depth;++k)out[k]=out[k]+weight*source[k-e];
+  }
+  return out;
+}
 } // namespace scalar_functional_detail
 
-// Integrate weight(x,eps)*J_power(x,eps) with exact rational weight combined
-// before deflation/expansion. The retained affine-epsilon endpoint power is
-// integrated meromorphically; the omitted analytic tail is integrated with
-// absolute log-moment bounds. Negative weight epsilon valuation shifts the
-// source and requests gamma lookahead. No quadrature enters the solver.
-// Geometry and weight must belong to the same ExactField, with geometry
-// independent of eps and other parameters specialized. The lower weight must
-// be jointly analytic after monomial deflation; the upper endpoint is regular.
+// Integrate weight(x,eps)*J_power(x,eps) over [0,1] with the exact rational
+// weight combined before deflation/expansion. J is known in closed form at
+// every point, so the interval is covered by charts on which the integrand is
+// expanded exactly and integrated term by term; nothing is transported from
+// chart to chart. The endpoint chart keeps x^(q+slope*eps) symbolic and is
+// integrated meromorphically, with absolute log-moment bounds on its omitted
+// tail; every other chart is a symmetric interval about its centre inside a
+// disk of proved analyticity, with a Cauchy bound on its omitted tail.
+// Negative weight epsilon valuation shifts the source and requests gamma
+// lookahead. No quadrature enters the solver. Geometry and weight must belong
+// to the same ExactField, with geometry independent of eps and other
+// parameters specialized. The lower weight must be jointly analytic after
+// monomial deflation; the upper endpoint is regular.
 namespace scalar_functional_detail {
 inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,int d0,
     unsigned power,const Exact& weight,unsigned epsilon_top,const CertifiedDeepestBetaOptions& options={}) {
@@ -88,7 +220,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
     throw std::invalid_argument("invalid certified scalar functional precision or proof budget");
   const Rational requested_radius(options.initial_radius);
   if(!(Rational(0)<requested_radius))throw std::invalid_argument("certified scalar functional radius must be positive");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
 
   const auto& names=geometry.U.variables();auto found=std::find(names.begin(),names.end(),"x");
   if(found==names.end())throw std::invalid_argument("scalar functional needs the path variable x");
@@ -111,62 +243,22 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   const int low=std::min(0,source_low-static_cast<int>(primitive_poles)),top=static_cast<int>(epsilon_top);
   const unsigned maximum=static_cast<unsigned>(std::max(0,top+static_cast<int>(primitive_poles)-source_low));
   const auto weight_coefficients=scalar_functional_detail::epsilon_series(weights.regular,weights.epsilon_variable,maximum);
-  const auto bits=B::precision();Jet x(0,taylor_order+1,bits);x.set(1,B(1));
-  // Rational constants are evaluated as expressions, not decimal literals.
-  auto constant=[&](const Rational& value){return evaluate(data::Reader(value.str()).read(),x,{});};
-  auto ur=evaluate(data::Reader(uf.regular.str()).read(),x,{{"x",x}})/constant(uf.value);
-  auto fr=evaluate(data::Reader(ff.regular.str()).read(),x,{{"x",x}})/constant(ff.value);
-  auto prefactor=ur.pow(c)*fr.pow(-a);
-  auto logarithm=x.constant(loops+1)*ur.log()-x.constant(loops)*fr.log();
-  std::vector<Jet> weight_jets;
-  for(const auto& coefficient:weight_coefficients)
-    weight_jets.push_back(evaluate(data::Reader(coefficient.str()).read(),x,{{"x",x}}));
-  std::vector<Jet> analytic(maximum+1,x.constant(0));auto log_power=x.constant(1);
-  for(unsigned m=0;m<=maximum;++m) {
-    for(unsigned j=0;j+m<=maximum && j<gamma.coefficients.size();++j) {
-      auto coefficient=x.constant(0);coefficient.set(0,gamma.coefficients[j]);
-      for(unsigned w=0;w+j+m<=maximum;++w)
-        analytic[w+j+m]=analytic[w+j+m]+prefactor*log_power*coefficient*weight_jets[w];
-    }
-    log_power=log_power*logarithm/x.constant(m+1);
+  const auto bits=B::precision();
+  Integrand g{compile_fraction(uf.regular,variable),compile_fraction(ff.regular,variable),{},c,a,q,slope,loops};
+  for(const auto& coefficient:weight_coefficients)g.weights.push_back(compile_fraction(coefficient,variable));
+  Rational radius=requested_radius;std::optional<Chart> origin;
+  for(unsigned attempt=0;attempt<options.max_disk_attempts && !origin;++attempt) {
+    try {origin.emplace(prove(g,gamma.coefficients,B(0),false,M::upper_abs(B::from_strings(radius.str())),maximum,bits));}
+    catch(const std::domain_error&) {radius=radius/Rational(2);}
   }
-  // Whole-disk proof of the ordinary analytic factor, independent of its
-  // stored Taylor coefficients. Principal logs apply to ratios equal to 1
-  // at the origin, so the explicit endpoint x^(q+slope*epsilon) is untouched.
-  using M=NativeTailMagnitude;
-  auto ur_exact=uf.regular/uf.regular.constant(uf.value);
-  auto fr_exact=ff.regular/ff.regular.constant(ff.value);
-  const auto signed_power=[](const Exact& value,long power){return power<0?value.constant(1)/value.pow(-power):value.pow(power);};
-  auto p_exact=signed_power(ur_exact,c)*signed_power(fr_exact,-a);
-  auto p_expression=data::Reader(p_exact.str()).read();
-  auto l_expression=data::Reader(std::to_string(loops+1)+"*Log["+ur_exact.str()+"]-"+std::to_string(loops)+"*Log["+fr_exact.str()+"]").read();
-  Rational radius=requested_radius;M p_bound,l_bound;std::vector<M> weight_bounds;bool disk_proved=false;
-  for(unsigned attempt=0;attempt<options.max_disk_attempts;++attempt) {
-    B disk(0);M::upper_abs(B::from_strings(radius.str())).add_error_to(disk);
-    try {
-      auto p=native_tail_detail::eval(p_expression,disk,"x").value;
-      auto l=native_tail_detail::eval(l_expression,disk,"x").value;
-      native_tail_detail::require_finite(p);native_tail_detail::require_finite(l);
-      std::vector<M> candidate_weights;
-      for(const auto& coefficient:weight_coefficients) {
-        auto value=native_tail_detail::eval(data::Reader(coefficient.str()).read(),disk,"x").value;
-        native_tail_detail::require_finite(value);candidate_weights.push_back(M::upper_abs(value));
-      }
-      p_bound=M::upper_abs(p);l_bound=M::upper_abs(l);weight_bounds=std::move(candidate_weights);disk_proved=true;break;
-    }catch(const std::domain_error&) {radius=radius/Rational(2);}
-  }
-  if(!disk_proved)throw std::runtime_error("certified scalar functional endpoint disk-proof budget exhausted");
+  if(!origin)throw std::runtime_error("certified scalar functional endpoint disk-proof budget exhausted");
+  const auto analytic=expand(g,*origin,gamma.coefficients,maximum,taylor_order+1,bits);
+  const auto& analytic_bounds=origin->bounds;
   const Rational quarter=radius/Rational(4);
   const Rational overlap=quarter<Rational("1/8")?quarter:Rational("1/8");
   const auto h=B::from_strings(overlap.str());
   const long first_denominator=static_cast<long>(taylor_order)+q+2;
   if(first_denominator<=0)throw std::domain_error("certified scalar functional omitted tail is not integrable");
-  std::vector<M> analytic_bounds(maximum+1);M logarithm_factor=M::one();
-  for(unsigned m=0;m<=maximum;++m) {
-    for(unsigned j=0;j+m<=maximum && j<gamma.coefficients.size();++j)
-      for(unsigned w=0;w+j+m<=maximum;++w)analytic_bounds[w+j+m]+=p_bound*logarithm_factor*M::upper_abs(gamma.coefficients[j])*weight_bounds[w];
-    logarithm_factor=logarithm_factor*l_bound/M::lower_abs(B::from_strings(std::to_string(m+1)));
-  }
   std::vector<B> primitive(top-low+1,B(0));B h_power(1);
   for(unsigned n=0;n<=taylor_order;++n) {
     const long denominator=static_cast<long>(n)+q+1;
@@ -177,6 +269,9 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
         if(!slope)throw std::domain_error("scalar functional endpoint has a logarithmic divergence not regulated by epsilon");
         if(exponent-1>=low && exponent-1<=top)primitive[exponent-1-low]+=coefficient/B(slope);
       } else {
+        // x^(D-1) with D<0 and no epsilon in the exponent has no analytic
+        // continuation: h^D/D would be a Hadamard finite part, not the integral.
+        if(denominator<0 && !slope)throw std::domain_error("scalar functional endpoint has a power divergence not regulated by epsilon");
         auto term=coefficient/B(denominator);
         for(int target=exponent;target<=top;++target) {
           if(target>=low)primitive[target-low]+=term;
@@ -219,46 +314,85 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   }
   std::vector<Exact> point;const auto sample=geometry.U;
   for(std::size_t i=0;i<sample.variable_count();++i)point.push_back(sample.variable(i));
-  point[variable]=sample.constant(overlap);
-  auto seed=tadpole(geometry.U.substitute(point).rational(),geometry.F.substitute(point).rational(),v,loops,d0,static_cast<unsigned>(std::max<long>(0,static_cast<long>(epsilon_top)-weights.epsilon_power)),options.f_rim);
-  Boundary boundary{std::vector<B>(top-low+1,B(0)),std::move(matched)};
-  for(int k=std::max(seed.epsilon_low+weights.epsilon_power,low);k<=top;++k)boundary[0][k-low]=seed.coefficients[k-weights.epsilon_power-seed.epsilon_low];
-  auto parameter=sample.variable(variable);
-  auto a0=sample.constant(c)*geometry.U.derivative(variable)/geometry.U-sample.constant(a)*geometry.F.derivative(variable)/geometry.F;
-  auto a1=sample.constant(loops+1)*geometry.U.derivative(variable)/geometry.U-sample.constant(loops)*geometry.F.derivative(variable)/geometry.F;
-  const auto width=sample.constant(Rational(1)-overlap);
-  point[variable]=sample.constant(overlap)+width*parameter;
   // A regular terminal point is a deliberate contract of this scalar path.
-  auto endpoint=point;endpoint[variable]=sample.constant(1);
-  if(geometry.U.substitute(endpoint).is_zero() || geometry.F.substitute(endpoint).is_zero())
+  point[variable]=sample.constant(1);
+  if(geometry.U.substitute(point).is_zero() || geometry.F.substitute(point).is_zero())
     throw std::domain_error("scalar functional needs a separate singular upper-endpoint operation");
-  std::vector<RationalLineEntry> entries{{0,0,0,width*a0.substitute(point)},
-    {0,0,1,width*a1.substitute(point)}};
-  for(unsigned e=0;e<weight_coefficients.size();++e) {
-    auto regular_weight=signed_power(parameter,weights.x_power)*weight_coefficients[e];
-    if(!regular_weight.is_zero())entries.push_back({1,0,e,width*regular_weight.substitute(point)});
+  // Charts from the overlap to the upper endpoint. A chart is the interval
+  // [c-s,c+s] inside the proved disk of radius R=s/rho; with |A_n|<=M/R^n
+  // its odd powers cancel and the omitted even ones are bounded by
+  //   2 M s rho^(N+1) / ((N+2)(1-rho)).
+  // A failed disk proof halves R. rho=sixtyfourths/64 follows the largest
+  // value this bound allows for the proved M, so neither the tail limit nor
+  // the chart length is wasted; the estimate only proposes, the bound decides.
+  if(top>=source_low) {
+    const unsigned depth=static_cast<unsigned>(top-source_low);
+    const auto gamma_order=static_cast<unsigned>(std::max<long>(0,static_cast<long>(epsilon_top)-weights.epsilon_power));
+    const bool monomial=q!=0 || slope!=0;
+    const auto limit=M::lower_abs(B::from_strings("1/1"+std::string(options.requested_digits+20,'0')));
+    const double log_limit=-std::log(10.)*(options.requested_digits+20.);
+    Rational position=overlap,half=(Rational(1)-overlap)/Rational(2);unsigned charts=0;long sixtyfourths=16;
+    while(position<Rational(1)) {
+      if(charts++>=options.max_charts)throw std::runtime_error("certified scalar functional chart budget exhausted before the upper endpoint");
+      const Rational remaining=(Rational(1)-position)/Rational(2);if(remaining<half)half=remaining;
+      std::optional<Chart> chart;TadpoleBoundary seed;B step,scale;std::vector<M> tails;long next_sixtyfourths=sixtyfourths;
+      for(unsigned attempt=0;attempt<options.max_disk_attempts && !chart;++attempt) {
+        const Rational middle=position+half;point[variable]=sample.constant(middle);
+        const auto u_middle=geometry.U.substitute(point).rational(),f_middle=geometry.F.substitute(point).rational();
+        if(f_middle.is_zero() || u_middle<=Rational(0))
+          throw std::domain_error("certified scalar functional real path meets a zero of U or F");
+        try {
+          seed=tadpole(u_middle,f_middle,v,loops,d0,gamma_order,options.f_rim);
+          const auto centre=B::from_strings(middle.str()),disk_radius=B::from_strings((half*Rational(64)/Rational(sixtyfourths)).str());
+          step=B::from_strings(half.str());
+          auto candidate=prove(g,seed.coefficients,centre,monomial,M::upper_abs(disk_radius),depth,bits);
+          acb_pow_si(scale.raw(),centre.raw(),weights.x_power,bits);
+          const auto ratio=M::upper_abs(step)/M::lower_abs(disk_radius);
+          const auto gap=M::positive_difference_lower(M::one(),ratio);
+          if(gap.is_zero())throw std::domain_error("certified scalar functional chart outside its disk");
+          const auto common=M::from_ui(2)*M::upper_abs(scale)*M::upper_abs(step)*ratio.power_upper(taylor_order+1)/
+            (gap*M::lower_abs(B(static_cast<long>(taylor_order)+2)));
+          bool small=true;tails.clear();double largest=0;
+          for(const auto& bound:candidate.bounds){tails.push_back(common*bound);if(!(tails.back()<=limit))small=false;largest=std::max(largest,tails.back().approximate_upper());}
+          // tail ~ rho^(N+2) at fixed R: the admissible rho for this M.
+          const double current=sixtyfourths/64.;
+          const long admissible=largest>0?std::clamp(static_cast<long>(64*0.97*current*std::exp((log_limit-std::log(largest))/(taylor_order+2.))),1L,24L):24L;
+          if(small){chart.emplace(std::move(candidate));next_sixtyfourths=admissible;break;}
+          const long shorter=std::min(admissible,sixtyfourths-1);
+          if(shorter<1)throw std::domain_error("certified scalar functional tail cannot be reduced on this disk");
+          half=half*Rational(shorter)/Rational(sixtyfourths);sixtyfourths=shorter;
+        }catch(const std::domain_error&) {half=half/Rational(2);}
+      }
+      if(!chart)throw std::runtime_error("certified scalar functional chart disk/tail-proof budget exhausted");
+      const auto series=expand(g,*chart,seed.coefficients,depth,taylor_order+1,bits);
+      for(unsigned k=0;k<=depth;++k) {
+        B sum(0),power=step;const auto square=step*step;
+        for(unsigned n=0;n<=taylor_order;n+=2){sum+=series[k].at(n)*power/B(static_cast<long>(n)+1);power=power*square;}
+        sum=B(2)*scale*sum;tails[k].add_error_to(sum);
+        matched[source_low+static_cast<int>(k)-low]+=sum;
+      }
+      // Start the next chart on a disk twice as large, at its admissible rho.
+      position+=half*Rational(2);half=half*Rational(2)*Rational(next_sixtyfourths)/Rational(sixtyfourths);sixtyfourths=next_sixtyfourths;
+    }
   }
-  CertifiedRationalOptions ordinary;
-  ordinary.working_bits=options.working_bits;ordinary.requested_digits=options.requested_digits;
-  ordinary.taylor_order=taylor_order;ordinary.max_charts=options.max_charts;
-  ordinary.max_disk_attempts=options.max_disk_attempts;ordinary.initial_radius=options.initial_radius;
-  auto result=certified_rational_line(entries,boundary,ordinary);
-  return {low,std::move(result.boundary[1]),true};
+  const std::string tolerance="1/1"+std::string(options.requested_digits,'0');
+  if(!native_enclosure_meets_tolerance({matched},tolerance))
+    throw std::runtime_error("certified scalar functional final enclosure does not meet requested absolute digits; arithmetic precision or Taylor order is insufficient");
+  return {low,std::move(matched),true};
 }
 } // namespace scalar_functional_detail
 
 // A singular upper endpoint is handled by reversing the second half of the
-// same scalar functional. Both lower-endpoint primitives must independently
-// certify their full omitted tails; their final sum is checked again. This is
-// the same meromorphic DR endpoint prescription on each arm, with an explicit
-// common F rim. No arbitrary real-interval integration across an interior zero
-// of U/F is admitted by the ordinary disk proofs.
+// same scalar functional. Both arms certify their full omitted tails; their
+// final sum is checked again. This is the same meromorphic DR endpoint
+// prescription on each arm, with an explicit common F rim. No chart crosses an
+// interior zero of U or F: its disk proof cannot succeed there.
 inline LaurentValue certified_scalar_functional(const Symanzik& geometry,unsigned loops,int d0,
     unsigned power,const Exact& weight,unsigned epsilon_top,const CertifiedDeepestBetaOptions& options={}) {
   using B=kernel::ComplexBall;
   if(options.working_bits<64 || options.working_bits>1000000 || !options.requested_digits || options.requested_digits>10000 || (options.f_rim!=1 && options.f_rim!=-1))
     throw std::invalid_argument("invalid scalar functional precision or F rim");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   (void)(geometry.U.constant(0)+geometry.F+weight);
   const auto& names=weight.variables();auto xi=std::find(names.begin(),names.end(),"x"),ei=std::find(names.begin(),names.end(),"eps");
   if(xi==names.end())throw std::invalid_argument("scalar functional requires x");
@@ -301,5 +435,19 @@ inline LaurentValue certified_scalar_functional(const Symanzik& geometry,unsigne
   const std::string tolerance="1/1"+std::string(options.requested_digits,'0');
   if(!native_enclosure_meets_tolerance({result.coefficients},tolerance))throw std::runtime_error("scalar two-endpoint sum does not meet requested absolute digits");
   result.taylor_tail_certified=true;return result;
+}
+// Beta functional of the deepest scalar boundary: the certified scalar
+// functional of power left+right with weight
+// normalization*x^(left-1)*(1-x)^(right-1). A regular upper endpoint is
+// required; the lower F constant uses options.f_rim.
+inline LaurentValue certified_deepest_beta(const Symanzik& geometry,unsigned loops,int d0,
+    unsigned left,unsigned right,unsigned epsilon_top,const CertifiedDeepestBetaOptions& options={}) {
+  if(!left || !right || left>10000 || right>10000)throw std::invalid_argument("invalid deepest beta request");
+  const auto request=merge_request({static_cast<int>(left),static_cast<int>(right)},0,1);
+  const auto& names=geometry.U.variables();auto found=std::find(names.begin(),names.end(),"x");
+  if(found==names.end())throw std::invalid_argument("deepest beta needs the path variable x");
+  const auto x=geometry.U.variable(static_cast<std::size_t>(found-names.begin()));
+  return scalar_functional_detail::integrate_one_sided(geometry,loops,d0,left+right,
+    geometry.U.constant(request.normalization)*x.pow(left-1)*(geometry.U.constant(1)-x).pow(right-1),epsilon_top,options);
 }
 } // namespace diffexp::feynman

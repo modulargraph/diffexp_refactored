@@ -6,7 +6,7 @@
 namespace diffexp::oracle {
 namespace pentagon_detail {
 using B=kernel::ComplexBall;
-struct Precision {slong previous;explicit Precision(slong bits):previous(B::precision()){if(bits<64||bits>4096)throw std::invalid_argument("oracle requires 64..4096 bits");B::set_precision(bits);}~Precision(){B::set_precision(previous);}};
+inline slong checked_bits(slong bits){if(bits<64||bits>4096)throw std::invalid_argument("oracle requires 64..4096 bits");return bits;}
 inline B rational(const Rational& r){return B::from_strings(r.str());}
 inline B logarithm(const Rational& r){B out=rational(r);acb_log(out.raw(),out.raw(),B::precision());return out;}
 }
@@ -17,7 +17,7 @@ inline B logarithm(const Rational& r){B out=rational(r);acb_log(out.raw(),out.ra
 // no exp(gamma*eps). Only s,t,m2<0; real branches, either F rim agrees.
 // These are rigorous coefficient balls, not a finite-epsilon remainder bound.
 inline BoxReference one_mass_box_reference(const Rational& s,const Rational& t,const Rational& m2,slong bits=192) {
-  using namespace pentagon_detail;Precision precision(bits);
+  using namespace pentagon_detail;kernel::PrecisionScope precision(checked_bits(bits));
   if(s.sign()>=0 || t.sign()>=0 || m2.sign()>=0)throw std::invalid_argument("one-mass box requires s,t,m2<0");
   const auto ls=logarithm(-s),lt=logarithm(-t),lm=logarithm(-m2);
   B gamma,pi,ds,dt;arb_const_euler(acb_realref(gamma.raw()),bits);acb_const_pi(pi.raw(),bits);
@@ -49,7 +49,7 @@ struct PentagonReference {
 // lines, strictly negative nonadjacent squared distances. Exceptional/singular
 // kinematics or non-unit loop coefficient are explicitly unsupported.
 inline PentagonReference massless_pentagon_reference(const feynman::Family& family,slong bits=192) {
-  using namespace pentagon_detail;Precision precision(bits);family.validate();
+  using namespace pentagon_detail;kernel::PrecisionScope precision(checked_bits(bits));family.validate();
   if(family.loops!=1 || family.lines.size()!=5)throw std::invalid_argument("pentagon oracle needs one loop and five lines");
   for(const auto& line:family.lines)if(!line.mass_squared.is_zero() || line.loop_coefficients.size()!=1 || line.loop_coefficients[0]!=Rational(1))
     throw std::invalid_argument("pentagon oracle needs massless unit loop-coefficient lines");

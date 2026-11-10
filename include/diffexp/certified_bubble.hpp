@@ -38,11 +38,7 @@ inline CertifiedBubbleResult certified_feynman_bubble(const CertifiedBubbleOptio
   if(!(Rational(0)<initial_radius))throw std::invalid_argument("certified bubble radius must be positive");
   // Existing native scalar arithmetic uses a thread-local ambient precision.
   // Restore it on success and exceptions so this public solver owns its choice.
-  struct PrecisionScope {
-    slong previous;
-    explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}
-    ~PrecisionScope(){B::set_precision(previous);}
-  } precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   ExactField field({"x","I","eps"});Exact x(field,"x");
   auto family=feynman::banana(1,{Rational(1),Rational(1)});
   auto geometry=feynman::symanzik(family,{x,x.constant(1)-x});

@@ -60,7 +60,7 @@ inline LeafBoundary evaluate_leaf(const Node& node,const Exact& dimension,int d0
   if(!node.scalar_leaf || node.merged.physical_count!=1 || node.incoming.physical_count!=2 ||
      node.requested.size()!=node.operations.size() || top>100)
     throw std::invalid_argument("recursive scalar leaf contract");
-  struct PrecisionScope {slong previous;explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}~PrecisionScope(){B::set_precision(previous);}} precision(options.working_bits);
+  kernel::PrecisionScope precision(options.working_bits);
   const auto& names=dimension.variables();auto xi=std::find(names.begin(),names.end(),"x");
   if(xi==names.end())throw std::invalid_argument("recursive leaf requires path variable x");
   const auto x=dimension.variable(xi-names.begin());

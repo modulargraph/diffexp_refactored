@@ -431,6 +431,20 @@ class ComplexBall {
   acb_t value_;
 };
 
+// The working precision is thread-local ambient state. A solver that owns its
+// precision holds one of these so success and exceptions both restore the
+// caller's value. The default form restores without changing the precision.
+struct PrecisionScope {
+  slong previous;
+  PrecisionScope() : previous(ComplexBall::precision()) {}
+  explicit PrecisionScope(slong bits) : previous(ComplexBall::precision()) {
+    ComplexBall::set_precision(bits);
+  }
+  ~PrecisionScope() { ComplexBall::set_precision(previous); }
+  PrecisionScope(const PrecisionScope&) = delete;
+  PrecisionScope& operator=(const PrecisionScope&) = delete;
+};
+
 template <typename Scalar>
 struct ScalarTraits;
 

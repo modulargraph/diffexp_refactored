@@ -175,6 +175,160 @@ int main() {
     throw std::runtime_error("domain clipping removed a genuine endpoint pole");
   rejected=false;try{transport::run(endpoint_ghost);}catch(const std::runtime_error&){rejected=true;}
   if(!rejected)throw std::runtime_error("genuine singular endpoint accepted after ghost filtering");
+  // Rational physical-basis entries use the finite-lag product recurrence
+  // Q f = P y. It must enclose the same retained polynomial as the dot
+  // convolution, for exact and for uncertain (centered) input.
+  {
+    auto coupled=j::parse(R"JSON({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":1,"column":0,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":0,"column":0,"epsilon":1,"variable":"t","expression":"(3+t)/((2-t)*(5+t^2))"},{"row":1,"column":0,"epsilon":1,"variable":"t","expression":"(3+t)/((2-t)*(5+t^2))"}]})JSON");
+    B::set_precision(384);
+    auto system=transport::compile(coupled.as_object(),2,1,384);auto system_entries=transport::numerical_entries(system);
+    const B quarter=B::from_strings("1/4");
+    for(bool wide:{false,true}) {
+      Boundary start{{B(1),B(0)},{B(0),B(0)}};
+      if(wide)arb_add_error_2exp_si(acb_realref(start[0][0].raw()),-100);
+      transport::Chart lag_chart,dot_chart;
+      auto lagged=transport::expand(system,system_entries,start,{},B(0),quarter,48,false,120,lag_chart);
+      auto dotted=transport::expand(system,system_entries,start,{},B(0),quarter,48,false,120,dot_chart,true,10000000,true,false);
+      if(!lagged.series || lagged.series->lag_entries!=2 || dotted.series->lag_entries!=0)throw std::runtime_error("rational entries did not select the finite-lag product recurrence");
+      if(lag_chart.centered!=wide || dot_chart.centered!=wide)throw std::runtime_error("finite-lag products changed the uncertainty selector");
+      for(unsigned i=0;i<2;++i)for(unsigned e=0;e<2;++e) {
+        if(!acb_overlaps(lag_chart.values[i][e].raw(),dot_chart.values[i][e].raw()))throw std::runtime_error("finite-lag product recurrence disagrees with the convolution");
+        const double lag_radius=mag_get_d(arb_radref(acb_realref(lag_chart.values[i][e].raw()))),dot_radius=mag_get_d(arb_radref(acb_realref(dot_chart.values[i][e].raw())));
+        if(lag_radius>1e3*dot_radius+1e-100)throw std::runtime_error("finite-lag product recurrence lost its enclosure quality");
+      }
+      // y0 +/- y1 = (1+t)^(+/-1) at epsilon^0. The chart is the retained
+      // order-48 polynomial, so compare within its 4^-48 truncation.
+      const auto near=[](const B& value,const B& expected) {
+        return arb_lt(acb_realref(transport::magnitude(value-expected).raw()),acb_realref(B::from_strings("1e-25").raw()));
+      };
+      const B up=B::from_strings("5/4"),down=B::from_strings("4/5");
+      if(!near(lag_chart.values[0][0],(up+down)/B(2)) || !near(lag_chart.values[1][0],(up-down)/B(2)))
+        throw std::runtime_error("finite-lag product recurrence missed the exact solution");
+      auto shorter=transport::evaluate_expansion(system,lagged,B::from_strings("1/8"),false,120);
+      if(!shorter || !near(shorter->values[0][0],(B::from_strings("9/8")+B::from_strings("8/9"))/B(2)))
+        throw std::runtime_error("finite-lag product expansion could not be re-evaluated");
+    }
+    // A denominator whose scaled feedback is not contracting keeps the convolution.
+    transport::Chart guarded;
+    auto far=transport::expand(system,system_entries,{{B(1),B(0)},{B(0),B(0)}},{},B(0),B::from_strings("19/20"),48,false,120,guarded);
+    if(far.series->lag_entries!=1)throw std::runtime_error("finite-lag feedback guard");
+  }
+  // Systems with epsilon-zero feedback accumulate omitted-tail estimates
+  // beside the balls. The folded endpoint radius must still cover the actual
+  // truncation error, also when the solution grows by e^30 along the path.
+  {
+    auto feedback=j::parse(R"JSON({"dimension":2,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":25,"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"},{"row":1,"column":0,"epsilon":0,"variable":"t","expression":"1/(1+t)"}],"boundary":[["1"],["0"]]})JSON");
+    auto folded=transport::run(feedback).as_object();
+    if(folded.at("recurrence").as_object().at("tail_estimates")!="accumulated")throw std::runtime_error("coupled system did not accumulate tail estimates separately");
+    B::set_precision(256);
+    const auto covered=[&](const j::object& output,unsigned row,const B& exact,const char* goal_bound) {
+      const auto& cell=output.at("values").as_array()[row].as_array()[0].as_object();
+      B mid=B::from_strings(transport::string(cell.at("real_midpoint"))),radius=B::from_strings(transport::string(cell.at("radius")));
+      auto miss=transport::magnitude(mid-exact);
+      return arb_le(acb_realref(miss.raw()),acb_realref(radius.raw())) &&
+        arb_lt(acb_realref(radius.raw()),acb_realref((B::from_strings(goal_bound)*(transport::magnitude(exact)+B(1))).raw())) && !radius.is_zero();
+    };
+    if(!covered(folded,0,B::from_strings("5/4"),"1e-25") || !covered(folded,1,B::from_strings("3/4"),"1e-25"))
+      throw std::runtime_error("accumulated tail estimate does not cover the truncation error");
+    auto growing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"paths":{"t":"x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"30"}],"boundary":[["1"]]})JSON");
+    auto grown=transport::run(growing).as_object();B e30;acb_exp(e30.raw(),B(30).raw(),256);
+    if(grown.at("recurrence").as_object().at("tail_estimates")!="accumulated" || !covered(grown,0,e30,"1e-20"))
+      throw std::runtime_error("accumulated tail estimate lost a growing solution");
+    // Canonical and triangular systems keep propagating estimates in the balls.
+    auto triangular_run=j::parse(R"JSON({"dimension":2,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":0,"variable":"t","expression":"1/(1+t)"}],"boundary":[["0"],["1"]]})JSON");
+    auto propagated=transport::run(triangular_run).as_object();B log2;acb_log(log2.raw(),B(2).raw(),256);
+    if(propagated.at("recurrence").as_object().at("tail_estimates")!="propagated" || !covered(propagated,0,log2,"1e-20"))
+      throw std::runtime_error("triangular system changed its tail propagation");
+  }
+  // Optional segment saving: the saved series reproduce interior values at
+  // the requested digits, and an exhausted output budget drops the segments
+  // without discarding the transport.
+  {
+    auto plotted=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":30,"working_bits":256,"accuracy_goal":20,"save_segments":true,"save_segments_optional":true,"segment_digits":25,"paths":{"t":"x/2"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
+    auto saved_run=transport::run(plotted).as_object();
+    if(!saved_run.at("segments_complete").as_bool() || saved_run.at("segments").as_array().empty())throw std::runtime_error("optional segments were not saved");
+    const auto number=[](const j::value& v){return std::stod(std::string(v.as_string()));};
+    double previous_end=0;
+    for(const double x:{0.0,0.3,0.71,1.0}) {
+      bool found=false;
+      for(const auto& item:saved_run.at("segments").as_array()) {
+        const auto& segment=item.as_object();const double begin=number(segment.at("start")),finish=number(segment.at("end")),center=number(segment.at("center"));
+        if(x<begin || x>finish || found)continue;
+        const auto& coefficients=segment.at("coefficients").as_array();double value=0;
+        for(std::size_t n=coefficients.size();n-->0;){
+          const auto& cell=coefficients[n].as_array()[0].as_array()[0].as_object();
+          if(cell.at("real_midpoint").as_string().size()>40)throw std::runtime_error("segment_digits was ignored");
+          value=value*(x-center)+number(cell.at("real_midpoint"));}
+        if(std::abs(value-1/(1-x/2))>1e-13)throw std::runtime_error("saved segment does not reproduce the interior solution");
+        found=true;
+      }
+      if(!found)throw std::runtime_error("saved segments do not cover the path");
+    }
+    for(const auto& item:saved_run.at("segments").as_array()) {
+      if(std::abs(number(item.as_object().at("start"))-previous_end)>1e-12)throw std::runtime_error("saved segments are not contiguous");
+      previous_end=number(item.as_object().at("end"));
+    }
+    if(std::abs(previous_end-1)>1e-12)throw std::runtime_error("saved segments stop before the endpoint");
+    auto overflow=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":1000,"working_bits":100000,"save_segments":true,"save_segments_optional":true,"paths":{"t":"x"},"entries":[],"boundary":[["1"]]})JSON");
+    auto dropped=transport::run(overflow).as_object();
+    if(dropped.at("segments_complete").as_bool() || !dropped.at("segments").as_array().empty() || std::abs(real(j::value(dropped))-1)>1e-15)
+      throw std::runtime_error("optional segment budget did not degrade to an unsaved transport");
+  }
+  // Canonical systems outside the finite-lag regime use charts centred between
+  // input and output. They must reproduce analytic values, including a
+  // continued square root on a complex path, uncertain input and a goal that
+  // forces a closer centre, and agree with the finite-lag recurrence.
+  {
+    B::set_precision(384);
+    auto dilog=j::parse(R"JSON({"dimension":3,"epsilon_order":2,"taylor_order":30,"working_bits":384,"accuracy_goal":30,"recurrence":"series","paths":{"t":"3*x/4"},"entries":[{"row":1,"column":0,"epsilon":1,"variable":"dlog","expression":"1-t","coefficient":"-1"},{"row":2,"column":1,"epsilon":1,"variable":"dlog","expression":"t","coefficient":"1"}],"boundary":[["1","0","0"],["0","0","0"],["0","0","0"]]})JSON");
+    const auto ball=[](const j::object& output,unsigned row,unsigned epsilon) {
+      const auto& cell=output.at("values").as_array()[row].as_array()[epsilon].as_object();
+      B value=B::from_strings(transport::string(cell.at("real_midpoint")),transport::string(cell.at("imaginary_midpoint"))),radius=B::from_strings(transport::string(cell.at("radius")));
+      arb_add_error(acb_realref(value.raw()),acb_realref(radius.raw()));arb_add_error(acb_imagref(value.raw()),acb_realref(radius.raw()));return value;
+    };
+    const auto tight=[](const B& value,const char* bound){return arb_lt(acb_realref(transport::arithmetic_error(value).raw()),acb_realref(B::from_strings(bound).raw()));};
+    auto centred=transport::run(dilog).as_object();const auto& how=centred.at("recurrence").as_object();
+    if(how.at("centered_charts").as_uint64()==0 || how.at("series_charts").as_uint64()!=0 || how.at("finite_lag_charts").as_uint64()!=0)
+      throw std::runtime_error("canonical series transport did not use centred charts");
+    B li2,log4;acb_polylog_si(li2.raw(),2,B::from_strings("3/4").raw(),384);acb_log(log4.raw(),B(4).raw(),384);
+    if(!acb_contains(ball(centred,2,2).raw(),li2.raw()) || !acb_contains(ball(centred,1,1).raw(),log4.raw()) || !tight(ball(centred,2,2),"1e-30"))
+      throw std::runtime_error("centred canonical charts missed the dilogarithm");
+    dilog.as_object()["recurrence"]="taylor";auto lagged=transport::run(dilog).as_object();
+    if(lagged.at("recurrence").as_object().at("finite_lag_charts").as_uint64()==0 || !acb_overlaps(ball(lagged,2,2).raw(),ball(centred,2,2).raw()))
+      throw std::runtime_error("centred and finite-lag canonical transports disagree");
+    if(centred.at("charts").as_uint64()>=lagged.at("charts").as_uint64())throw std::runtime_error("centred charts did not lengthen the steps");
+    auto root=j::parse(R"JSON({"dimension":2,"epsilon_order":2,"taylor_order":24,"working_bits":384,"accuracy_goal":28,"recurrence":"series","paths":{"t":"x/2+I*x*(1-x)/4"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"t+Sqrt[1+t^2]"}],"boundary":[["0","0","0"],["1","0","0"]],"boundary_errors":[["0","0","0"],["10^-40","0","0"]]})JSON");
+    auto continued=transport::run(root).as_object();B asinh_half;acb_asinh(asinh_half.raw(),B::from_strings("1/2").raw(),384);
+    if(continued.at("recurrence").as_object().at("centered_charts").as_uint64()==0 || !acb_contains(ball(continued,0,1).raw(),asinh_half.raw()) || !tight(ball(continued,0,1),"1e-28"))
+      throw std::runtime_error("centred canonical chart lost a continued square root or its input uncertainty");
+    // Direct chart: input at the left end, output at the right end, against a
+    // one-sided chart from the same input.
+    auto pair=j::parse(R"JSON({"paths":{"t":"x"},"entries":[{"row":0,"column":1,"epsilon":1,"variable":"dlog","expression":"2+t","coefficient":"3/2"},{"row":1,"column":0,"epsilon":1,"variable":"dlog","expression":"3-t"},{"row":0,"column":0,"epsilon":1,"variable":"dlog","expression":"3-t","coefficient":"-2"}]})JSON");
+    auto pair_system=transport::compile(pair.as_object(),2,3,384);Boundary start{{B(1),B(2),B(0),B(0)},{B(0),B::from_strings("1/3"),B(0),B(0)}};
+    arb_add_error_2exp_si(acb_realref(start[0][1].raw()),-120);
+    const B left=B::from_strings("1/4"),middle=B::from_strings("1/2"),right=B::from_strings("3/4");
+    auto both=transport::centered_canonical_expand(pair_system,start,{},middle,left-middle,40);
+    auto arrived=transport::centered_canonical_evaluate(both,right-middle);
+    auto back=transport::centered_canonical_evaluate(both,left-middle);
+    auto one_sided=transport::chart(pair_system,transport::numerical_entries(pair_system),start,{},left,right-left,40,false,120,true,10000000,true,false);
+    for(unsigned i=0;i<2;++i)for(unsigned e=0;e<4;++e) {
+      if(!acb_overlaps(back.values[i][e].raw(),start[i][e].raw()))throw std::runtime_error("centred chart does not reproduce its input");
+      // 4^-40 against 2^-40: the one-sided chart from the left end is the coarser one.
+      auto slack=transport::magnitude(arrived.values[i][e]-one_sided.values[i][e]);
+      if(!arb_lt(acb_realref(slack.raw()),acb_realref(B::from_strings("1e-10").raw())))throw std::runtime_error("centred and one-sided charts disagree");
+    }
+  }
+  // A pole on the open path is reported at once, with its location, instead
+  // of after the chart clearance has shrunk through the refinement budget.
+  auto crossing=j::parse(R"JSON({"dimension":1,"epsilon_order":0,"taylor_order":40,"working_bits":256,"accuracy_goal":20,"paths":{"t":"2*x"},"entries":[{"row":0,"column":0,"epsilon":0,"variable":"t","expression":"1/(1-t)"}],"boundary":[["1"]]})JSON");
+  std::string crossing_message;try{transport::run(crossing);}catch(const std::runtime_error& e){crossing_message=e.what();}
+  if(crossing_message.find("path parameter 0.5")==std::string::npos)throw std::runtime_error("interior path singularity was not located: "+crossing_message);
+  // The same pole off the real path, or behind the endpoint, is not an obstacle.
+  crossing.as_object()["paths"]=j::object{{"t","2*x+I*x*(1-x)"}};
+  result=transport::run(crossing);
+  if(std::abs(real(result)+1)>1e-15)throw std::runtime_error("complex detour around a path singularity");
+  crossing.as_object()["paths"]=j::object{{"t","x/2"}};
+  result=transport::run(crossing);if(std::abs(real(result)-2)>1e-15)throw std::runtime_error("regular path was rejected as singular");
   std::cout<<"Generic physical/canonical/algebraic transport and asymptotic matching passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

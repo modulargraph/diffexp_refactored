@@ -12,7 +12,7 @@ UpdateConfiguration::usage = "UpdateConfiguration[rules] updates the current tra
 PrepareBoundaryConditions::usage = "PrepareBoundaryConditions[values, pointOrLine] prepares epsilon coefficients or asymptotic boundary input.";
 TransportTo::usage = "TransportTo[boundary, pointOrLine, to:1, save:False] runs native transport and returns {point, values, errors}. Saved output includes replay metadata.";
 IntegrateSystem::usage = "IntegrateSystem[boundary, line] returns numerical functions backed by native transport. Symbolic free-constant solutions are not supported.";
-ToPiecewise::usage = "ToPiecewise[saved, pade:False] returns numerical functions. Evaluation replays and caches native transport at the requested physical point; pade is accepted for call compatibility and does not change the native method.";
+ToPiecewise::usage = "ToPiecewise[saved, pade:False] returns numerical functions. On an undeformed path without BasisPrefactors they evaluate the saved Taylor segments directly; otherwise evaluation replays and caches native transport at the requested physical point. pade is accepted for call compatibility and does not change the native method.";
 DiffExpLastTimings::usage = "DiffExpLastTimings[] returns the most recent wrapper and native timings.";
 DiffExpFamilyTemplate::usage = "DiffExpFamilyTemplate[name] returns a complete editable family configuration for DiffExpFeynmanTrick.";
 BasisPrefactors::usage = "BasisPrefactors is a list of algebraic normalization factors, one per integral. Native transport converts their continued square-root sheets to principal endpoint values.";
@@ -284,7 +284,7 @@ lineStartParameter[line_Association,start_Association,lp_] := Module[{dependent,
  If[MissingQ[candidate],compatFailure["BoundaryLine","The requested line does not pass through the numerical boundary point."]];candidate
 ];
 
-TransportTo[bcs_List,line_,to_:1,save_:False] := Catch[Module[{began=AbsoluteTime[],boundary=bcs,target=Map[exactPathInput,lineAssociation[line]],toParameter=exactPathInput[to],lp=configValue[LineParameter],start,finish,coefficients,errors,paths,request,data,matrices,result,original=bcs,configuration=$configuration,explicitLine,parameter,from,basePaths,curve,nativeCalls={}},
+TransportTo[bcs_List,line_,to_:1,save_:False] := Catch[Module[{began=AbsoluteTime[],boundary=bcs,target=Map[exactPathInput,lineAssociation[line]],toParameter=exactPathInput[to],lp=configValue[LineParameter],start,finish,coefficients,errors,paths,request,data,matrices,result,original=bcs,configuration=$configuration,explicitLine,parameter,from,basePaths,curve,nativeCalls={},saveSegments},
  If[$matrixDimension===0,compatFailure["Matrices","LoadConfiguration must load differential-equation matrices first."]];
  If[Length[boundary]===2 && ListQ[boundary[[1]]] && AssociationQ[boundary[[1,1]]],boundary=boundary[[1]]];
  If[Length[boundary]<2 || !AssociationQ[boundary[[1]]],compatFailure["BoundaryShape","Use prepared boundary conditions or a previous transport result."]];
@@ -303,16 +303,42 @@ TransportTo[bcs_List,line_,to_:1,save_:False] := Catch[Module[{began=AbsoluteTim
   basePaths=Map[(#/.lp->(from+(toParameter-from)lp))&,target];curve=target,
   basePaths=Association[KeyValueMap[(#1->(start[#1]+lp(#2-start[#1])))&,finish]];curve=basePaths];
  paths=deformedPaths[start,finish,basePaths];
- request=Join[baseRequest[paths,False],<|"boundary"->Map[numericString,coefficients,{2}],"boundary_errors"->Map[numericString,errors,{2}]|>];
+ saveSegments=TrueQ[save] && configValue[Recurrence]=!="spectral";
+ request=Join[baseRequest[paths,saveSegments],<|"boundary"->Map[numericString,coefficients,{2}],"boundary_errors"->Map[numericString,errors,{2}]|>];
+ (* Saved Taylor segments let ToPiecewise evaluate interior points directly.
+    Saving is optional: beyond the native output budget the transport still
+    completes, and evaluation falls back to replaying it. *)
+ If[saveSegments,request=Join[request,<|"save_segments_optional"->True,"segment_digits"->segmentDigits[]|>]];
  data=nativeTransport[request];AppendTo[nativeCalls,$lastTimings];matrices=responseMatrices[data];result={finish,matrices[[1]],matrices[[2]]};
  $lastTimings=Join[$lastTimings,<|"wrapper_total_seconds"->AbsoluteTime[]-began,"native_total_seconds"->Total[Lookup[nativeCalls,"total_seconds",0]],"native_calls"->nativeCalls,"charts"->Lookup[data,"charts",Missing["NotAvailable"]]|>];
  If[TrueQ[configValue[Verbosity]>0],Print["DiffExp native transport: ",$lastTimings["wrapper_total_seconds"]," seconds."]];
- If[TrueQ[save],{result,{<|"schema"->"DiffExp.SavedTransport/v1","boundary"->original,"line"->curve,"to"->toParameter,"configuration"->configuration,"dimension"->$matrixDimension,"entries"->$matrixEntries,"segments"->Lookup[data,"segments",{}],"replay_at_physical_point"->True,"omitted_tails_certified"->False|>}},result]
+ If[TrueQ[save],{result,{<|"schema"->"DiffExp.SavedTransport/v1","boundary"->original,"line"->curve,"to"->toParameter,"configuration"->configuration,"dimension"->$matrixDimension,"entries"->$matrixEntries,"segments"->If[TrueQ[Lookup[data,"segments_complete",False]],Lookup[data,"segments",{}],{}],
+  "segment_from"->If[explicitLine,from,0],"segment_to"->If[explicitLine,toParameter,1],
+  "segments_physical"->TrueQ[paths===basePaths && configValue[BasisPrefactors]==={}],
+  "replay_at_physical_point"->True,"omitted_tails_certified"->False|>}},result]
 ],"DiffExpCompatibility"];
 
 If[!AssociationQ[$savedMetadata],$savedMetadata=<||>];
 If[!AssociationQ[$savedSamples],$savedSamples=<||>];
-savedEvaluation[token_String,point_?NumericQ] := savedEvaluation[token,point] = Module[{metadata=$savedMetadata[token],samples,seed,result},
+If[!AssociationQ[$savedSegments],$savedSegments=<||>];
+(* Digits kept in saved segment coefficients: enough for the accuracy goal. *)
+segmentDigits[] := Module[{goal=configValue[AccuracyGoal],precision=configValue[WorkingPrecision]},
+ Max[20,Min[If[NumberQ[goal],Ceiling[goal]+10,40],Ceiling[precision]]]];
+(* Each native segment is a Taylor series in the path parameter x about its
+   center, valid for start <= x <= end, with coefficients ordered
+   [taylor order, integral, epsilon]. *)
+segmentTable[segments_List] := Map[Function[segment,{decimalValue[segment["start"]],decimalValue[segment["end"]],
+  decimalValue[segment["center"]],Map[wireNumber,segment["coefficients"],{3}]}],segments];
+(* The saved series describe physical points only on an undeformed path in
+   the transported basis. None selects the replay of the native transport. *)
+segmentValues[token_String,point_] := Module[{data=Lookup[$savedSegments,token,None],x,hit,dx},
+ If[!AssociationQ[data] || !NumericQ[data["to"]-data["from"]] || TrueQ[data["to"]==data["from"]],None,
+  x=(point-data["from"])/(data["to"]-data["from"]);
+  If[!(NumericQ[x] && TrueQ[Im[x]==0] && TrueQ[0<=Re[x]<=1]),None,
+   x=Re[x];hit=SelectFirst[data["table"],(#[[1]]<=x<=#[[2]])&,None];
+   If[hit===None,None,dx=x-hit[[3]];Fold[(#1 dx+#2)&,0,Reverse[hit[[4]]]]]]]];
+savedEvaluation[token_String,point_?NumericQ] := savedEvaluation[token,point] = Module[{metadata=$savedMetadata[token],samples,seed,result,direct=segmentValues[token,point]},
+ If[MatrixQ[direct],{point,direct,ConstantArray[0,Dimensions[direct]]},
  Block[{$configuration=metadata["configuration"],$matrixEntries=metadata["entries"],$matrixDimension=metadata["dimension"]},
  $configuration[Verbosity]=0;seed=metadata["boundary"];
  samples=Lookup[$savedSamples,token,{}];
@@ -320,7 +346,7 @@ savedEvaluation[token_String,point_?NumericQ] := savedEvaluation[token,point] = 
   seed=First[MinimalBy[samples,Abs[#[[1]]-point]&]][[2]]];
  result=TransportTo[seed,metadata["line"],point,False];
  If[FailureQ[result] && seed=!=metadata["boundary"],result=TransportTo[metadata["boundary"],metadata["line"],point,False]];
- If[!FailureQ[result],$savedSamples[token]=Append[samples,{point,result}]];result]];
+ If[!FailureQ[result],$savedSamples[token]=Append[samples,{point,result}]];result]]];
 savedComponent[evaluator_Symbol,row_,column_,point_?NumericQ] :=
  Module[{result=evaluator[point]},If[FailureQ[result],Indeterminate,result[[2,row,column]]]];
 ToPiecewise[saved_List,pade_:False,order_:Null] := Catch[Module[{metadata,data=saved,token,endpoint=None,lp,line,dependent,samples={},boundary,from,evaluator},
@@ -336,6 +362,10 @@ ToPiecewise[saved_List,pade_:False,order_:Null] := Catch[Module[{metadata,data=s
  (* Keep the line symbol in a private numeric callback. Plot substitutions
     cannot rewrite it, and dynamic plotting assignments are localized there. *)
  token=CreateUUID[];$savedMetadata[token]=metadata;$savedSamples[token]=samples;evaluator=Unique["savedEvaluator$"];
+ If[TrueQ[Lookup[metadata,"segments_physical",False]] && MatchQ[Lookup[metadata,"segments",{}],{__Association}],
+  With[{table=Catch[segmentTable[metadata["segments"]],"DiffExpCompatibility"]},
+   If[ListQ[table] && !FailureQ[table],
+    $savedSegments[token]=<|"from"->metadata["segment_from"],"to"->metadata["segment_to"],"table"->table|>]]];
  With[{id=token,locals={lp}},evaluator[point_?NumericQ]:=Block[locals,savedEvaluation[id,point]]];
  Table[With[{evaluate=evaluator,r=row,c=column},Function[point,savedComponent[evaluate,r,c,point]]],{row,metadata["dimension"]},{column,Lookup[metadata["configuration"],EpsilonOrder]+1}]
 ],"DiffExpCompatibility"];

@@ -45,6 +45,10 @@ struct Compiled {
   mutable slong finite_lag_bits=0;
   mutable std::shared_ptr<const FiniteLagPlan> finite_lag;
   mutable std::string finite_lag_reason;
+  // Numerator/denominator polynomials of each rational physical-basis entry,
+  // parallel to numerical_entries(); empty where a coefficient is algebraic.
+  mutable std::shared_ptr<const std::vector<std::pair<std::vector<B>,std::vector<B>>>> rational_entries;
+  mutable slong rational_entries_bits=0;
   ExactField field;
   std::vector<Exact> squares,root_derivatives;
   std::vector<Entry> entries;
@@ -205,6 +209,12 @@ inline json::array matrix_json(const Boundary& values,long digits) {
 }
 inline B magnitude(const B& v) {B b;acb_abs(acb_realref(b.raw()),v.raw(),B::precision());return b;}
 inline B arithmetic_error(const B& v) {B b;mag_t m;mag_init(m);mag_add(m,arb_radref(acb_realref(v.raw())),arb_radref(acb_imagref(v.raw())));arf_set_mag(arb_midref(acb_realref(b.raw())),m);mag_clear(m);return b;}
+// A nonnegative estimate as an exact upper bound: accumulating estimates
+// must not also accumulate the radii of the balls they were read from.
+inline B upper_estimate(const B& nonnegative) {
+  B out;arf_t upper;arf_init(upper);arb_get_ubound_arf(upper,acb_realref(nonnegative.raw()),B::precision());
+  if(arf_sgn(upper)>0)arf_set(arb_midref(acb_realref(out.raw())),upper);arf_clear(upper);return out;
+}
 // Endpoint normalization is supplied mathematical basis data. It is never
 // inferred from a component's value, a reference result, or a family name.
 inline std::vector<B> principal_roots_at(const Compiled& c,const B& point) {
@@ -317,25 +327,51 @@ struct Chart {Boundary values,errors,truncation_errors;json::object saved;bool c
 #include "diffexp/detail/finite_lag.ipp"
 #include "diffexp/detail/spectral.ipp"
 namespace diffexp::transport {
-inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
-    const std::vector<B>& root_values,const B& center,const B& step,unsigned order,bool save,long digits,
-    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,bool use_finite_lag=true) {
-  if(use_finite_lag && !save && order>=4)if(auto plan=finite_lag_plan(c)) {
-    try{if(order>=4*plan->max_degree) {
-      auto candidate=finite_lag_chart(c,*plan,initial,root_values,center,step,order);
-      // Reject severe interval amplification even without a requested goal.
-      B budget(1);acb_mul_2exp_si(budget.raw(),budget.raw(),32-B::precision());
-      for(const auto& row:initial)for(const auto& v:row) {
-        auto relative=arithmetic_error(v)/(magnitude(v)+B(1));
-        arb_max(acb_realref(budget.raw()),acb_realref(budget.raw()),acb_realref(relative.raw()),B::precision());
+// A rational coefficient a=P/Q turns each product f=a*y into the finite-lag
+// recurrence Q f = P y, whose cost per Taylor order is deg P + deg Q instead
+// of the order itself. Polynomials are extracted once per connection.
+inline const std::vector<std::pair<std::vector<B>,std::vector<B>>>& rational_entry_polynomials(const Compiled& c) {
+  if(!c.rational_entries || c.rational_entries_bits!=B::precision()) {
+    auto out=std::make_shared<std::vector<std::pair<std::vector<B>,std::vector<B>>>>();
+    std::set<std::pair<unsigned,std::string>> seen;
+    for(const auto& e:c.entries) {
+      if(!seen.emplace(e.epsilon,e.coefficient.str()).second)continue;
+      std::pair<std::vector<B>,std::vector<B>> polynomials;
+      if(c.finite_lag_enabled && c.squares.empty()) {
+        try {
+          polynomials={finite_lag_detail::polynomial(e.coefficient.numerator()),finite_lag_detail::polynomial(e.coefficient.denominator())};
+          if(polynomials.first.size()+polynomials.second.size()>66)polynomials={};
+        } catch(const std::runtime_error&) {polynomials={};}
       }
-      budget=budget*B(16);bool stable=true;
-      for(const auto& row:candidate.values)for(const auto& v:row)
-        if(!arb_le(acb_realref(arithmetic_error(v).raw()),acb_realref(((magnitude(v)+B(1))*budget).raw())))stable=false;
-      if(stable)return candidate;
-    }}
-    catch(const std::runtime_error&) { /* Singular/unsupported chart retains the series solver. */ }
+      out->push_back(std::move(polynomials));
+    }
+    c.rational_entries=std::move(out);c.rational_entries_bits=B::precision();
   }
+  return *c.rational_entries;
+}
+// Taylor coefficients of one chart about its centre. The step enters only the
+// final polynomial evaluation, so an accuracy refinement re-evaluates this
+// expansion at a shorter step instead of repeating the recurrence.
+struct SeriesExpansion {
+  unsigned order=0,d=0,w=0,columns=1;
+  // Rational entries advanced by the finite-lag product recurrence.
+  unsigned lag_entries=0;
+  bool centered=false;
+  slong stride=0;
+  B center;
+  Boundary delta;
+  std::unique_ptr<AcbArray> values;
+  acb_srcptr at(unsigned n,unsigned column,unsigned i,unsigned e)const{return values->p+n*stride+(static_cast<slong>(column)*d+i)*w+e;}
+  B coefficient(unsigned n,unsigned i,unsigned e)const {
+    const auto bits=B::precision();B value;acb_set(value.raw(),at(n,0,i,e));
+    if(centered)for(unsigned j=0;j<d;++j)for(unsigned l=0;l<=e;++l)
+      acb_addmul(value.raw(),at(n,j+1,i,l),delta[j][e-l].raw(),bits);
+    return value;
+  }
+};
+inline SeriesExpansion series_expand(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
+    const std::vector<B>& root_values,const B& center,unsigned order,
+    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,const B* longest_step=nullptr) {
   const auto bits=B::precision();const unsigned d=c.dimension,w=c.epsilon_order+1;
   // Separate inherited uncertainty before the recurrence can repeatedly use it.
   // This selector changes only the enclosing arithmetic, never accuracy controls.
@@ -348,18 +384,53 @@ inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,
   // would exceed this finite workspace budget. No input radius is removed.
   if(centered && (base_cells>map_cell_budget || d+1>map_cell_budget/base_cells))centered=false;
   const unsigned columns=centered?d+1:1;
-  Boundary delta(d,std::vector<B>(w,B(0)));
+  SeriesExpansion out;out.order=order;out.d=d;out.w=w;out.columns=columns;out.centered=centered;out.center=center;
+  out.delta=Boundary(d,std::vector<B>(w,B(0)));auto& delta=out.delta;
   Jet x(0,order+2,bits);x.set(0,center);x.set(1,B(1));std::map<std::string,Jet> vars{{"x",x}};
   for(unsigned r=0;r<c.squares.size();++r) {
     auto square=evaluate(data::Reader(c.squares[r].str()).read(),x,vars),root=square.sqrt();
     auto factor=root.constant(0);factor.set(0,root_values[r]/root.at(0));root=root*factor;vars.emplace("r"+std::to_string(r),std::move(root));
   }
-  AcbArray coeffs(static_cast<slong>(c.canonical?c.letters.size():entries.size())*order),values(static_cast<slong>(base_cells)*columns);
+  AcbArray coeffs(static_cast<slong>(c.canonical?c.letters.size():entries.size())*order);
+  out.values=std::make_unique<AcbArray>(static_cast<slong>(base_cells)*columns);auto& values=*out.values;
   if(c.canonical) {
     for(unsigned l=0;l<c.letters.size();++l){auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=c.letter_forms[l]?letter:letter.derivative()/letter;
       for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+l*order+n,value.raw());}}
-  } else for(unsigned e=0;e<entries.size();++e) {auto jet=evaluate(entries[e].coefficient,x,vars);for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+e*order+n,value.raw());}}
-  const slong stride=static_cast<slong>(columns)*d*w;
+  }
+  // Rational entries whose translated denominator keeps a contracting scaled
+  // feedback, sum |Q_m h^m| < |Q_0|, use the finite-lag product recurrence.
+  // Every column of a chart starts from its own input, so a bounded feedback
+  // cannot compound; other entries keep the enclosing dot convolution.
+  struct LagEntry {std::vector<B> p,q;std::vector<unsigned> sources;std::vector<std::vector<unsigned>> rows;std::unique_ptr<AcbArray> history;unsigned depth=0;};
+  std::vector<std::unique_ptr<LagEntry>> lag(c.canonical?0:entries.size());
+  if(!c.canonical && longest_step && order>=8) {
+    const auto& polynomials=rational_entry_polynomials(c);
+    if(polynomials.size()==entries.size())for(unsigned e=0;e<entries.size();++e) {
+      const auto& [p0,q0]=polynomials[e];
+      if(p0.empty() || q0.empty() || 2*(p0.size()+q0.size())>order)continue;
+      auto item=std::make_unique<LagEntry>();
+      item->p=finite_lag_detail::shifted(p0,center);item->q=finite_lag_detail::shifted(q0,center);
+      if(item->q[0].contains_zero())continue;
+      B feedback,power(1);
+      for(unsigned m=1;m<item->q.size();++m){power=power*(*longest_step);feedback+=magnitude(item->q[m]*power);}
+      if(!arb_le(acb_realref(feedback.raw()),acb_realref((magnitude(item->q[0])*B::from_strings("15/16")).raw())))continue;
+      std::map<unsigned,unsigned> ids;
+      for(const auto& [i,j]:entries[e].positions) {
+        auto [it,added]=ids.try_emplace(j,item->sources.size());
+        if(added){item->sources.push_back(j);item->rows.emplace_back();}
+        item->rows[it->second].push_back(i);
+      }
+      item->depth=item->q.size();
+      const std::uint64_t cells=static_cast<std::uint64_t>(item->sources.size())*columns*w*item->depth;
+      // A fixed bound on ring buffers, independent of the map workspace, so
+      // the centered and whole-input variants advance the same recurrence.
+      if(cells>10000000)continue;
+      item->history=std::make_unique<AcbArray>(static_cast<slong>(cells));
+      lag[e]=std::move(item);++out.lag_entries;
+    }
+  }
+  if(!c.canonical)for(unsigned e=0;e<entries.size();++e)if(!lag[e]) {auto jet=evaluate(entries[e].coefficient,x,vars);for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(coeffs.p+e*order+n,value.raw());}}
+  const slong stride=static_cast<slong>(columns)*d*w;out.stride=stride;
   const auto at=[&](unsigned n,unsigned column,unsigned i,unsigned e){return values.p+n*stride+(static_cast<slong>(column)*d+i)*w+e;};
   for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e) {
     if(centered) {
@@ -377,7 +448,11 @@ inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,
     auto [it,inserted]=pair_ids.try_emplace({e.letter,e.column},pair_ids.size());entry_pairs.push_back(it->second);
   }
   AcbArray convolutions(pair_ids.size()*w);std::vector<int> convolution_order(pair_ids.size()*w,-1);
+  // The homogeneous map only multiplies the small input deviation. A short
+  // mantissa keeps its enclosure rigorous at a fraction of the cost.
+  const slong full_bits=bits,map_bits=std::min<slong>(full_bits,128);
   for(unsigned n=0;n<order;++n)for(unsigned column=0;column<columns;++column) {
+    const slong bits=column?map_bits:full_bits;
     if(c.canonical) {
       for(unsigned p=0;p<c.canonical_entries.size();++p) {const auto& entry=c.canonical_entries[p];for(unsigned e=1;e<w;++e){
         acb_srcptr convolution;
@@ -394,20 +469,40 @@ inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,
         }
         acb_addmul(at(n+1,column,entry.row,e),convolution,weights[p].raw(),bits);
       }}
-    } else for(unsigned p=0;p<entries.size();++p)for(const auto& [i,j]:entries[p].positions)for(unsigned e=entries[p].epsilon;e<w;++e) {
-      auto target=at(n+1,column,i,e);acb_dot(sum.raw(),target,0,coeffs.p+p*order,1,at(n,column,j,e-entries[p].epsilon),-stride,n+1,bits);acb_swap(target,sum.raw());
+    } else for(unsigned p=0;p<entries.size();++p) {
+      if(lag[p]) {
+        const auto& item=*lag[p];const unsigned depth=item.depth,shift=entries[p].epsilon;
+        for(unsigned source=0;source<item.sources.size();++source)for(unsigned e=shift;e<w;++e) {
+          auto f=item.history->p+((static_cast<slong>(source)*columns+column)*w+e)*depth;
+          acb_zero(sum.raw());
+          for(unsigned m=0;m<item.p.size()&&m<=n;++m)if(!item.p[m].is_zero())
+            acb_addmul(sum.raw(),item.p[m].raw(),at(n-m,column,item.sources[source],e-shift),bits);
+          for(unsigned m=1;m<depth&&m<=n;++m)if(!item.q[m].is_zero())
+            acb_submul(sum.raw(),item.q[m].raw(),f+(n-m)%depth,bits);
+          acb_div(sum.raw(),sum.raw(),item.q[0].raw(),bits);
+          acb_set(f+n%depth,sum.raw());
+          for(auto i:item.rows[source])acb_add(at(n+1,column,i,e),at(n+1,column,i,e),sum.raw(),bits);
+        }
+        continue;
+      }
+      for(const auto& [i,j]:entries[p].positions)for(unsigned e=entries[p].epsilon;e<w;++e) {
+        auto target=at(n+1,column,i,e);acb_dot(sum.raw(),target,0,coeffs.p+p*order,1,at(n,column,j,e-entries[p].epsilon),-stride,n+1,bits);acb_swap(target,sum.raw());
+      }
     }
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e)acb_div_ui(at(n+1,column,i,e),at(n+1,column,i,e),n+1,bits);
   }
+  return out;
+}
+inline json::object series_saved(const SeriesExpansion& s,const B& step,long digits) {
+  json::array all;for(unsigned n=0;n<=s.order;++n){Boundary m(s.d,std::vector<B>(s.w));for(unsigned i=0;i<s.d;++i)for(unsigned e=0;e<s.w;++e)m[i][e]=s.coefficient(n,i,e);all.push_back(matrix_json(m,digits));}
+  return {{"center",decimal_mid(acb_realref(s.center.raw()),digits)},{"start",decimal_mid(acb_realref(s.center.raw()),digits)},
+    {"end",decimal_mid(acb_realref((s.center+step).raw()),digits)},{"coefficients",std::move(all)}};
+}
+inline Chart series_evaluate(const SeriesExpansion& s,const B& step,bool save,long digits) {
+  const auto bits=B::precision();const unsigned d=s.d,w=s.w,order=s.order;const bool centered=s.centered;const auto& delta=s.delta;
   Chart result{Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),{},centered};
-  const auto coefficient=[&](unsigned n,unsigned i,unsigned e) {
-    B value;acb_set(value.raw(),at(n,0,i,e));
-    if(centered)for(unsigned j=0;j<d;++j)for(unsigned l=0;l<=e;++l)
-      acb_addmul(value.raw(),at(n,j+1,i,l),delta[j][e-l].raw(),bits);
-    return value;
-  };
   const auto evaluate_column=[&](unsigned column,unsigned i,unsigned e) {
-    B value;for(unsigned n=order+1;n-->0;){acb_mul(value.raw(),value.raw(),step.raw(),bits);acb_add(value.raw(),value.raw(),at(n,column,i,e),bits);}return value;
+    B value;for(unsigned n=order+1;n-->0;){acb_mul(value.raw(),value.raw(),step.raw(),bits);acb_add(value.raw(),value.raw(),s.at(n,column,i,e),bits);}return value;
   };
   std::vector<B> step_powers(order+1,B(1));for(unsigned n=1;n<=order;++n)step_powers[n]=step_powers[n-1]*step;
   for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e) {
@@ -421,16 +516,189 @@ inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,
     // Preserve the existing last-four-term estimate for the entire uncertain
     // input, not just its midpoint. This is still not a remainder certificate.
     for(unsigned n=order>3?order-3:1;n<=order;++n) {
-      auto term=coefficient(n,i,e)*step_powers[n];result.errors[i][e]+=magnitude(term);
+      auto term=s.coefficient(n,i,e)*step_powers[n];result.errors[i][e]+=magnitude(term);
     }
     result.truncation_errors[i][e]=result.errors[i][e];
     result.errors[i][e]+=arithmetic_error(v);
   }
-  if(save) {
-    json::array all;for(unsigned n=0;n<=order;++n){Boundary m(d,std::vector<B>(w));for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e)m[i][e]=coefficient(n,i,e);all.push_back(matrix_json(m,digits));}
-    result.saved={{"center",decimal_mid(acb_realref(center.raw()),digits)},{"start",decimal_mid(acb_realref(center.raw()),digits)},
-      {"end",decimal_mid(acb_realref((center+step).raw()),digits)},{"coefficients",std::move(all)}};
+  if(save)result.saved=series_saved(s,step,digits);
+  return result;
+}
+// Canonical (epsilon-linear) systems are triangular in epsilon: order e is the
+// integral of letters times order e-1. Solving order by order therefore needs
+// no fundamental matrix to start a chart away from its centre: the constant
+// of each order is fixed by the input at `input_offset`. One expansion then
+// covers [centre-h, centre+h] at the convergence ratio a one-sided chart
+// spends on [centre, centre+h].
+struct CenteredCanonical {
+  unsigned order=0,d=0,w=0;
+  B center,input_offset;
+  Boundary input_tail;
+  std::unique_ptr<AcbArray> values;
+  acb_srcptr at(unsigned n,unsigned i,unsigned e)const{return values->p+(static_cast<slong>(n)*d+i)*w+e;}
+};
+inline CenteredCanonical centered_canonical_expand(const Compiled& c,const Boundary& initial,const std::vector<B>& center_roots,
+    const B& center,const B& input_offset,unsigned order) {
+  if(!c.canonical || order<8)throw std::invalid_argument("centred chart requires a canonical connection and order >= 8");
+  const auto bits=B::precision();const unsigned d=c.dimension,w=c.epsilon_order+1;
+  if(center_roots.size()!=c.squares.size())throw std::invalid_argument("centred chart root dimensions");
+  if(static_cast<std::uint64_t>(order+1)*d*w>10000000)throw std::length_error("centred chart workspace budget");
+  CenteredCanonical out;out.order=order;out.d=d;out.w=w;out.center=center;out.input_offset=input_offset;
+  out.input_tail=Boundary(d,std::vector<B>(w,B(0)));
+  out.values=std::make_unique<AcbArray>(static_cast<slong>(order+1)*d*w);
+  const slong stride=static_cast<slong>(d)*w;
+  const auto at=[&](unsigned n,unsigned i,unsigned e){return out.values->p+(static_cast<slong>(n)*d+i)*w+e;};
+  Jet x(0,order+2,bits);x.set(0,center);x.set(1,B(1));std::map<std::string,Jet> vars{{"x",x}};
+  for(unsigned r=0;r<c.squares.size();++r) {
+    auto square=evaluate(data::Reader(c.squares[r].str()).read(),x,vars),root=square.sqrt();
+    auto factor=root.constant(0);factor.set(0,center_roots[r]/root.at(0));root=root*factor;vars.emplace("r"+std::to_string(r),std::move(root));
   }
+  AcbArray letters(static_cast<slong>(c.letters.size())*order);
+  for(unsigned l=0;l<c.letters.size();++l) {
+    auto letter=evaluate(data::Reader(c.letters[l].str()).read(),x,vars);auto jet=c.letter_forms[l]?letter:letter.derivative()/letter;
+    for(unsigned n=0;n<order;++n){auto value=jet.at(n);acb_swap(letters.p+l*order+n,value.raw());}
+  }
+  // One convolution per (letter, source) or per (letter, target), whichever a
+  // letter has fewer of: its weight matrix factors through either side.
+  struct Term {unsigned other;B weight;};
+  struct Group {unsigned letter,index;bool by_source;std::vector<Term> terms;};
+  std::vector<Group> groups;
+  {
+    std::vector<std::set<unsigned>> rows(c.letters.size()),columns(c.letters.size());
+    for(const auto& e:c.canonical_entries){rows[e.letter].insert(e.row);columns[e.letter].insert(e.column);}
+    std::map<std::tuple<unsigned,bool,unsigned>,unsigned> ids;
+    for(const auto& e:c.canonical_entries) {
+      const bool by_source=columns[e.letter].size()<=rows[e.letter].size();
+      auto [it,added]=ids.try_emplace({e.letter,by_source,by_source?e.column:e.row},groups.size());
+      if(added)groups.push_back({e.letter,by_source?e.column:e.row,by_source,{}});
+      groups[it->second].terms.push_back({by_source?e.row:e.column,B::from_strings(e.coefficient.str())});
+    }
+  }
+  // support[i][e]: highest Taylor order at which component (i,e) is not an
+  // exact zero; a convolution only runs over its source's support.
+  std::vector<std::vector<int>> support(d,std::vector<int>(w,-1));
+  const auto measure=[&](unsigned i,unsigned e){int top=static_cast<int>(order);while(top>=0 && acb_is_zero(at(top,i,e)))--top;support[i][e]=top;};
+  for(unsigned i=0;i<d;++i){acb_set(at(0,i,0),initial[i][0].raw());measure(i,0);}
+  AcbArray combination(order);B product;
+  const bool offset=!input_offset.is_zero();
+  for(unsigned e=1;e<w;++e) {
+    for(const auto& group:groups) {
+      acb_srcptr series=letters.p+static_cast<slong>(group.letter)*order;
+      if(group.by_source) {
+        const int top=support[group.index][e-1];if(top<0)continue;
+        for(unsigned n=0;n<order;++n) {
+          const unsigned reach=std::min<unsigned>(n,top);
+          acb_dot(product.raw(),nullptr,0,series+(n-reach),1,at(reach,group.index,e-1),-stride,reach+1,bits);
+          for(const auto& term:group.terms)acb_addmul(at(n+1,term.other,e),product.raw(),term.weight.raw(),bits);
+        }
+      } else {
+        int top=-1;for(const auto& term:group.terms)top=std::max(top,support[term.other][e-1]);
+        if(top<0)continue;
+        for(int n=0;n<=top && n<static_cast<int>(order);++n) {
+          acb_zero(combination.p+n);
+          for(const auto& term:group.terms)if(n<=support[term.other][e-1])acb_addmul(combination.p+n,at(n,term.other,e-1),term.weight.raw(),bits);
+        }
+        for(unsigned n=0;n<order;++n) {
+          const unsigned reach=std::min<unsigned>(n,std::min<int>(top,order-1));
+          acb_dot(product.raw(),nullptr,0,series+(n-reach),1,combination.p+reach,-1,reach+1,bits);
+          acb_add(at(n+1,group.index,e),at(n+1,group.index,e),product.raw(),bits);
+        }
+      }
+    }
+    for(unsigned n=1;n<=order;++n)for(unsigned i=0;i<d;++i)acb_div_ui(at(n,i,e),at(n,i,e),n,bits);
+    for(unsigned i=0;i<d;++i) {
+      // The input fixes this order's constant: y_e(input)=initial_e.
+      B sum(0),tail(0),power(1);
+      if(offset) {
+        for(unsigned n=order;n>0;--n){acb_add(sum.raw(),sum.raw(),at(n,i,e),bits);acb_mul(sum.raw(),sum.raw(),input_offset.raw(),bits);}
+        std::vector<B> powers(order+1,B(1));for(unsigned n=1;n<=order;++n)powers[n]=powers[n-1]*input_offset;
+        for(unsigned n=order-3;n<=order;++n){B term;acb_mul(term.raw(),at(n,i,e),powers[n].raw(),bits);tail+=magnitude(term);}
+      }
+      acb_sub(at(0,i,e),initial[i][e].raw(),sum.raw(),bits);
+      // The omitted input-side terms shift this constant; later orders are
+      // built on it, so the estimate travels with the ball from here on.
+      out.input_tail[i][e]=upper_estimate(tail);
+      arb_add_error(acb_realref(at(0,i,e)),acb_realref(out.input_tail[i][e].raw()));
+      arb_add_error(acb_imagref(at(0,i,e)),acb_realref(out.input_tail[i][e].raw()));
+      measure(i,e);
+    }
+  }
+  return out;
+}
+inline Chart centered_canonical_evaluate(const CenteredCanonical& s,const B& step) {
+  const auto bits=B::precision();const unsigned d=s.d,w=s.w,order=s.order;
+  Chart result{Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),Boundary(d,std::vector<B>(w,B(0))),{},false};
+  std::vector<B> powers(order+1,B(1));for(unsigned n=1;n<=order;++n)powers[n]=powers[n-1]*step;
+  for(unsigned i=0;i<d;++i)for(unsigned e=0;e<w;++e) {
+    auto& v=result.values[i][e];
+    for(unsigned n=order+1;n-->0;){acb_mul(v.raw(),v.raw(),step.raw(),bits);acb_add(v.raw(),v.raw(),s.at(n,i,e),bits);}
+    if(!v.is_finite())throw std::runtime_error("transport chart produced a non-finite value");
+    B tail=s.input_tail[i][e];
+    for(unsigned n=order-3;n<=order;++n){B term;acb_mul(term.raw(),s.at(n,i,e),powers[n].raw(),bits);tail+=magnitude(term);}
+    result.truncation_errors[i][e]=tail;result.errors[i][e]=tail+arithmetic_error(v);
+  }
+  return result;
+}
+// One chart's retained coefficients, by either recurrence.
+struct Expansion {
+  std::optional<FiniteLagSeries> lag;
+  std::optional<SeriesExpansion> series;
+  const FiniteLagPlan* plan=nullptr;
+  B lag_budget;
+  bool finite_lag()const{return lag.has_value();}
+};
+// Reject severe interval amplification even without a requested goal.
+inline B finite_lag_budget(const Boundary& initial) {
+  B budget(1);acb_mul_2exp_si(budget.raw(),budget.raw(),32-B::precision());
+  for(const auto& row:initial)for(const auto& v:row) {
+    auto relative=arithmetic_error(v)/(magnitude(v)+B(1));
+    arb_max(acb_realref(budget.raw()),acb_realref(budget.raw()),acb_realref(relative.raw()),B::precision());
+  }
+  return budget*B(16);
+}
+inline bool finite_lag_stable(const Chart& candidate,const B& budget) {
+  for(const auto& row:candidate.values)for(const auto& v:row)
+    if(!arb_le(acb_realref(arithmetic_error(v).raw()),acb_realref(((magnitude(v)+B(1))*budget).raw())))return false;
+  return true;
+}
+// `step` is the longest step requested from this expansion; `first` receives
+// its evaluation there. Shorter steps use evaluate_expansion() below.
+inline Expansion expand(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
+    const std::vector<B>& root_values,const B& center,const B& step,unsigned order,bool save,long digits,Chart& first,
+    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,bool use_finite_lag=true) {
+  Expansion out;
+  if(use_finite_lag && !save && order>=4)if(auto plan=finite_lag_plan(c)) {
+    try{if(order>=4*plan->max_degree) {
+      auto series=finite_lag_series(c,*plan,initial,root_values,center,step,order);
+      auto candidate=finite_lag_evaluate(c,*plan,series,step);
+      auto budget=finite_lag_budget(initial);
+      if(finite_lag_stable(candidate,budget)) {
+        out.lag=std::move(series);out.plan=plan;out.lag_budget=std::move(budget);first=std::move(candidate);return out;
+      }
+    }}
+    catch(const std::runtime_error&) { /* Singular/unsupported chart retains the series solver. */ }
+  }
+  out.series=series_expand(c,entries,initial,root_values,center,order,center_uncertainty,map_cell_budget,share_canonical,use_finite_lag?&step:nullptr);
+  first=series_evaluate(*out.series,step,save,digits);
+  return out;
+}
+// Evaluate retained coefficients at a step no longer than the one supplied to
+// expand(). An empty result means the finite-lag enclosure is not usable at
+// this step; the caller then selects the series recurrence explicitly.
+inline std::optional<Chart> evaluate_expansion(const Compiled& c,const Expansion& expansion,const B& step,bool save,long digits) {
+  if(expansion.lag) {
+    try {
+      auto candidate=finite_lag_evaluate(c,*expansion.plan,*expansion.lag,step);
+      if(finite_lag_stable(candidate,expansion.lag_budget))return candidate;
+    } catch(const std::runtime_error&) {}
+    return std::nullopt;
+  }
+  return series_evaluate(*expansion.series,step,save,digits);
+}
+inline Chart chart(const Compiled& c,const std::vector<NumericalEntry>& entries,const Boundary& initial,
+    const std::vector<B>& root_values,const B& center,const B& step,unsigned order,bool save,long digits,
+    bool center_uncertainty=true,std::size_t map_cell_budget=10000000,bool share_canonical=true,bool use_finite_lag=true) {
+  Chart result;expand(c,entries,initial,root_values,center,step,order,save,digits,result,center_uncertainty,map_cell_budget,share_canonical,use_finite_lag);
   return result;
 }
 // Solve asymptotic coefficient constraints in the exact Frobenius frame. Each
@@ -523,7 +791,7 @@ inline std::optional<std::pair<Boundary,Boundary>> finite_start(const Compiled& 
 
 inline json::value run(const json::value& input) {
   const auto start=std::chrono::steady_clock::now();const auto& r=input.as_object();
-  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors","recurrence"},"transport");
+  known_keys(r,{"schema","dimension","epsilon_order","taylor_order","working_bits","accuracy_goal","division_order","save_segments","paths","entries","boundary","boundary_errors","asymptotic","initial_only","basis_prefactors","recurrence","save_segments_optional","segment_digits"},"transport");
   if(auto a=r.if_contains("asymptotic")) {
     known_keys(a->as_object(),{"constraints","cutoffs"},"asymptotic");
     for(const auto& v:a->as_object().at("constraints").as_array())known_keys(v.as_object(),{"row","epsilon","power","log_degree","value"},"asymptotic constraint");
@@ -535,6 +803,13 @@ inline json::value run(const json::value& input) {
   auto bits=integer(r,"working_bits",384,64,100000),division=integer(r,"division_order",4,2,100),goal=integer(r,"accuracy_goal",0,0,20000);
   if(goal*3.32193>bits-32)throw std::invalid_argument("working precision has insufficient reserve for AccuracyGoal");
   B::set_precision(bits);const long digits=bits*30103/100000+5;bool save=r.if_contains("save_segments") && r.at("save_segments").as_bool();
+  // Optional saving serves plotting: once the output budget is reached the
+  // transport continues without segments instead of discarding its work.
+  const bool save_requested=save,save_optional=r.if_contains("save_segments_optional") && r.at("save_segments_optional").as_bool();
+  bool segments_complete=true;
+  // Saved coefficients need not carry the full working precision: a plot or
+  // an interpolation asks for far fewer digits than the transported boundary.
+  const long segment_digits=std::min<long>(digits,integer(r,"segment_digits",digits,10,1000000));
   std::cerr<<"Preparing generic transport: "<<d<<" components, epsilon 0.."<<k<<"\n";
   std::string recurrence=r.if_contains("recurrence")?string(r.at("recurrence")):"auto";
   if(recurrence!="auto" && recurrence!="series" && recurrence!="taylor" && recurrence!="spectral")
@@ -545,6 +820,19 @@ inline json::value run(const json::value& input) {
     throw std::invalid_argument("spectral transport requires an ordinary boundary, positive AccuracyGoal and no saved Taylor segments");
   const bool spectral_size_candidate=recurrence=="auto" && d>=16 && k>0 && goal>0 && !save && ordinary_start;
   auto c=compile(r,d,k,bits,spectral_requested || spectral_size_candidate);
+  // A pole of the connection on the open path or at its endpoint cannot be
+  // reached by ordinary charts: their clearance shrinks geometrically and the
+  // run would only fail after exhausting its refinement or chart budget.
+  // Report the location at once. A singular START is handled separately below.
+  for(const auto& point:c.singularities) {
+    if(point.contains_zero() || !arb_contains_zero(acb_imagref(point.raw())))continue;
+    B domain=B::from_strings("1/2");arb_add_error_2exp_si(acb_realref(domain.raw()),-1);
+    if(!arb_overlaps(acb_realref(point.raw()),acb_realref(domain.raw())))continue;
+    const auto location=decimal_mid(acb_realref(point.raw()),12);
+    throw std::runtime_error("transport path meets a singularity of the differential equation at path parameter "+location+
+      (acb_contains(point.raw(),B(1).raw())?" (the endpoint)":"")+
+      "; end the path before it or pass around it with a complex path (DeltaPrescriptions)");
+  }
   json::object spectral_diagnostic{{"attempted",false},{"accepted",false}};
   bool spectral_candidate=spectral_requested || spectral_size_candidate;
   // Estimate how many global nodes nearby complex singularities could demand.
@@ -603,6 +891,22 @@ inline json::value run(const json::value& input) {
   unsigned finite_lag_charts=0,series_charts=0,finite_lag_rejections=0;
   const auto prepared=std::chrono::steady_clock::now();
   Boundary current,errors(d,std::vector<B>(k+1,B(0)));double center=0;json::array segments;unsigned charts=0;std::uint64_t saved_budget_used=0;
+  // An omitted-tail ESTIMATE is not an enclosure. Folding it into the balls of
+  // a system with epsilon-zero feedback makes every later chart carry it
+  // through a d-column homogeneous map. Such systems accumulate the estimate
+  // beside the balls and fold it in once, at the endpoint. Triangular and
+  // canonical recurrences propagate radii at no extra cost and keep doing so;
+  // supplied boundary uncertainties always stay in the balls.
+  const bool separate_tails=!c.canonical && zero_order_feedback(c);
+  Boundary accumulated(d,std::vector<B>(k+1,B(0)));
+  const auto fold_accumulated=[&]() {
+    if(!separate_tails)return;
+    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      arb_add_error(acb_realref(current[i][e].raw()),acb_realref(accumulated[i][e].raw()));
+      arb_add_error(acb_imagref(current[i][e].raw()),acb_realref(accumulated[i][e].raw()));
+      errors[i][e]=errors[i][e]+accumulated[i][e];accumulated[i][e]=B(0);
+    }
+  };
   if(auto a=r.if_contains("asymptotic")) {
     if(!c.squares.empty())throw std::invalid_argument("asymptotic matching currently requires a rational connection");
     std::vector<B> finite=c.singularities;finite.erase(std::remove_if(finite.begin(),finite.end(),[](const B& p){return p.contains_zero();}),finite.end());
@@ -627,12 +931,14 @@ inline json::value run(const json::value& input) {
       const auto acceptable=[&](){for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e){auto bound=(magnitude(current[i][e])+B(1))*tolerance;if(!arb_le(acb_realref(errors[i][e].raw()),acb_realref(bound.raw())))return false;}return true;};
       while(!acceptable()){if(++attempts>30)throw std::runtime_error("asymptotic start cannot meet AccuracyGoal with the supplied boundary precision");next/=2;acb_set_d(endpoint.raw(),next);evaluate_start();}
     }
+    const bool initial_only=r.if_contains("initial_only") && r.at("initial_only").as_bool();
     for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      if(separate_tails && !initial_only){accumulated[i][e]=upper_estimate(errors[i][e]);continue;}
       arb_add_error(acb_realref(current[i][e].raw()),acb_realref(errors[i][e].raw()));
       arb_add_error(acb_imagref(current[i][e].raw()),acb_realref(errors[i][e].raw()));
     }
     center=next;++charts;
-    if(r.if_contains("initial_only") && r.at("initial_only").as_bool()) {
+    if(initial_only) {
       apply_basis_prefactors(c,endpoint,{},current,errors);
       const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
       return json::object{{"schema","DiffExp.TransportResult/v1"},{"parameter",decimal_mid(acb_realref(endpoint.raw()),digits)},
@@ -670,26 +976,105 @@ inline json::value run(const json::value& input) {
     for(unsigned root=0;root<root_values.size();++root)root_values[root]=continue_polynomial_sqrt(c.square_polynomials[root],B(0),end,root_values[root]);
     center=next;++charts;
   }
+  // Canonical systems outside the finite-lag regime use charts centred between
+  // their input and output. `centered_scale` remembers how far below the
+  // nominal radius/division the accuracy goal pushed recent charts, so that a
+  // rejected (and recomputed) centre stays the exception.
+  const auto* lag_plan=save_requested?nullptr:finite_lag_plan(c);
+  const bool centered_canonical=c.canonical && !save_requested && order>=8 && !(lag_plan && order>=4*lag_plan->max_degree);
+  double centered_scale=1;unsigned centered_charts=0;
+  const auto clearance_radius=[&](double point) {
+    double clearance=4;B p;acb_set_d(p.raw(),point);
+    for(const auto& root:c.singularities){auto delta=p-root;arf_t lower;arf_init(lower);acb_get_abs_lbound_arf(lower,delta.raw(),bits);
+      clearance=std::min(clearance,arf_get_d(lower,ARF_RND_FLOOR));arf_clear(lower);}
+    return clearance;
+  };
+  while(centered_canonical && center<1) {
+    if(++charts>20000)throw std::runtime_error("transport chart budget exhausted");
+    Chart result;double middle=center,next=center;B at,mid,end;acb_set_d(at.raw(),center);unsigned attempts=0;
+    const B tolerance=B::from_strings("1e-"+std::to_string(goal+8));
+    const auto worst=[&](bool input_only,const CenteredCanonical& expansion) {
+      double ratio=0;
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto value=(input_only?expansion.input_tail[i][e]:result.truncation_errors[i][e])/((magnitude(result.values[i][e])+B(1))*tolerance);
+        arf_t upper;arf_init(upper);arb_get_ubound_arf(upper,acb_realref(value.raw()),64);
+        const double bound=arf_get_d(upper,ARF_RND_CEIL);arf_clear(upper);
+        if(!(bound<1e300))return 1e300;ratio=std::max(ratio,bound);
+      }
+      return ratio;
+    };
+    const auto shrink=[&](double ratio) {
+      if(attempts>3 || !(ratio<1e300))return 0.5;
+      const double rho=0.9*std::pow(std::max(ratio,1.0),-1.0/static_cast<double>(order-3));
+      return rho<0.5?0.5:rho>0.9?0.9:rho;
+    };
+    for(;;) {
+      // Solve middle-center = scale*radius(middle)/division; the radius is
+      // 1-Lipschitz, so this fixed point contracts with factor 1/division.
+      double half=centered_scale*clearance_radius(center)/division;
+      for(unsigned i=0;i<6;++i){middle=center+half;half=centered_scale*clearance_radius(middle)/division;}
+      middle=center+half;
+      while(middle-center>centered_scale*clearance_radius(middle)/division)middle=center+(middle-center)*0.9;
+      if(!(middle>center))throw std::runtime_error("transport has no nonzero continuation step");
+      next=middle+centered_scale*clearance_radius(middle)/division;
+      if(middle>=1){middle=center+(1-center)/2;next=1;} else if(next>1)next=1;
+      acb_set_d(mid.raw(),middle);acb_set_d(end.raw(),next);
+      std::vector<B> middle_roots;
+      for(unsigned root=0;root<root_values.size();++root)middle_roots.push_back(continue_polynomial_sqrt(c.square_polynomials[root],at,mid,root_values[root]));
+      auto expansion=centered_canonical_expand(c,current,middle_roots,mid,at-mid,order);
+      result=centered_canonical_evaluate(expansion,end-mid);
+      if(goal==0)break;
+      bool recenter=false;
+      for(;;) {
+        const double total=worst(false,expansion);
+        if(total<=1)break;
+        if(++attempts>24)throw std::runtime_error("chart could not meet AccuracyGoal within 24 local refinements");
+        // The input-side sum is fixed by the centre: only a closer centre
+        // repairs it. The output side merely re-evaluates a shorter step.
+        const double input=worst(true,expansion);
+        if(2*input>1){centered_scale*=shrink(2*input);recenter=true;break;}
+        const double rho=shrink(total);centered_scale*=rho;
+        next=middle+(next-middle)*rho;acb_set_d(end.raw(),next);
+        if(!(next>middle))throw std::runtime_error("transport has no nonzero continuation step");
+        result=centered_canonical_evaluate(expansion,end-mid);
+      }
+      if(!recenter)break;
+    }
+    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+      errors[i][e]=result.errors[i][e];
+      auto tail=result.truncation_errors[i][e];
+      arb_add_error(acb_realref(result.values[i][e].raw()),acb_realref(tail.raw()));
+      arb_add_error(acb_imagref(result.values[i][e].raw()),acb_realref(tail.raw()));
+    }
+    current=std::move(result.values);++centered_charts;
+    for(unsigned root=0;root<root_values.size();++root)root_values[root]=continue_polynomial_sqrt(c.square_polynomials[root],at,end,root_values[root]);
+    center=next;centered_scale=std::min(1.0,centered_scale*1.03);
+    if(charts%20==0)std::cerr<<"Transport chart "<<charts<<", path parameter "<<center<<"\n";
+  }
   while(center<1) {
     if(++charts>20000)throw std::runtime_error("transport chart budget exhausted");
     auto next=clearance_endpoint(center,c.singularities);next=center+(next-center)*4.0/division;next=std::min(next,1.0);
     if(!(next>center))throw std::runtime_error("transport has no nonzero continuation step");
     B at,end;acb_set_d(at.raw(),center);acb_set_d(end.raw(),next);
     if(save) {
-      const std::uint64_t estimate=static_cast<std::uint64_t>(order+1)*d*(k+1)*(3*(digits+32)+80);
-      if(estimate>64*1024*1024 || saved_budget_used>64*1024*1024-estimate)throw std::length_error("saved transport segments exceed the 64 MiB output budget");
-      saved_budget_used+=estimate;
+      const std::uint64_t estimate=static_cast<std::uint64_t>(order+1)*d*(k+1)*(3*(segment_digits+32)+80);
+      if(estimate>64*1024*1024 || saved_budget_used>64*1024*1024-estimate) {
+        if(!save_optional)throw std::length_error("saved transport segments exceed the 64 MiB output budget");
+        save=false;segments_complete=false;segments=json::array{};
+      } else saved_budget_used+=estimate;
     }
-    auto result=chart(c,entries,current,root_values,at,end-at,order,save,digits);
-    bool use_finite_lag=true;
+    // Saved coefficients are serialized once, for the accepted step only.
+    Chart result;auto expansion=expand(c,entries,current,root_values,at,end-at,order,false,digits,result,true,10000000,true,!save);
     if(goal>0) {
       // Bounded local refinement at a fixed expansion order. No retry of the
-      // complete transport, and no relaxation of the requested accuracy.
+      // complete transport, and no relaxation of the requested accuracy. The
+      // Taylor coefficients do not depend on the step, so a refinement only
+      // re-evaluates the retained polynomial at a shorter step.
       B tolerance=B::from_strings("1e-"+std::to_string(goal+8));unsigned attempts=0;
       const auto acceptable=[&]() {for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e){auto scale=magnitude(result.values[i][e])+B(1);if(!arb_le(acb_realref(result.truncation_errors[i][e].raw()),acb_realref((scale*tolerance).raw())))return false;}return true;};
       // A rational gauge may be poorly conditioned on a particular chart.
-      // Retry the physical series at the same step before shrinking it, and
-      // before carrying any candidate roundoff amplification into the boundary.
+      // Retry the physical series at the same step before carrying any
+      // candidate roundoff amplification into the boundary.
       const auto candidate_roundoff_ok=[&]() {
         auto budget=B::from_strings("1e-"+std::to_string(goal+16));
         // Do not demand more precision than the supplied boundary carries.
@@ -705,16 +1090,58 @@ inline json::value run(const json::value& input) {
               acb_realref(((magnitude(result.values[i][e])+B(1))*budget).raw())))return false;
         return true;
       };
-      if(result.finite_lag && (!acceptable() || !candidate_roundoff_ok())) {
-        ++finite_lag_rejections;use_finite_lag=false;
-        result=chart(c,entries,current,root_values,at,end-at,order,save,digits,true,10000000,true,false);
-      }
-      while(!acceptable()) {
-        if(++attempts>20)throw std::runtime_error("chart could not meet AccuracyGoal within 20 local refinements");
-        next=(center+next)/2;acb_set_d(end.raw(),next);result=chart(c,entries,current,root_values,at,end-at,order,save,digits,true,10000000,true,use_finite_lag);
+      const auto series_only=[&]() {
+        ++finite_lag_rejections;
+        expansion=expand(c,entries,current,root_values,at,end-at,order,false,digits,result,true,10000000,true,false);
+      };
+      // The estimate is a sum of |y_n| h^n over the last four retained orders,
+      // so scaling the step by rho reduces it at least by rho^(order-3). Use
+      // that prediction first; plain halving remains the bounded fallback.
+      const auto shrink=[&]() {
+        if(attempts>3)return 0.5;
+        double worst=1;
+        for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+          auto ratio=result.truncation_errors[i][e]/((magnitude(result.values[i][e])+B(1))*tolerance);
+          arf_t upper;arf_init(upper);arb_get_ubound_arf(upper,acb_realref(ratio.raw()),64);
+          const double value=arf_get_d(upper,ARF_RND_CEIL);arf_clear(upper);
+          if(!(value<1e300))return 0.5;
+          worst=std::max(worst,value);
+        }
+        const double rho=0.9*std::pow(worst,-1.0/static_cast<double>(order-3));
+        return rho<0.5?0.5:rho>0.9?0.9:rho;
+      };
+      for(;;) {
+        if(acceptable()) {
+          // Truncation is independent of the recurrence; only arithmetic
+          // amplification of the finite-lag gauge selects the series solver.
+          if(!result.finite_lag || candidate_roundoff_ok())break;
+          series_only();continue;
+        }
+        if(++attempts>24)throw std::runtime_error("chart could not meet AccuracyGoal within 24 local refinements");
+        next=center+(next-center)*shrink();
+        if(!(next>center))throw std::runtime_error("transport has no nonzero continuation step");
+        acb_set_d(end.raw(),next);
+        if(auto refined=evaluate_expansion(c,expansion,end-at,false,digits))result=std::move(*refined);
+        else series_only();
       }
     }
-    for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+    if(save)result.saved=series_saved(*expansion.series,end-at,segment_digits);
+    if(separate_tails) {
+      // Two models bound how an earlier estimate reaches this endpoint: it is
+      // carried unchanged, or the solution's relative error is preserved (as
+      // for a growing mode). Take the larger, then add this chart's tail.
+      B relative(0);
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto ratio=upper_estimate(accumulated[i][e]/(magnitude(current[i][e])+B(1)));
+        arb_max(acb_realref(relative.raw()),acb_realref(relative.raw()),acb_realref(ratio.raw()),bits);
+      }
+      for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
+        auto scaled=upper_estimate(relative*(magnitude(result.values[i][e])+B(1)));
+        arb_max(acb_realref(accumulated[i][e].raw()),acb_realref(accumulated[i][e].raw()),acb_realref(scaled.raw()),bits);
+        accumulated[i][e]=upper_estimate(accumulated[i][e]+result.truncation_errors[i][e]);
+        errors[i][e]=arithmetic_error(result.values[i][e]);
+      }
+    } else for(unsigned i=0;i<d;++i)for(unsigned e=0;e<=k;++e) {
       errors[i][e]=result.errors[i][e];
       // Carry the estimated omitted terms into the next chart as input radii.
       // This remains an error estimate, not a proof of the infinite remainder.
@@ -728,6 +1155,7 @@ inline json::value run(const json::value& input) {
     center=next;
     if(charts%20==0)std::cerr<<"Transport chart "<<charts<<", path parameter "<<center<<"\n";
   }
+  fold_accumulated();
   apply_basis_prefactors(c,B(1),root_values,current,errors);
   if(goal>0) {
     auto tolerance=B::from_strings("1e-"+std::to_string(goal));
@@ -743,9 +1171,13 @@ inline json::value run(const json::value& input) {
     {"timings",json::object{{"preparation_seconds",std::chrono::duration<double>(prepared-start).count()},
       {"numerical_seconds",std::chrono::duration<double>(finished-prepared).count()},{"total_seconds",std::chrono::duration<double>(finished-start).count()}}}};
   output["spectral"]=spectral_diagnostic;
-  output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"finite_lag_rejections",finite_lag_rejections},
+  if(save_requested)output["segments_complete"]=segments_complete;
+  output["recurrence"]=json::object{{"requested",recurrence},{"spectral_charts",0},{"finite_lag_charts",finite_lag_charts},{"series_charts",series_charts},{"centered_charts",centered_charts},{"finite_lag_rejections",finite_lag_rejections},
     {"max_polynomial_degree",c.finite_lag?c.finite_lag->max_degree:0},
-    {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason}};
+    {"preparation_note",save?"saved physical-basis coefficients use series":c.finite_lag_reason},
+    // How omitted-tail estimates reached the endpoint: inside the balls of
+    // every chart, or accumulated beside them and folded in at the end.
+    {"tail_estimates",separate_tails?"accumulated":"propagated"}};
   if(!c.basis_prefactors.empty()) {
     output["basis_convention"]="principal_endpoint";
     output["segments_basis_convention"]="continued";

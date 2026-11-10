@@ -35,6 +35,22 @@ int main(){try {
   for(unsigned row=0;row<2;++row)
     require(acb_contains(centered.coefficients[0][row][0].raw(),expected[row][0].raw()),"integrated chart excluded exact interval flow");
   require(adjoint_detail::enclosure_quality(Boundary{centered.coefficients[0][0],centered.coefficients[0][1]}).approximate_upper()<1e-80,"integrated chart retained fictitious interval growth");
+  {
+    // Probe propagation: midpoints only, two homogeneous probe rows carry the
+    // size of the input uncertainty. The exact flow has radius 2001*2^-300 and
+    // 1999*2^-300; the all-plus probe alone would see (1,1)*2^-300.
+    AdjointConditioningStats probe_stats;AdjointOptions probe;probe.conditioning_stats=&probe_stats;
+    probe.uncertainty=AdjointOptions::Uncertainty::probe;
+    auto estimated=transport_adjoint_rows(connection,start,forcing,{zero,one},probe);
+    require(probe_stats.centered_charts==0 && probe_stats.charts==1,"probe propagation used a chart map");
+    require(estimated.coefficients.size()==1 && estimated.coefficients[0].size()==2,"probe rows leaked into the result");
+    for(unsigned row=0;row<2;++row) {
+      const auto& value=estimated.coefficients[0][row][0];
+      require(acb_overlaps(value.raw(),expected[row][0].raw()),"probe estimate excluded the exact flow");
+      const double radius=std::log2(adjoint_detail::enclosure_uncertainty(value).approximate_upper());
+      require(radius>=std::log2(1999.)-300 && radius<-280,"probe radius does not follow the transported input uncertainty");
+    }
+  }
   // Without the map the broad enclosure is all the recurrence can give, and
   // with the last-resort subdivision enabled it must be reported, not returned.
   options.centered_input=false;options.max_conditioning_halvings=0;stats={};

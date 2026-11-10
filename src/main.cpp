@@ -107,6 +107,16 @@ int main(int argc, char** argv) {
           else if(option=="--fire-simplifier-threads")options.reduction.provider.simplifier_threads=number;
           else options.reduction.provider.memory_bytes=static_cast<std::size_t>(number)*1024*1024;
         }
+        else if(command=="ft" && option=="--uncertainty") {
+          const std::string mode=option_value;
+          if(mode!="probe" && mode!="map")throw std::invalid_argument("FT uncertainty propagation must be probe or map");
+          numerical.adjoint.uncertainty=mode=="map"?diffexp::AdjointOptions::Uncertainty::map:diffexp::AdjointOptions::Uncertainty::probe;
+        }
+        else if(command=="ft" && option=="--transport-bits") {
+          char* end=nullptr;const auto value=std::strtoul(option_value,&end,10);
+          if(!end || *end || value<16 || value>100000)throw std::invalid_argument("transport bits must be in 16..100000");
+          numerical.adjoint.truncation_bits=static_cast<unsigned>(value);
+        }
         else if(command=="ft" && option=="--method") {
           const std::string method=option_value;
           if(method=="values")throw std::invalid_argument("--method values was removed: use adjoint (default), factored or auto");
@@ -283,7 +293,8 @@ int main(int argc, char** argv) {
           }
         }
         const auto& stats=evaluator.statistics();
-        report["ft_transport"]=boost::json::object{{"method","taylor"},{"direct_endpoints",stats.direct_endpoints}};
+        report["ft_transport"]=boost::json::object{{"method","taylor"},{"direct_endpoints",stats.direct_endpoints},
+          {"uncertainty",numerical.adjoint.uncertainty==diffexp::AdjointOptions::Uncertainty::probe?"probe":"map"}};
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
         // Phases of numerical_seconds that precede transport. Disjoint from each
         // other and from ordinary_seconds.
@@ -416,6 +427,13 @@ Feynman-trick recursion
   --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis)
   --leaf-digits N                 1..100000 (default 28)
   --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
+  --uncertainty probe|map         how a transport carries the uncertainty it inherits. probe
+                                  (default): midpoints, with two probe rows following the size of
+                                  the uncertainty, an estimate. map: the chart map applied to the
+                                  intervals, a rigorous enclosure, one expansion per master on
+                                  every chart that needs it
+  --transport-bits N              relative Taylor tail admitted per chart, as a power of two
+                                  (default min(2*ordinary order, precision bits-32))
   --basis-scan-seconds N          0..60 (default 30): per level, the search for an internal master
                                   basis with a smaller exact connection (cheaper transport) that does
                                   not widen the child epsilon window; 0 disables it

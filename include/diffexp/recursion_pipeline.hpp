@@ -33,9 +33,9 @@ struct NumericalOptions {
   std::map<std::size_t,PhysicalBasisTransform> physical_bases;
   slong working_bits=384;
   unsigned endpoint_order=32,ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
-  // Orders of the leaf's Laurent series at epsilon=0 summed beyond the
+  // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
-  unsigned shifted_leaf_orders=40;
+  unsigned shifted_leaf_orders=60;
   Rational overlap{Rational("1/16")},contour_height{Rational("1/10")};
   unsigned leaf_digits=28;
   // Consistency of retained physical endpoint constraints, not a proof about
@@ -46,7 +46,9 @@ struct NumericalOptions {
   // Unsupported fixed sectors retain the complete Frobenius construction.
   bool direct_endpoint_functionals=false;
   LinearMethod linear_method=LinearMethod::adjoint;
-  AdjointOptions adjoint;
+  // The recursion propagates inherited uncertainty by probes (see
+  // AdjointOptions::Uncertainty); the transport's own default is the map.
+  AdjointOptions adjoint=[]{AdjointOptions value;value.uncertainty=AdjointOptions::Uncertainty::probe;return value;}();
   std::optional<causal::Prescription> causal_prescription;
   std::function<void(std::size_t,const std::string&,int)> progress;
   // Accepted fraction of the current ordinary arm's original path. This is
@@ -521,7 +523,15 @@ class Evaluator {
     Node unshifted=node;
     for(auto& operation:unshifted.operations)for(auto& [integral,value]:operation.source_row)if(!value.is_zero())value=value.substitute(back);
     const auto dimension=graph_.dimension.constant(d0_)-graph_.dimension.constant(2)*epsilon;
-    const unsigned top=std::min<unsigned>(options_.max_epsilon,desired_top+options_.shifted_leaf_orders);
+    // The leaf series converges like (shift*2(L+1))^k for L loops (its nearest
+    // gamma-function poles); sum it until that is below the leaf tolerance.
+    double magnitude=0;{B value;arb_set_fmpq(acb_realref(value.raw()),graph_.epsilon_shift.raw(),64);
+      magnitude=std::abs(arf_get_d(arb_midref(acb_realref(value.raw())),ARF_RND_NEAR));}
+    const double convergence=magnitude*2.0*(node.merged.space.loops+1);
+    unsigned orders=options_.shifted_leaf_orders;
+    if(convergence>0 && convergence<0.5)
+      orders=std::min<unsigned>(orders,8+static_cast<unsigned>(std::ceil((leaf.requested_digits+6)*std::log(10.)/-std::log(convergence))));
+    const unsigned top=std::min<unsigned>(options_.max_epsilon,desired_top+orders);
     // The leaf integrator applies its absolute tolerance to every order of the
     // wide series, although order k enters weighted by shift^k: a deep family
     // may need fewer leaf digits here than in the unshifted recursion.
@@ -1260,6 +1270,8 @@ class Evaluator {
           if(stats)text<<", "<<stats->charts-before.charts<<" charts ("<<stats->centered_charts-before.centered_charts
               <<" centred, "<<stats->conditioning_subdivisions-before.conditioning_subdivisions<<" halved)";
           text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
+          if(stats)text<<" (compile "<<stats->compilation_seconds-before.compilation_seconds<<", prepare "
+              <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds<<")";
           report(depth,text.str(),high);
           return result;
         };

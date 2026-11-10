@@ -39,7 +39,8 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
     {"max_charts_per_leg",options.max_charts_per_leg},{"max_taylor_cells",options.max_taylor_cells},
     {"max_circuit_terms",options.max_circuit_terms},{"max_circuit_operations",options.max_circuit_operations},
     {"max_rows_per_batch",options.max_rows_per_batch},{"centered_input",options.centered_input},
-    {"max_conditioning_halvings",options.max_conditioning_halvings}};
+    {"max_conditioning_halvings",options.max_conditioning_halvings},
+    {"uncertainty",options.uncertainty==AdjointOptions::Uncertainty::probe?"probe":"map"}};
   return artifacts::detail::sha256(artifacts::detail::canonical(payload));
 }
 namespace detail {

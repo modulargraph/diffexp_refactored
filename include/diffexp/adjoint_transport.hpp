@@ -76,6 +76,15 @@ struct AdjointOptions {
   // map is computed from exact unit inputs, so cancellations such as A^2=0
   // are resolved before the input intervals enter, once.
   bool centered_input=true;
+  // How the uncertainty a chart inherits is carried on. `map` is the centred
+  // evaluation above: a rigorous enclosure that costs one expansion per
+  // master whenever a chart would wrap its input. `probe` transports
+  // midpoints only and follows the size of the discarded radii along two
+  // extra homogeneous rows, into which every chart's radii are added without
+  // cancellation; the final radii are eight times the largest probe
+  // coefficient of each epsilon order. That is an estimate along two
+  // directions, not an enclosure, at the cost of two rows.
+  enum class Uncertainty { map, probe } uncertainty=Uncertainty::map;
   // A remaining large loss of arithmetic accuracy rejects the step and
   // halves it. Zero disables this last resort.
   unsigned max_conditioning_halvings=12;
@@ -220,8 +229,11 @@ inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary&
 // as far as the retained tail stays below the target and the poles of the
 // connection allow. Ball arithmetic encloses the retained polynomials; no
 // omitted Taylor tail certificate is claimed.
-inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,LaurentRows initial,
-    const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,const AdjointOptions& options={}) {
+namespace adjoint_detail {
+// The last `probes` rows of `initial` are the uncertainty probes of
+// AdjointOptions::Uncertainty::probe (zero forcing, zero initial value).
+inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows initial,
+    const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,const AdjointOptions& options,unsigned probes) {
   using B=Jet::Ball;namespace rc=rational_circuit;
   const auto d=initial.columns(),r=initial.coefficients.size();const unsigned order=options.taylor_order;
   if(matrix.size()!=d || forcing.size()!=r || vertices.empty() || order<8 || order>1000 || !options.max_charts_per_leg ||
@@ -354,9 +366,41 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
     }
     // The homogeneous block alone, compiled when a chart first needs its map.
     std::optional<rc::Compiled> map_circuit;
-    const bool map_fits=options.centered_input && d<=options.max_taylor_cells/(order+1)/epsilon_count/d;
+    const bool map_fits=!probes && options.centered_input && d<=options.max_taylor_cells/(order+1)/epsilon_count/d;
+    // Probe propagation is used from the first chart of a leg that would wrap
+    // its input (the charts a chart map would otherwise serve); until then the
+    // rows are plain interval evaluations and the probes stay exactly zero,
+    // which costs nothing. `fold` moves every radius into the probes.
+    bool folding=false;
+    const auto fold=[&] {
+      // Every row enters the chart as its midpoint. The largest discarded
+      // radius of each (master, epsilon order) is added to both probes
+      // along the sign they already have, so additions never cancel.
+      const auto rows=r-probes;arf_t radius,largest;arf_init(radius);arf_init(largest);
+      for(unsigned j=0;j<d;++j)for(std::size_t k=0;k<epsilon_count;++k) {
+        arf_zero(largest);
+        for(unsigned i=0;i<r;++i) {
+          auto* value=state[i*d+j][k].raw();
+          if(i<rows)for(auto* part:{acb_realref(value),acb_imagref(value)}) {
+            arf_set_mag(radius,arb_radref(part));if(arf_cmp(radius,largest)>0)arf_set(largest,radius);
+          }
+          mag_zero(arb_radref(acb_realref(value)));mag_zero(arb_radref(acb_imagref(value)));
+        }
+        if(arf_is_zero(largest))continue;
+        for(unsigned p=0;p<probes;++p) {
+          auto* value=state[(rows+p)*d+j][k].raw();
+          for(auto* part:{acb_realref(value),acb_imagref(value)}) {
+            const int sign=arf_is_zero(arb_midref(part))?((p&1)&&(j&1)?-1:1):arf_sgn(arb_midref(part));
+            if(sign>0)arf_add(arb_midref(part),arb_midref(part),largest,bits,ARF_RND_UP);
+            else arf_sub(arb_midref(part),arb_midref(part),largest,bits,ARF_RND_DOWN);
+          }
+        }
+      }
+      arf_clear(radius);arf_clear(largest);
+    };
     while(center<1) {
       if(++charts>options.max_charts_per_leg)throw std::runtime_error("adjoint transport chart budget exhausted");
+      if(probes && (folding || beyond_reserve(state))){fold();folding=true;}
       const double limit=shorten(center,clearance_endpoint(center,roots,fraction));
       if(!(limit>center) || limit>1)throw std::runtime_error("adjoint transport geometric chart made no progress");
       B c;acb_set_d(c.raw(),center);
@@ -442,9 +486,9 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
         if(!prepared[index])prepared[index]=prepare(circuits[index]);
         // Inherited uncertainty beyond the reserve would be wrapped by the
         // recurrence; a direct enclosure that lost the reserve was.
-        if(map_fits && adjoint_detail::beyond_reserve(input))return centered(index,input,next);
+        if(map_fits && beyond_reserve(input))return centered(index,input,next);
         auto values=fit(expand(*prepared[index],input),next,target);
-        if(map_fits && adjoint_detail::beyond_reserve(values))return centered(index,input,next);
+        if(map_fits && beyond_reserve(values))return centered(index,input,next);
         return values;
       };
       double next=limit;
@@ -464,6 +508,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
           }
           complete=true;for(auto endpoint:evaluated)complete=complete && endpoint==next;
         }
+        if(probes && !folding && beyond_reserve(output)){fold();folding=true;continue;}
         if(options.max_conditioning_halvings && adjoint_detail::needs_conditioning_subdivision(state,output)) {
           if(halvings>=options.max_conditioning_halvings)
             throw ArithmeticConditioningFailure("adjoint arithmetic-conditioning step budget exhausted");
@@ -489,6 +534,42 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
   }
   LaurentRows out{low,initial.high,std::vector(r,std::vector(d,std::vector<B>(initial.high-low+1)))};
   for(unsigned i=0;i<r;++i)for(unsigned j=0;j<d;++j)out.coefficients[i][j]=std::move(state[i*d+j]);
+  return out;
+}
+} // namespace adjoint_detail
+inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,LaurentRows initial,
+    const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,const AdjointOptions& options={}) {
+  using B=Jet::Ball;
+  if(options.uncertainty==AdjointOptions::Uncertainty::map)
+    return adjoint_detail::transport_rows(matrix,std::move(initial),forcing,vertices,options,0);
+  const unsigned probes=2;
+  const auto d=initial.columns(),r=initial.coefficients.size();
+  if(vertices.empty())throw std::invalid_argument("adjoint transport dimensions/path/budget");
+  initial.coefficients.insert(initial.coefficients.end(),probes,
+    std::vector(d,std::vector<B>(initial.high-initial.low+1,B(0))));
+  auto wide=forcing;wide.insert(wide.end(),probes,std::vector<Exact>(d,vertices[0].constant(0)));
+  auto out=adjoint_detail::transport_rows(matrix,std::move(initial),wide,vertices,options,probes);
+  // The probes hold the transported size of everything that was discarded.
+  const slong bits=B::precision();
+  arf_t size,largest;arf_init(size);arf_init(largest);
+  for(std::size_t k=0;k<out.coefficients[0][0].size();++k) {
+    arf_zero(largest);
+    for(unsigned p=0;p<probes;++p)for(unsigned j=0;j<d;++j)
+      for(const auto* part:{acb_realref(out.coefficients[r+p][j][k].raw()),acb_imagref(out.coefficients[r+p][j][k].raw())}) {
+        arf_abs(size,arb_midref(part));if(arf_cmp(size,largest)>0)arf_set(largest,size);
+      }
+    if(arf_is_zero(largest))continue;
+    arf_mul_2exp_si(largest,largest,3);
+    // An exact zero is a structural zero of the transported operator: the
+    // epsilon-demand analysis relies on it and no uncertainty reached it.
+    for(unsigned i=0;i<r;++i)for(unsigned j=0;j<d;++j) {
+      auto* value=out.coefficients[i][j][k].raw();
+      if(acb_is_zero(value))continue;
+      arb_add_error_arf(acb_realref(value),largest);arb_add_error_arf(acb_imagref(value),largest);
+    }
+  }
+  arf_clear(size);arf_clear(largest);(void)bits;
+  out.coefficients.resize(r);
   return out;
 }
 } // namespace diffexp

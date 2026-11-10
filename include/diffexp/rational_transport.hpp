@@ -1,7 +1,9 @@
 #pragma once
 #include "diffexp/canonical.hpp"
 #include "diffexp/geometry.hpp"
+#include <cmath>
 #include <filesystem>
+#include <limits>
 
 namespace diffexp {
 struct RationalLineEntry {unsigned row,column,epsilon;Exact coefficient;};

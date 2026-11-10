@@ -230,6 +230,15 @@ int main(int argc, char** argv) {
           const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
           progress<<"Numerical level "<<depth+1<<": "<<phase<<"; epsilon through "<<high<<"; elapsed "<<elapsed<<" s\n"<<std::flush;
         };
+        // A transport that runs for minutes reports its position once a minute.
+        numerical.ordinary_fraction_progress=[&progress,start=std::chrono::steady_clock::now(),last=std::chrono::steady_clock::now()](double fraction) mutable {
+          const auto now=std::chrono::steady_clock::now();
+          if(fraction<=0){last=now;return;}
+          if(now-last<std::chrono::seconds(60))return;
+          last=now;
+          progress<<"  adjoint transport at "<<static_cast<int>(100*fraction)<<"% of its path; elapsed "
+            <<std::chrono::duration<double>(now-start).count()<<" s\n"<<std::flush;
+        };
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);

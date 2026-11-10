@@ -114,6 +114,9 @@ struct Options {
 };
 struct Result {
   bool success=false;
+  // A finite-field provider sets this when the failure belongs to the sample
+  // point alone (a pole of an input coefficient), not to the reduction.
+  bool exceptional_point=false;
   std::string reason;
   std::filesystem::path directory;
   std::map<ibp::Integral,ibp::Relation> reductions;

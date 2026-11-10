@@ -15,12 +15,19 @@ struct VerificationLimits {
   bool dense_epsilon_polynomials=false;
   // Cumulative conservative monomial-product estimate, not elapsed CPU work.
   std::function<void(unsigned,unsigned,std::size_t)> column_progress;
+  // Stored columns that contradict the exact verifier are a hard error by
+  // default (fail closed). When set, such records are discarded for this call
+  // and the series is recomputed without reading any checkpoint; the result is
+  // verified like any other, so no unverified coefficient is ever returned.
+  bool recompute_rejected_checkpoints=false;
 };
 struct Result {
   Series series;
   bool cache_hit;
   std::string semantic_id,content_id;
   unsigned columns_reused=0,columns_prepared=0;
+  // Stored columns discarded because the assembled series failed verification.
+  unsigned columns_rejected=0;
 };
 namespace detail {
 inline constexpr const char* algorithm="native-affine-frobenius-canonical-frontier-v1";
@@ -28,6 +35,15 @@ inline constexpr const char* verifier="native-affine-polynomial-residual-normali
 inline constexpr const char* scope="exact_retained_frobenius_coefficients";
 inline void require(bool condition,const char* why) {
   if(!condition)throw std::runtime_error(why);
+}
+// The stored data contradict the exact mathematics. Receiving limits and I/O
+// failures say nothing about a record, so they keep the plain runtime_error
+// and can never be mistaken for a reason to discard an expensive artifact.
+struct Mismatch : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+inline void matches(bool condition,const char* why) {
+  if(!condition)throw Mismatch(why);
 }
 inline void input(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,const Series::Options& options) {
   require(!a.empty() && a.size()<=256 && a.size()<=options.max_dimension &&
@@ -120,8 +136,8 @@ struct PolynomialBudget {
   }
 };
 inline long integer_offset(const Rational& offset,unsigned n) {
-  const auto text=offset.str();require(text.find('/')==std::string::npos && offset.sign()>=0 && offset<=Rational(n),"cached affine power outside retained integer frontier");
-  return std::stol(text);
+  matches(affine_frobenius_detail::is_integer(offset) && offset.sign()>=0 && offset<=Rational(n),"cached affine power outside retained integer frontier");
+  return affine_frobenius_detail::integer_value(offset);
 }
 // Independent verification uses polynomial residuals, not the preparation
 // recurrence. A common epsilon denominator removes rational-expression gcds
@@ -134,26 +150,27 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
   auto connection=fuchsify::detail::zeros(d,d,z),residue=connection;
   for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j){connection[i][j]=x*a[i][j];residue[i][j]=affine_frobenius_detail::taylor(connection[i][j],xi,0)[0];}
   const auto canonical=affine_frobenius_detail::frame(residue,xi,ei);
-  require(state.frame==canonical.transform && state.successors==canonical.successor && state.exponents.size()==d && state.frontiers.size()==d,"cached affine canonical Jordan frame mismatch");
+  matches(state.frame==canonical.transform && state.successors==canonical.successor && state.exponents.size()==d && state.frontiers.size()==d,"cached affine canonical Jordan frame mismatch");
   std::vector<unsigned> cutoffs;
   for(unsigned c=0;c<d;++c) {
-    require(state.exponents[c].power==canonical.exponents[c].power && state.exponents[c].slope==canonical.exponents[c].slope,"cached affine canonical spectrum mismatch");
+    matches(state.exponents[c].power==canonical.exponents[c].power && state.exponents[c].slope==canonical.exponents[c].slope,"cached affine canonical spectrum mismatch");
     auto minimum=canonical.exponents[c].power;
-    for(unsigned j=0;j<d;++j)if((canonical.exponents[j].power-canonical.exponents[c].power).str().find('/')==std::string::npos)minimum=std::min(minimum,canonical.exponents[j].power);
-    require(state.frontiers[c]==minimum+Rational(n),"cached affine absolute frontier mismatch");
+    for(unsigned j=0;j<d;++j)if(affine_frobenius_detail::is_integer(canonical.exponents[j].power-canonical.exponents[c].power))minimum=std::min(minimum,canonical.exponents[j].power);
+    matches(state.frontiers[c]==minimum+Rational(n),"cached affine absolute frontier mismatch");
     cutoffs.push_back(integer_offset(state.frontiers[c]-canonical.exponents[c].power,n));
   }
-  require(state.expansion.rows==d && state.expansion.columns==d && state.expansion.coherent_x_frontier && !state.expansion.omitted_tail_certified && state.expansion.terms.size()<=options.max_terms,"cached affine expansion shape/certificate budget");
+  matches(state.expansion.rows==d && state.expansion.columns==d && state.expansion.coherent_x_frontier && !state.expansion.omitted_tail_certified,"cached affine expansion shape/certificate budget");
+  require(state.expansion.terms.size()<=options.max_terms,"cached affine expansion shape/certificate budget");
   using Coordinate=std::tuple<unsigned,unsigned,unsigned,unsigned>; // column,k,row,log
   std::map<Coordinate,const Series::Term*> coordinates;
   std::vector<std::vector<const Series::Term*>> columns(d);
   for(const auto& term:state.expansion.terms) {
-    require(term.row<d && term.column<d && term.log_degree<=static_cast<std::size_t>(d)*(n+1) && !term.coefficient.is_zero(),"cached affine invalid nonzero term coordinate");
-    require(term.slope==canonical.exponents[term.column].slope,"cached affine term slope mismatch");
+    matches(term.row<d && term.column<d && term.log_degree<=static_cast<std::size_t>(d)*(n+1) && !term.coefficient.is_zero(),"cached affine invalid nonzero term coordinate");
+    matches(term.slope==canonical.exponents[term.column].slope,"cached affine term slope mismatch");
     auto k=integer_offset(term.power-canonical.exponents[term.column].power,cutoffs[term.column]);
     for(const auto& terms:{term.coefficient.numerator_terms(),term.coefficient.denominator_terms()})
-      for(const auto& t:terms)for(unsigned j=0;j<t.powers.size();++j)require(!t.powers[j] || j==ei,"cached affine coefficient depends on a non-epsilon variable");
-    require(coordinates.emplace(Coordinate{term.column,k,term.row,term.log_degree},&term).second,"cached affine duplicate term coordinate");
+      for(const auto& t:terms)for(unsigned j=0;j<t.powers.size();++j)matches(!t.powers[j] || j==ei,"cached affine coefficient depends on a non-epsilon variable");
+    matches(coordinates.emplace(Coordinate{term.column,k,term.row,term.log_degree},&term).second,"cached affine duplicate term coordinate");
     columns[term.column].push_back(&term);
   }
   // Polynomial ODE data are shared across all retained columns and log powers.
@@ -214,7 +231,7 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
           auto term=dp::multiply(dense_p[i][j],numerator[j][l],cutoff,spend);check(term);
           if(residual.size()<term.size())residual.resize(term.size());for(std::size_t k=0;k<term.size();++k)residual[k]-=term[k];check(residual);
         }
-        for(const auto& coefficient:residual)require(coefficient.zero(),"cached affine defining polynomial residual is nonzero within frontier");
+        for(const auto& coefficient:residual)matches(coefficient.zero(),"cached affine defining polynomial residual is nonzero within frontier");
       }
     } else {
     std::vector<std::vector<Exact>> numerator(d,std::vector<Exact>(log_high+1,z));
@@ -234,7 +251,7 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
       for(unsigned j=0;j<d;++j)if(!p[i][j].is_zero() && !numerator[j][l].is_zero()) {
         residual=residual-budget.multiply(p[i][j],numerator[j][l]);budget.check(residual);
       }
-      for(const auto& term:residual.numerator_terms())require(term.powers[xi]>cutoffs[c],"cached affine defining polynomial residual is nonzero within frontier");
+      for(const auto& term:residual.numerator_terms())matches(term.powers[xi]>cutoffs[c],"cached affine defining polynomial residual is nonzero within frontier");
     }
     }
     // A polynomial ODE alone permits arbitrary resonant homogeneous constants.
@@ -242,10 +259,10 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
     // by prepare, including each seeded diagonal constant at k=0.
     for(unsigned i=0;i<d;++i)if(canonical.exponents[i].slope==canonical.exponents[c].slope) {
       const auto offset=canonical.exponents[i].power-canonical.exponents[c].power;
-      if(offset.sign()<0 || offset>Rational(cutoffs[c]) || offset.str().find('/')!=std::string::npos)continue;
+      if(offset.sign()<0 || offset>Rational(cutoffs[c]) || !affine_frobenius_detail::is_integer(offset))continue;
       const auto k=integer_offset(offset,cutoffs[c]);auto value=z;
       for(unsigned j=0;j<d;++j)if(auto found=coordinates.find(Coordinate{c,k,j,0});found!=coordinates.end())value=value+inverse[i][j]*found->second->coefficient;
-      require(value==z.constant(k==0 && i==c?1:0),"cached affine resonant integration constant mismatch");
+      matches(value==z.constant(k==0 && i==c?1:0),"cached affine resonant integration constant mismatch");
     }
     if(limits.column_progress)limits.column_progress(c+1,d,budget.products);
   }
@@ -254,7 +271,7 @@ inline void verify(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,cons
   std::vector<Exact> origin;for(unsigned j=0;j<z.variable_count();++j)origin.push_back(j==xi || j==ei?z:z.variable(j));
   std::optional<Exact> wronskian;
   if(!regular_trace.denominator().substitute(origin).is_zero())wronskian=affine_frobenius_detail::determinant(canonical.transform);
-  require(state.expansion.wronskian_prefactor==wronskian,"cached affine Wronskian metadata mismatch");
+  matches(state.expansion.wronskian_prefactor==wronskian,"cached affine Wronskian metadata mismatch");
 }
 } // namespace detail
 
@@ -277,7 +294,9 @@ struct StateAccess {
     detail::verify(a,xi,ei,n,options,state,limits);
     Series out(a[0][0].constant(0));out.d_=a.size();out.n_=n;out.xi_=xi;out.ei_=ei;out.options_=options;
     out.frame_=std::move(state.frame);out.eigen_=std::move(state.exponents);out.successor_=std::move(state.successors);
-    out.frontiers_=std::move(state.frontiers);out.expansion_=std::move(state.expansion);return out;
+    out.frontiers_=std::move(state.frontiers);out.expansion_=std::move(state.expansion);
+    // Fuchsian rows are unshifted: each is complete exactly through its column frontier.
+    out.expansion_.row_x_valuations.assign(out.d_,0);return out;
   }
 };
 inline artifacts::Identity identity(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,const Series::Options& options={}) {
@@ -377,34 +396,50 @@ inline Result prepare(const Matrix& a,std::size_t xi,std::size_t ei,unsigned n,c
   const artifacts::Certificate checkpoint{"uncertified_numerical","","unverified_exact_preparation_checkpoint",
     {{"status","exact-data checkpoint pending independent residual verification; no error or tail claim"}}};
   const artifacts::CertificateRequirement verified{"exact",detail::verifier,detail::scope};
+  // Builds, checkpoints and independently verifies the series. `reuse` selects
+  // whether durable column checkpoints may stand in for the recurrence.
+  unsigned reused=0;
+  const auto build=[&](bool reuse)->Result {
+    std::vector<std::string> contents(d);unsigned prepared=0;std::size_t loaded_terms=0;reused=0;
+    auto load=[&](unsigned c)->std::optional<std::vector<Series::Term>> {
+      if(!reuse)return std::nullopt;
+      auto record=store.lookup(column_identity(base,c),resources);if(!record)return std::nullopt;
+      auto terms=detail::decode_column(record->payload,a[0][0],d,n,c,options.max_terms-loaded_terms);
+      loaded_terms+=terms.size();contents[c]=record->content_id;++reused;return terms;
+    };
+    auto save=[&](unsigned c,std::span<const Series::Term> terms) {
+      auto record=store.put(column_identity(base,c),resources,detail::column_payload(c,terms),checkpoint);
+      contents[c]=record.content_id;loaded_terms+=terms.size();++prepared;
+    };
+    auto fresh=StateAccess::build_unverified_columns(a,xi,ei,n,options,load,save);
+    auto payload=detail::manifest_payload(fresh);
+    (void)store.put(key,resources,payload,checkpoint,contents);
+    auto restored=StateAccess::restore(a,xi,ei,n,options,StateAccess::release(std::move(fresh)),limits);
+    auto record=store.put(key,resources,payload,exact,contents);
+    return {std::move(restored),false,key.key(),record.content_id,reused,prepared};
+  };
+  // Only a Mismatch condemns stored records; a receiving limit or an I/O error
+  // leaves them intact. A series built without any checkpoint that still fails
+  // verification is a defect of the recurrence and is never retried.
+  unsigned rejected=0;
   auto hit=store.lookup(key,resources,verified);if(!hit)hit=store.lookup(key,resources);
   if(hit) {
-    auto state=detail::decode_manifest(hit->payload,a[0][0],d,n,options);
-    for(unsigned c=0;c<d;++c) {
-      auto record=store.read(column_identity(base,c),hit->parent_content_ids.at(c));
-      detail::require(record.guarantee.dominates(resources),"cached affine column resources mismatch");
-      auto terms=detail::decode_column(record.payload,a[0][0],d,n,c,options.max_terms-state.expansion.terms.size());
-      for(auto& term:terms)state.expansion.terms.push_back(std::move(term));
-    }
-    auto series=StateAccess::restore(a,xi,ei,n,options,std::move(state),limits);
-    if(!verified.accepts(hit->certificate))hit=store.put(key,resources,hit->payload,exact,hit->parent_content_ids);
-    return {std::move(series),true,key.key(),hit->content_id,d,0};
+    try {
+      auto state=detail::decode_manifest(hit->payload,a[0][0],d,n,options);
+      for(unsigned c=0;c<d;++c) {
+        auto record=store.read(column_identity(base,c),hit->parent_content_ids.at(c));
+        detail::require(record.guarantee.dominates(resources),"cached affine column resources mismatch");
+        auto terms=detail::decode_column(record.payload,a[0][0],d,n,c,options.max_terms-state.expansion.terms.size());
+        for(auto& term:terms)state.expansion.terms.push_back(std::move(term));
+      }
+      auto series=StateAccess::restore(a,xi,ei,n,options,std::move(state),limits);
+      if(!verified.accepts(hit->certificate))hit=store.put(key,resources,hit->payload,exact,hit->parent_content_ids);
+      return {std::move(series),true,key.key(),hit->content_id,d,0};
+    } catch(const detail::Mismatch&) {if(!limits.recompute_rejected_checkpoints)throw;rejected=d;}
+  } else {
+    try {return build(true);}
+    catch(const detail::Mismatch&) {if(!limits.recompute_rejected_checkpoints || !reused)throw;rejected=reused;}
   }
-  std::vector<std::string> contents(d);unsigned reused=0,prepared=0;std::size_t loaded_terms=0;
-  auto load=[&](unsigned c)->std::optional<std::vector<Series::Term>> {
-    auto record=store.lookup(column_identity(base,c),resources);if(!record)return std::nullopt;
-    auto terms=detail::decode_column(record->payload,a[0][0],d,n,c,options.max_terms-loaded_terms);
-    loaded_terms+=terms.size();contents[c]=record->content_id;++reused;return terms;
-  };
-  auto save=[&](unsigned c,std::span<const Series::Term> terms) {
-    auto record=store.put(column_identity(base,c),resources,detail::column_payload(c,terms),checkpoint);
-    contents[c]=record.content_id;loaded_terms+=terms.size();++prepared;
-  };
-  auto fresh=StateAccess::build_unverified_columns(a,xi,ei,n,options,load,save);
-  auto payload=detail::manifest_payload(fresh);
-  (void)store.put(key,resources,payload,checkpoint,contents);
-  auto restored=StateAccess::restore(a,xi,ei,n,options,StateAccess::release(std::move(fresh)),limits);
-  auto record=store.put(key,resources,payload,exact,contents);
-  return {std::move(restored),false,key.key(),record.content_id,reused,prepared};
+  auto result=build(false);result.columns_rejected=rejected;return result;
 }
 } // namespace diffexp::cached_affine

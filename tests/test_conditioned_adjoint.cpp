@@ -37,14 +37,27 @@ int main(){try {
   // The same high-degree denominator also makes a polynomial homogeneous
   // column lose its accuracy reserve. Its rational fallback must retain the
   // independent exact N80 value, including the inherited input uncertainty.
+  // These checks pin the single quarter-step N80 polynomial, which is an
+  // arithmetic fixture and not an approximation (its tail is O(0.1)): the
+  // truncation guard is switched off for them and exercised separately below.
   AdjointOptions map_options;AdjointConditioningStats map_stats;
-  map_options.conditioning_stats=&map_stats;
+  map_options.conditioning_stats=&map_stats;map_options.max_truncation_halvings=0;
   auto map_guarded=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},
       LaurentRows{0,0,{{{value}}}},{{zero}},{zero,Exact(f,"1/4")},map_options);
   check(map_stats.polynomial_homogeneous_columns>0 && map_stats.rational_homogeneous_columns>0,
       "inaccurate polynomial homogeneous column did not fall back");
   check(acb_contains(map_guarded.coefficients[0][0][0].raw(),expected.raw()),
       "homogeneous map fallback excluded independent exact retained polynomial");
+  // With the guard on, the same transport must instead subdivide until the
+  // retained tail is consistent and reproduce the analytic solution.
+  {
+    AdjointConditioningStats tail_stats;AdjointOptions tail_options;tail_options.conditioning_stats=&tail_stats;
+    auto accurate=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},exact_laurent_rows({{one}},zero,0),{{zero}},{zero,Exact(f,"1/4")},tail_options);
+    B power,analytic;acb_pow_si(power.raw(),B::from_strings("5/4").raw(),-19,384);
+    const B exponent=(B(1)-power)/B(19);acb_exp(analytic.raw(),exponent.raw(),384);
+    check(tail_stats.truncation_subdivisions>0 && NativeTailMagnitude::upper_abs(accurate.coefficients[0][0][0]-analytic).approximate_upper()<1e-30,
+        "slowly convergent chart near a high-order pole was accepted with an unconverged Taylor tail");
+  }
   // Fixed reserve catches cumulative small losses, even below the 256x trigger.
   B broad(1);arb_add_error_2exp_si(acb_realref(broad.raw()),-190);
   check(adjoint_detail::needs_rational_cross_check({{broad}},{{broad}}),"fixed accuracy reserve depends on per-chart loss");
@@ -60,7 +73,7 @@ int main(){try {
   check(stats.polynomial_charts>0 && !stats.rational_cross_checks && !stats.rational_compilations,"well-conditioned path lost lazy polynomial fast path");
   check(NativeTailMagnitude::upper_abs(benign.coefficients[0][0][0]-B::from_strings("1/2")).approximate_upper()<1e-40,"benign analytic solution mismatch");
   // Exercise lazy reference compilation and the independent-row batch path.
-  options.max_rows_per_batch=1;stats={};
+  options.max_rows_per_batch=1;options.max_truncation_halvings=0;stats={};
   auto many=exact_laurent_rows({{one},{one},{one}},zero,0);
   auto batched=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},many,{{zero},{zero},{zero}},{zero,Exact(f,"1/4")},options);
   // The default compact centered recovery repairs each ill-conditioned batch

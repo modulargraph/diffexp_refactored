@@ -22,5 +22,17 @@ int main(){try {
     throw std::runtime_error("rational contour pullback/accumulator Jacobian");
   for(unsigned k=1;k<rational.integrals.values[0].size();++k)if(size(rational.integrals.values[0][k])>1e-60)
     throw std::runtime_error("rational zero coefficients");
+  // Entire but stiff: no pole bounds the geometric step, so the retained
+  // Taylor tail alone must shorten it. One order-80 chart of unit length
+  // would be wrong at 8e-9 (rate 40) and 6e-3 (rate 60).
+  double tail=0;(void)rational_chart(std::vector<RationalLineEntry>{{0,0,0,Exact(field,"40")}},{{B(1)}},B(0),B(1),80,&tail);
+  if(taylor_tail_consistent(tail,80,384))throw std::runtime_error("unconverged unit chart reported a consistent Taylor tail");
+  (void)rational_chart(std::vector<RationalLineEntry>{{0,0,0,Exact(field,"2")}},{{B(1)}},B(0),B(1),80,&tail);
+  if(!taylor_tail_consistent(tail,80,384))throw std::runtime_error("converged chart reported an inconsistent Taylor tail");
+  for(const char* rate:{"40","60"}) {
+    auto stiff=rational_line({{0,0,0,Exact(field,rate)}},{{B(1)}},80);
+    B expected;acb_exp(expected.raw(),B::from_strings(rate).raw(),384);
+    if(size(stiff[0][0]/expected-B(1))>1e-30)throw std::runtime_error("stiff pole-free line was not subdivided to its Taylor accuracy");
+  }
   std::cout<<"Laurent contour transport and explicit boundary demands passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

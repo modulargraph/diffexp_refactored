@@ -41,6 +41,12 @@ int main(int argc,char** argv) {
   bool rejected=false;try{family_config::parse(bad);}catch(const std::exception&){rejected=true;}if(!rejected)throw std::runtime_error("unknown field accepted");
   bad=document;bad.as_object()["propagators"].as_array()[0].as_object()["mass_squared"]=0.5;
   rejected=false;try{family_config::parse(bad);}catch(const std::exception&){rejected=true;}if(!rejected)throw std::runtime_error("approximate family coefficient accepted");
+  // Slots beyond the physical denominators hold numerators only.
+  auto numerators=family_config::describe(feynman::example_family("sunrise"));
+  numerators.as_object()["integrals"]=boost::json::array{boost::json::array{1,1,1,-1,0},boost::json::array{2,1,1}};
+  if(family_config::parse(numerators).integrals!=std::vector<diffexp::ibp::Integral>{{1,1,1,-1,0},{2,1,1,0,0}})throw std::runtime_error("numerator powers or auxiliary padding");
+  numerators.as_object()["integrals"]=boost::json::array{boost::json::array{1,1,1,1,0}};
+  rejected=false;try{family_config::parse(numerators);}catch(const std::invalid_argument&){rejected=true;}if(!rejected)throw std::runtime_error("positive auxiliary power accepted");
   if(argc>1) {
     auto sunrise=family_config::describe(feynman::example_family("sunrise"));auto& definition=sunrise.as_object();
     definition["name"]="configured-three-distinct-masses";definition["external_gram"]=boost::json::array{boost::json::array{"-3"}};definition["epsilon_order"]=0;

@@ -24,36 +24,65 @@ inline int maximum(const Highs& values,int empty=0) {
   High result;for(const auto& value:values)if(value)raise(result,*value);
   return result.value_or(empty);
 }
+// Exact generic epsilon valuations of a matrix, computed once. nullopt marks an
+// identically zero entry. Demand propagation only ever reads these integers,
+// so callers that revisit one matrix must not re-derive them per relaxation.
+using Valuations = std::vector<std::vector<std::optional<int>>>;
+inline Valuations valuations(const Matrix& a,std::size_t ei) {
+  Valuations result;result.reserve(a.size());
+  for(const auto& row:a) {
+    result.emplace_back();result.back().reserve(row.size());
+    for(const auto& value:row) {
+      if(value.is_zero()){result.back().emplace_back();continue;}
+      const auto v=*exact_epsilon_valuation(value,ei);
+      // Clamp only far outside every admissible window; checked() below then
+      // rejects any demand that would actually depend on such an entry.
+      result.back().emplace_back(static_cast<int>(std::max<std::int64_t>(-100000,std::min<std::int64_t>(100000,v))));
+    }
+  }
+  return result;
+}
 // A_ij couples source j to destination i. This is backward reachability with
 // epsilon valuations as weights, not merely an unweighted component graph.
-inline Highs close(const Matrix& a,Highs highs,std::size_t ei) {
+inline Highs close(const Valuations& a,Highs highs) {
   const auto n=a.size();if(highs.size()!=n)throw std::invalid_argument("component demand shape");
   for(const auto& row:a)if(row.size()!=n)throw std::invalid_argument("component connection shape");
   for(std::size_t pass=0;pass<n;++pass) {
     bool changed=false;
     for(std::size_t i=0;i<n;++i)if(highs[i])for(std::size_t j=0;j<n;++j)
-      if(!a[i][j].is_zero()) {
-        const int need=checked(static_cast<long>(*highs[i])-*exact_epsilon_valuation(a[i][j],ei));
+      if(a[i][j]) {
+        const int need=checked(static_cast<long>(*highs[i])-*a[i][j]);
         if(!highs[j] || *highs[j]<need){highs[j]=need;changed=true;}
       }
     if(!changed)return highs;
     if(pass+1==n) {
       for(std::size_t i=0;i<n;++i)if(highs[i])for(std::size_t j=0;j<n;++j)
-        if(!a[i][j].is_zero() && (!highs[j] || *highs[j]<*highs[i]-*exact_epsilon_valuation(a[i][j],ei)))
+        if(a[i][j] && (!highs[j] || *highs[j]<static_cast<long>(*highs[i])-*a[i][j]))
           throw std::domain_error("negative epsilon demand cycle requires another basis");
     }
   }
   return highs;
 }
-inline Highs pullback(const Matrix& map,const Highs& outputs,std::size_t ei) {
+inline Highs close(const Matrix& a,Highs highs,std::size_t ei) {
+  // Shape errors precede any valuation, as before.
+  if(highs.size()!=a.size())throw std::invalid_argument("component demand shape");
+  for(const auto& row:a)if(row.size()!=a.size())throw std::invalid_argument("component connection shape");
+  return close(valuations(a,ei),std::move(highs));
+}
+inline Highs pullback(const Valuations& map,const Highs& outputs) {
   if(map.size()!=outputs.size() || map.empty())throw std::invalid_argument("component exact map shape");
   Highs result(map.front().size());
   for(std::size_t i=0;i<map.size();++i) {
     if(map[i].size()!=result.size())throw std::invalid_argument("component exact map width");
-    if(outputs[i])for(std::size_t j=0;j<result.size();++j)if(!map[i][j].is_zero())
-      raise(result[j],checked(static_cast<long>(*outputs[i])-*exact_epsilon_valuation(map[i][j],ei)));
+    if(outputs[i])for(std::size_t j=0;j<result.size();++j)if(map[i][j])
+      raise(result[j],checked(static_cast<long>(*outputs[i])-*map[i][j]));
   }
   return result;
+}
+inline Highs pullback(const Matrix& map,const Highs& outputs,std::size_t ei) {
+  if(map.size()!=outputs.size() || map.empty())throw std::invalid_argument("component exact map shape");
+  for(const auto& row:map)if(row.size()!=map.front().size())throw std::invalid_argument("component exact map width");
+  return pullback(valuations(map,ei),outputs);
 }
 // The unknown tail starts at high+1 even if every retained coefficient is zero.
 // Only exactly zero balls may improve the bound; zero-containing balls may not.

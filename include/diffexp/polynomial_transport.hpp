@@ -45,6 +45,12 @@ namespace detail {
 inline B ball(const Rational &q) {
   B result; acb_set_fmpq(result.raw(), q.raw(), B::precision()); return result;
 }
+struct AcbPolynomial {
+  acb_poly_t raw;
+  AcbPolynomial() { acb_poly_init(raw); }
+  ~AcbPolynomial() { acb_poly_clear(raw); }
+  AcbPolynomial(const AcbPolynomial &) = delete;
+};
 inline void validate_parameters(const Exact &e, std::size_t xi,
                                 std::optional<std::size_t> ei) {
   for (const auto &list : {e.numerator_terms(), e.denominator_terms()})
@@ -260,8 +266,10 @@ inline Compiled compile(const ExactEpsilonMatrix &matrix, std::size_t xi,
 }
 // Computes the same retained Taylor polynomial as ordinary rational transport.
 // Ball rounding is enclosed; no omitted-Taylor-tail certificate is inferred.
+// truncation_log2, when requested, receives the heuristic TaylorTailEstimate.
 inline Boundary chart(const Compiled &compiled, const Boundary &boundary,
-                      const B &center, const B &step, unsigned order) {
+                      const B &center, const B &step, unsigned order,
+                      double *truncation_log2 = nullptr) {
   const unsigned d = compiled.dimension;
   if (boundary.size() != d || boundary.empty() || boundary[0].empty() ||
       !order || order > 1000 || !center.is_finite() || !step.is_finite())
@@ -282,22 +290,18 @@ inline Boundary chart(const Compiled &compiled, const Boundary &boundary,
   std::vector<std::vector<B>> polynomials;
   polynomials.reserve(compiled.polynomials.size());
   for (const auto &p : compiled.polynomials) {
-    acb_poly_t a, b;
-    acb_poly_init(a);
-    acb_poly_init(b);
+    detail::AcbPolynomial a, b;
     for (unsigned j = 0; j < p.size(); ++j) {
       auto value = detail::ball(p[j].real);
       auto imaginary = detail::ball(p[j].imaginary);
       arb_set(acb_imagref(value.raw()), acb_realref(imaginary.raw()));
-      acb_poly_set_coeff_acb(a, j, value.raw());
+      acb_poly_set_coeff_acb(a.raw, j, value.raw());
     }
-    acb_poly_taylor_shift(b, a, center.raw(), bits);
+    acb_poly_taylor_shift(b.raw, a.raw, center.raw(), bits);
     std::vector<B> coefficients(p.size());
     for (unsigned j = 0; j < p.size(); ++j)
-      acb_poly_get_coeff_acb(coefficients[j].raw(), b, j);
+      acb_poly_get_coeff_acb(coefficients[j].raw(), b.raw, j);
     polynomials.push_back(std::move(coefficients));
-    acb_poly_clear(a);
-    acb_poly_clear(b);
   }
   std::vector<B> leading(d, B(1));
   for (unsigned i = 0; i < d; ++i)
@@ -399,6 +403,14 @@ inline Boundary chart(const Compiled &compiled, const Boundary &boundary,
     for (unsigned k = 0; k <= high; ++k)
       for (unsigned n = order + 1; n-- > 0;)
         out[i][k] = out[i][k] * step + at(n, i, k);
+  if (truncation_log2) {
+    TaylorTailEstimate tail(step, order);
+    for (unsigned i = 0; i < d; ++i)
+      for (unsigned k = 0; k <= high; ++k)
+        tail.component(out[i][k].raw(),
+                       [&](unsigned n) { return at(n, i, k).raw(); });
+    *truncation_log2 = tail.log2_relative();
+  }
   return out;
 }
 } // namespace diffexp::polynomial_transport

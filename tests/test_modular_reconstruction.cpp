@@ -61,5 +61,16 @@ int main(){try{
     unsigned calls=0;modular::discover(generic,0,2,4,prime,[&]{++calls;});
     if(!calls)throw std::runtime_error("dense scan ignored its deadline checkpoint");
   }
+  // Fits read a view of the caller's samples: a prefix needs no copy, and the
+  // withheld tail of that prefix, not of the full set, decides acceptance.
+  {
+    modular::Samples all(samples[0]);auto prefix=all.first(20);
+    auto viewed=modular::discover(prefix,2,2,6,modular::prime(1)),whole=modular::discover(all,2,2,6,modular::prime(1));
+    if(!viewed||!whole||viewed->coefficients!=whole->coefficients||viewed->ansatz.numerator!=whole->ansatz.numerator)throw std::runtime_error("sample view changed the discovered image");
+    auto tail=samples[0];tail[19].coefficients[2]^=1;
+    if(modular::fit_with_holdouts(modular::Samples(tail).first(20),2,whole->ansatz,modular::prime(1)))throw std::runtime_error("corrupted held-out row of a view was accepted");
+    if(!modular::fit_with_holdouts(modular::Samples(tail).first(19),2,whole->ansatz,modular::prime(1)))throw std::runtime_error("held-out window is not the tail of the supplied view");
+    if(modular::fit_with_holdouts(all.first(modular::holdouts),1,whole->ansatz,modular::prime(1)))throw std::runtime_error("fit without any training row was accepted");
+  }
   std::cout<<"native multivariate modular interpolation, multi-prime CRT, large rational coefficients, zero-constant denominator and held-out corruption checks passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

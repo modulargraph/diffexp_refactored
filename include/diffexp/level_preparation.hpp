@@ -111,7 +111,9 @@ inline Result prepare(const ibp::PropagatorBasis& basis,const Exact& dimension,
     if(!result.success)throw std::runtime_error("level preparation pass budget exhausted");
   }catch(const std::exception& e){result.reason=e.what();}
   result.elapsed_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
-  if(result.success&&result.elapsed_seconds>options.total_timeout_seconds){result.success=false;result.reason="level preparation total time budget exhausted";}
+  // The budget is checked before each provider pass. A closure that was
+  // completed and exactly certified is kept even if its last pass overran:
+  // discarding it would repeat the same work, and overrun the same way.
   return result;
 }
 } // namespace diffexp::level

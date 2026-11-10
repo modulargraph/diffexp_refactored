@@ -41,6 +41,9 @@ struct AdjointPhaseTimer {
 struct AdjointConditioningStats {
   std::size_t polynomial_charts=0, rational_cross_checks=0, rational_compilations=0;
   std::size_t centered_charts=0, homogeneous_chart_maps=0, centered_budget_skips=0, conditioning_subdivisions=0;
+  // Charts rejected because their retained Taylor tail contradicted the step,
+  // and compact row batches split to satisfy term/operation/cell budgets.
+  std::size_t truncation_subdivisions=0, circuit_batch_reductions=0;
   std::size_t polynomial_homogeneous_columns=0, rational_homogeneous_columns=0;
   std::size_t polynomial_midpoint_charts=0, rational_midpoint_charts=0;
   std::size_t reduced_precision_homogeneous_maps=0, full_precision_map_retries=0;
@@ -94,6 +97,15 @@ struct AdjointOptions {
   // A remaining large loss of arithmetic accuracy rejects this step and
   // reduces its length. Zero preserves the original geometric chart sequence.
   unsigned max_conditioning_halvings=12;
+  // The geometric step is a quarter of the pole distance, which bounds late
+  // Taylor terms only for pole-controlled growth. A chart whose retained tail
+  // fails taylor_tail_consistent is rejected and its step halved, at most
+  // this many times per chart. Zero disables the check.
+  unsigned max_truncation_halvings=32;
+  // Exact-term and predicted-operation budgets of one compact row batch. They
+  // are charged per replicated observable row, so an overrun splits the batch
+  // exactly as a live-cell overrun does.
+  std::size_t max_circuit_terms=2000000,max_circuit_operations=200000000;
   // Optional bounded counters; no output or polling inside transport.
   AdjointConditioningStats* conditioning_stats=nullptr;
   // Zero selects the largest independent-row batch fitting max_taylor_cells.
@@ -321,28 +333,17 @@ inline std::vector<Entry> compile(const std::vector<RationalLineEntry>& entries)
 }
 // Repeated observable rows share each exact coefficient's Taylor expansion.
 inline Boundary scalar_chart(const std::vector<Entry>& entries,const Boundary& initial,const Jet::Ball& center,
-    const Jet::Ball& step,unsigned order) {
-  using B=Jet::Ball;const unsigned d=initial.size(),kmax=initial[0].size()-1;
+    const Jet::Ball& step,unsigned order,double* truncation_log2=nullptr) {
+  using B=Jet::Ball;
   Jet x(0,order+1,B::precision());x.set(0,center);x.set(1,B(1));
   auto imaginary=x.constant(0);imaginary.set(0,B::from_strings("0","1"));
-  std::vector<std::vector<B>> coefficients;
+  std::vector<rational_transport_detail::ConvolutionTerm> terms;terms.reserve(entries.size());
   for(const auto& entry:entries) {
-    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});coefficients.emplace_back();
-    for(unsigned n=0;n<order;++n)coefficients.back().push_back(jet.at(n));
+    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});
+    rational_transport_detail::ConvolutionTerm term{entry.epsilon,entry.positions.data(),entry.positions.size(),{}};
+    for(unsigned n=0;n<order;++n)term.coefficients.push_back(jet.at(n));terms.push_back(std::move(term));
   }
-  std::vector<B> values(static_cast<std::size_t>(order+1)*d*(kmax+1),B(0));
-  const auto at=[&](unsigned n,unsigned i,unsigned k)->B&{return values[(static_cast<std::size_t>(n)*d+i)*(kmax+1)+k];};
-  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)at(0,i,k)=initial[i][k];
-  for(unsigned n=0;n<order;++n) {
-    for(unsigned e=0;e<entries.size();++e)for(const auto& [row,column]:entries[e].positions)
-      for(unsigned k=entries[e].epsilon;k<=kmax;++k)for(unsigned m=0;m<=n;++m)
-        if(!coefficients[e][m].is_zero() && !at(n-m,column,k-entries[e].epsilon).is_zero())
-          acb_addmul(at(n+1,row,k).raw(),coefficients[e][m].raw(),at(n-m,column,k-entries[e].epsilon).raw(),B::precision());
-    for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)acb_div_ui(at(n+1,i,k).raw(),at(n+1,i,k).raw(),n+1,B::precision());
-  }
-  Boundary out(d,std::vector<B>(kmax+1,B(0)));
-  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)for(unsigned n=order+1;n-->0;)out[i][k]=out[i][k]*step+at(n,i,k);
-  return out;
+  return rational_transport_detail::convolution_chart(terms,initial,step,order,truncation_log2);
 }
 struct ChartAcbArray {
   slong size;acb_ptr values;
@@ -351,7 +352,7 @@ struct ChartAcbArray {
   ChartAcbArray(const ChartAcbArray&)=delete;
 };
 inline Boundary dot_chart(const std::vector<adjoint_detail::Entry>& entries,const Boundary& initial,
-    const Jet::Ball& center,const Jet::Ball& step,unsigned order) {
+    const Jet::Ball& center,const Jet::Ball& step,unsigned order,double* truncation_log2=nullptr) {
   using B=Jet::Ball;
   const unsigned d=initial.size(),width=initial[0].size();const auto bits=B::precision();
   Jet x(0,order+1,bits);x.set(0,center);x.set(1,B(1));
@@ -382,15 +383,21 @@ inline Boundary dot_chart(const std::vector<adjoint_detail::Entry>& entries,cons
       acb_add(out[i][k].raw(),out[i][k].raw(),at(n,i,k),bits);
     }
   }
+  if(truncation_log2) {
+    TaylorTailEstimate tail(step,order);
+    for(unsigned i=0;i<d;++i)for(unsigned k=0;k<width;++k)
+      tail.component(out[i][k].raw(),[&](unsigned n){return at(n,i,k);});
+    *truncation_log2=tail.log2_relative();
+  }
   return out;
 }
 // Apply the same existing arithmetic reserve and per-chart radius guard.
 // If grouped rounding consumes the reserve, retain the scalar reference path.
 inline Boundary chart(const std::vector<Entry>& entries,const Boundary& initial,
-    const Jet::Ball& center,const Jet::Ball& step,unsigned order) {
-  auto output=dot_chart(entries,initial,center,step,order);
+    const Jet::Ball& center,const Jet::Ball& step,unsigned order,double* truncation_log2=nullptr) {
+  auto output=dot_chart(entries,initial,center,step,order,truncation_log2);
   if(needs_rational_cross_check(initial,output))
-    return scalar_chart(entries,initial,center,step,order);
+    return scalar_chart(entries,initial,center,step,order,truncation_log2);
   return output;
 }
 
@@ -485,38 +492,6 @@ inline Boundary centered_action(const Boundary& input,Reference reference,
   }
   return output;
 }
-// Dense reference adapter retained for compatibility and independent tests.
-template<class Reference>
-inline Boundary centered_action(const Boundary& input,Reference reference,
-    const LaurentRows& homogeneous,std::size_t block_dimension) {
-  using B=Jet::Ball;const auto d=homogeneous.columns();
-  if(!block_dimension || d!=block_dimension || homogeneous.coefficients.size()!=d ||
-      homogeneous.low!=0 || input.size()<d+1 || (input.size()-1)%d ||
-      input[0].size()!=static_cast<std::size_t>(homogeneous.high+1))
-    throw std::invalid_argument("centered chart homogeneous map/input shape");
-  const auto width=input[0].size();
-  Boundary midpoint=input,delta=input;
-  for(unsigned i=0;i<input.size();++i) {
-    if(input[i].size()!=width)throw std::invalid_argument("centered chart epsilon window mismatch");
-    for(unsigned k=0;k<width;++k) {
-      if(!input[i][k].is_finite())throw std::domain_error("nonfinite centered chart input");
-      acb_get_mid(midpoint[i][k].raw(),input[i][k].raw());
-      acb_sub(delta[i][k].raw(),input[i][k].raw(),midpoint[i][k].raw(),B::precision());
-    }
-  }
-  for(const auto& value:delta.back())if(!value.is_zero())
-    throw std::invalid_argument("centered chart requires an exact constant forcing source");
-  auto output=reference(midpoint);
-  if(output.size()!=input.size())throw std::logic_error("centered chart reference shape mismatch");
-  for(const auto& row:output)if(row.size()!=width)throw std::logic_error("centered chart reference window mismatch");
-  for(std::size_t first=0;first+1<input.size();first+=d)
-    for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j)
-      for(unsigned k=0;k<width;++k)for(unsigned e=0;e<=k;++e)
-        if(!homogeneous.coefficients[i][j][e].is_zero() && !delta[first+j][k-e].is_zero())
-          acb_addmul(output[first+i][k].raw(),homogeneous.coefficients[i][j][e].raw(),
-            delta[first+j][k-e].raw(),B::precision());
-  return output;
-}
 } // namespace adjoint_detail
 
 // g' = forcing - g*A. All rows share one compiled sparse recurrence and one
@@ -528,6 +503,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
   using B=Jet::Ball;const auto d=initial.columns(),r=initial.coefficients.size();
   if(matrix.size()!=d || forcing.size()!=r || vertices.empty() || options.taylor_order<8 || options.taylor_order>1000 || !options.max_charts_per_leg ||
       !options.max_centered_map_cells || options.max_centered_map_cells>20000000 || options.max_conditioning_halvings>32 ||
+      options.max_truncation_halvings>64 || !options.max_circuit_terms || !options.max_circuit_operations ||
       !options.centered_map_workers || options.centered_map_workers>4 ||
       (options.centered_map_working_bits && (options.centered_map_working_bits<64 || options.centered_map_working_bits>1000000)))
     throw std::invalid_argument("adjoint transport dimensions/path/budget");
@@ -591,6 +567,9 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
     std::optional<std::vector<adjoint_detail::Entry>> homogeneous_compiled;
     std::optional<polynomial_transport::Compiled> homogeneous_polynomial;
     bool rational_compiled=false;
+    // The homogeneous map only improves enclosures. Once its own resource
+    // budget fails on this leg, the direct recurrences continue without it.
+    bool centered_map_unavailable=false;
     const auto ensure_rational=[&] {
       if(rational_compiled)return;
       AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->compilation_seconds:nullptr};
@@ -602,15 +581,30 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       compiled=adjoint_detail::compile(expanded);rational_compiled=true;
       if(options.conditioning_stats)++options.conditioning_stats->rational_compilations;
     };
+    // First-block restriction of the rational reference; true when newly built.
+    const auto ensure_homogeneous_compiled=[&] {
+      if(homogeneous_compiled)return false;
+      ensure_rational();homogeneous_compiled.emplace();
+      for(const auto& entry:compiled) {
+        adjoint_detail::Entry selected{entry.epsilon,entry.coefficient,{}};
+        for(const auto& [row,column]:entry.positions)if(row<d && column<d)
+          selected.positions.emplace_back(row,column);
+        if(!selected.positions.empty())homogeneous_compiled->push_back(std::move(selected));
+      }
+      return true;
+    };
     if(options.polynomial_recurrence && options.rational_circuit_recurrence) {
       AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->compilation_seconds:nullptr};
       rational_circuit::Options limits;limits.max_cells=options.max_taylor_cells;
       limits.grouped_dot=options.circuit_grouped_dot;
-      limits.max_terms=2000000;limits.max_dimension=static_cast<unsigned>(r*d+1);
+      limits.max_terms=options.max_circuit_terms;limits.max_operations=options.max_circuit_operations;
+      limits.max_dimension=static_cast<unsigned>(r*d+1);
       limits.max_epsilon_degree=std::max(limits.max_epsilon_degree,static_cast<unsigned>(initial.high-low));
-      // The compact recurrence has auxiliary rings in addition to Y history.
-      // Retry smaller independent-row batches transactionally if their full
-      // declared storage cannot fit. Exploration time remains accounted for.
+      // The compact recurrence has auxiliary rings in addition to Y history,
+      // and its exact-term and operation budgets grow with the replicated
+      // rows. Retry smaller independent-row batches transactionally if any of
+      // these declared budgets cannot be met. Exploration time remains accounted for.
+      std::string overflow;
       for(;;) {
         circuits.clear();bool fits=true;
         for(std::size_t first=0;first<r;first+=batch_rows) {
@@ -621,24 +615,30 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
             if(column>count)throw std::logic_error("circuit batch crosses independent observable rows");
             selected.push_back({static_cast<unsigned>(entry.row-begin),static_cast<unsigned>(column),entry.epsilon,entry.coefficient});
           }
-          auto candidate=rational_circuit::compile(selected,count+1,xi,ei,initial.high-low,options.taylor_order,limits);
-          const auto& plan=candidate.data();
-          // Upper bounds are small enough for uint64 by the admitted d,N,K and
-          // compilation term caps; prepare() independently checks every sum.
-          std::uint64_t rings=0,largest=0;
-          for(const auto& stream:plan.streams)if(!plan.denominators[stream.denominator].one)
-            rings+=std::min(options.taylor_order,stream.lag+1)*std::uint64_t(epsilon_count);
-          for(const auto& poly:plan.polynomials)largest=std::max(largest,std::uint64_t(poly.size()));
-          auto shared=std::uint64_t(plan.coefficient_cells)+plan.denominators.size();
-          auto live=(std::uint64_t(options.taylor_order)+2)*plan.dimension*epsilon_count+rings+shared+2;
-          if(limits.grouped_dot)live+=2*rational_circuit::dot_capacity(plan,options.taylor_order,epsilon_count)+1;
-          auto preparation=shared+2*largest+3;
-          if(std::max(live,preparation)>limits.max_cells){fits=false;break;}
-          circuits.push_back(std::move(candidate));
+          try {
+            if(selected.size()>limits.max_terms)throw std::length_error("rational circuit sparse entry budget exhausted");
+            auto candidate=rational_circuit::compile(selected,count+1,xi,ei,initial.high-low,options.taylor_order,limits);
+            const auto& plan=candidate.data();
+            (void)rational_circuit::operation_upper_bound(plan,options.taylor_order,static_cast<unsigned>(epsilon_count));
+            // Upper bounds are small enough for uint64 by the admitted d,N,K and
+            // compilation term caps; prepare() independently checks every sum.
+            std::uint64_t rings=0,largest=0;
+            for(const auto& stream:plan.streams)if(!plan.denominators[stream.denominator].one)
+              rings+=std::min(options.taylor_order,stream.lag+1)*std::uint64_t(epsilon_count);
+            for(const auto& poly:plan.polynomials)largest=std::max(largest,std::uint64_t(poly.size()));
+            auto shared=std::uint64_t(plan.coefficient_cells)+plan.denominators.size();
+            auto live=(std::uint64_t(options.taylor_order)+2)*plan.dimension*epsilon_count+rings+shared+2;
+            if(limits.grouped_dot)live+=2*rational_circuit::dot_capacity(plan,options.taylor_order,epsilon_count)+1;
+            auto preparation=shared+2*largest+3;
+            if(std::max(live,preparation)>limits.max_cells)
+              throw std::length_error("adjoint circuit cannot fit one observable row within the live-cell budget");
+            circuits.push_back(std::move(candidate));
+          } catch(const std::length_error& error) {fits=false;overflow=error.what();break;}
         }
         if(fits)break;
-        if(batch_rows==1)throw std::length_error("adjoint circuit cannot fit one observable row within the live-cell budget");
+        if(batch_rows==1)throw std::length_error(overflow);
         batch_rows=(batch_rows+1)/2;
+        if(options.conditioning_stats)++options.conditioning_stats->circuit_batch_reductions;
       }
       limits.max_dimension=d;
       homogeneous_circuit=rational_circuit::compile(homogeneous_entries,d,xi,ei,initial.high-low,options.taylor_order,limits);
@@ -671,12 +671,28 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       std::vector<std::optional<rational_circuit::Prepared>> circuit_prepared(circuits.size());
       std::optional<rational_circuit::Prepared> homogeneous_prepared;
       slong homogeneous_prepared_bits=0;
-      for(unsigned halvings=0;;++halvings) {
+      for(unsigned halvings=0,truncation_halvings=0;;) {
       // A rejected chart must not leak partially updated observable batches
       // into its retry. No precision, order or epsilon window is changed.
       Boundary before;
-      if(options.max_conditioning_halvings)before=state;
+      if(options.max_conditioning_halvings || options.max_truncation_halvings)before=state;
       B c,end;acb_set_d(c.raw(),center);acb_set_d(end.raw(),next);
+      // Worst TaylorTailEstimate over every recurrence evaluated for this
+      // attempt, relative to its acceptance threshold at the precision used.
+      double truncation_excess=-std::numeric_limits<double>::infinity();
+      const auto note_truncation=[&](double log2_relative) {
+        truncation_excess=std::max(truncation_excess,taylor_tail_excess(log2_relative,options.taylor_order,B::precision()));
+      };
+      const auto polynomial_chart=[&](const polynomial_transport::Compiled& rows,const Boundary& input) {
+        double tail=-std::numeric_limits<double>::infinity();
+        auto out=polynomial_transport::chart(rows,input,c,end-c,options.taylor_order,&tail);
+        note_truncation(tail);return out;
+      };
+      const auto rational_reference=[&](const std::vector<adjoint_detail::Entry>& rows,const Boundary& input) {
+        double tail=-std::numeric_limits<double>::infinity();
+        auto out=adjoint_detail::chart(rows,input,c,end-c,options.taylor_order,&tail);
+        note_truncation(tail);return out;
+      };
       const auto circuit_chart=[&](std::size_t index,const Boundary& input) {
         if(!circuit_prepared.at(index)) {
           AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->preparation_seconds:nullptr};
@@ -686,6 +702,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
         AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->source_seconds:nullptr};
         rational_circuit::Statistics work;
         auto out=rational_circuit::chart(*circuit_prepared[index],input,end-c,&work);
+        note_truncation(work.truncation_log2);
         if(auto* stats=options.conditioning_stats) {
           ++stats->circuit_charts;stats->circuit_addmul_operations+=work.addmul_operations;
           stats->circuit_scalar_operations+=work.scalar_operations;
@@ -716,33 +733,18 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       };
       const auto centered_guard=[&](const Boundary& input,Boundary output,const auto& reference,
           bool centered_only=false) {
-        if(!options.centered_input || (!centered_only && !needs_centered(input,output)))return output;
+        if(!options.centered_input || (!centered_only && (centered_map_unavailable || !needs_centered(input,output))))return output;
         if(d>options.max_centered_map_cells/epsilon_count/d) {
           if(options.conditioning_stats)++options.conditioning_stats->centered_budget_skips;
           return output;
         }
-        if(!homogeneous_map && !homogeneous_circuit) {
-          ensure_rational();
-          if(!homogeneous_compiled) {
-            homogeneous_compiled.emplace();
-            for(const auto& entry:compiled) {
-              adjoint_detail::Entry selected{entry.epsilon,entry.coefficient,{}};
-              for(const auto& [row,column]:entry.positions)if(row<d && column<d)
-                selected.positions.emplace_back(row,column);
-              if(!selected.positions.empty())homogeneous_compiled->push_back(std::move(selected));
-            }
-            if(polynomial) {
-              // Compile the physical homogeneous equation independently of
-              // forcing denominators. Its finite-lag recurrence describes the
-              // same retained map as the rational coefficient recurrence.
-              std::vector<RationalLineEntry> homogeneous_entries;
-              for(const auto& entry:compact)if(entry.row<d && entry.column<d)
-                homogeneous_entries.push_back(entry);
-              auto limits=polynomial->options;limits.max_dimension=d;
-              homogeneous_polynomial=polynomial_transport::compile(homogeneous_entries,d,xi,ei,
-                  epsilon_count-1,options.taylor_order,limits);
-            }
-          }
+        if(!homogeneous_map && !homogeneous_circuit && ensure_homogeneous_compiled() && polynomial) {
+          // Compile the physical homogeneous equation independently of
+          // forcing denominators. Its finite-lag recurrence describes the
+          // same retained map as the rational coefficient recurrence.
+          auto limits=polynomial->options;limits.max_dimension=d;
+          homogeneous_polynomial=polynomial_transport::compile(homogeneous_entries,d,xi,ei,
+              epsilon_count-1,options.taylor_order,limits);
         }
         const auto build_homogeneous_map=[&](slong map_bits) {
           struct PrecisionRestore { slong bits=B::precision(); ~PrecisionRestore(){B::set_precision(bits);} } precision_restore;
@@ -780,7 +782,10 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               }
             }
           }
-          struct ColumnResult {Boundary values;bool polynomial=false,rational=false,circuit=false;rational_circuit::Statistics work;};
+          struct ColumnResult {
+            Boundary values;bool polynomial=false,rational=false,circuit=false;rational_circuit::Statistics work;
+            double truncation=-std::numeric_limits<double>::infinity();
+          };
           std::vector<ColumnResult> results(columns.size());
           const auto workspace_cells=homogeneous_prepared?homogeneous_prepared->data().workspace_cells:
             static_cast<std::size_t>(options.taylor_order+1)*d*epsilon_count;
@@ -793,22 +798,29 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
             const auto column_width=epsilon_count-homogeneous_map->columns[column].minimum_input_order;
             Boundary basis(d,std::vector<B>(column_width,B(0)));basis[column][0]=B(1);
             Boundary mapped;bool rational_needed=true;
+            // Workers only fill their own slot; the caller merges the tails.
+            const auto tail_excess=[&](double log2_relative) {
+              result.truncation=std::max(result.truncation,taylor_tail_excess(log2_relative,options.taylor_order,B::precision()));
+            };
+            double tail=-std::numeric_limits<double>::infinity();
             if(homogeneous_prepared) {
               mapped=rational_circuit::chart(*homogeneous_prepared,basis,end-c,&result.work);
+              tail_excess(result.work.truncation_log2);
               result.circuit=true;result.polynomial=true;
               B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
               const auto quality=adjoint_detail::enclosure_quality(mapped);
               rational_needed=!quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve);
             } else if(homogeneous_polynomial) {
-              mapped=polynomial_transport::chart(*homogeneous_polynomial,basis,c,end-c,options.taylor_order);
-              result.polynomial=true;
+              mapped=polynomial_transport::chart(*homogeneous_polynomial,basis,c,end-c,options.taylor_order,&tail);
+              tail_excess(tail);result.polynomial=true;
               B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
               const auto quality=adjoint_detail::enclosure_quality(mapped);
               rational_needed=!quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve);
             }
             result.rational=rational_needed;
             if(rational_needed && !homogeneous_circuit) {
-              auto reference=adjoint_detail::chart(*homogeneous_compiled,basis,c,end-c,options.taylor_order);
+              auto reference=adjoint_detail::chart(*homogeneous_compiled,basis,c,end-c,options.taylor_order,&tail);
+              tail_excess(tail);
               mapped=homogeneous_polynomial?adjoint_detail::intersect_retained_enclosures(std::move(mapped),reference):std::move(reference);
             }
             result.values=std::move(mapped);
@@ -816,6 +828,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
           // Count completed circuit work even if the low-precision map is
           // discarded. Reference-column counters below count actual fallbacks.
           for(const auto& result:results) {
+            truncation_excess=std::max(truncation_excess,result.truncation);
             if(options.conditioning_stats) {
               options.conditioning_stats->polynomial_homogeneous_columns+=result.polynomial;
               options.conditioning_stats->circuit_homogeneous_columns+=result.circuit;
@@ -839,18 +852,11 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
           for(unsigned index=0;index<columns.size();++index) {
             auto& result=results[index];const auto column=columns[index];
             if(result.rational && homogeneous_circuit) {
-              if(!homogeneous_compiled) {
-                ensure_rational();homogeneous_compiled.emplace();
-                for(const auto& entry:compiled) {
-                  adjoint_detail::Entry selected{entry.epsilon,entry.coefficient,{}};
-                  for(const auto& [row,col]:entry.positions)if(row<d && col<d)selected.positions.emplace_back(row,col);
-                  if(!selected.positions.empty())homogeneous_compiled->push_back(std::move(selected));
-                }
-              }
+              ensure_homogeneous_compiled();
               const auto column_width=epsilon_count-homogeneous_map->columns[column].minimum_input_order;
               Boundary basis(d,std::vector<B>(column_width,B(0)));basis[column][0]=B(1);
               AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->reference_seconds:nullptr};
-              auto reference=adjoint_detail::chart(*homogeneous_compiled,basis,c,end-c,options.taylor_order);
+              auto reference=rational_reference(*homogeneous_compiled,basis);
               result.values=adjoint_detail::intersect_retained_enclosures(std::move(result.values),reference);
             }
             for(unsigned row=0;row<d;++row) {
@@ -890,7 +896,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
       };
       const auto polynomial_advance=[&](const Boundary& input,const auto& fast,
           const auto& reference,const auto& midpoint) {
-        if(compact_recovery && options.compact_centered_only && options.centered_input &&
+        if(compact_recovery && options.compact_centered_only && options.centered_input && !centered_map_unavailable &&
             d<=options.max_centered_map_cells/epsilon_count/d &&
             adjoint_detail::needs_rational_cross_check(input,input)) {
           try {
@@ -899,8 +905,10 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               if(options.conditioning_stats)++options.conditioning_stats->centered_only_charts;
               return centered;
             }
-          } catch(const ArithmeticConditioningFailure&) {
-            homogeneous_map.reset();reduced_homogeneous_map=false;
+          } catch(const std::length_error&) {
+            // Conditioning shortfalls are retried at full precision inside the
+            // guard; what can escape it is a resource budget of the map.
+            homogeneous_map.reset();reduced_homogeneous_map=false;centered_map_unavailable=true;
           }
           // A valid but insufficiently conditioned centered evaluation can
           // still benefit from intersecting the whole-input recurrence.
@@ -919,10 +927,10 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               }
               if(options.conditioning_stats)++options.conditioning_stats->centered_before_rational_charts;
               return centered;
-            } catch(const ArithmeticConditioningFailure&) {
-              // A map may exceed resources or lose conditioning even when a
-              // direct rational chart works. Recover the established ordering.
-              homogeneous_map.reset();reduced_homogeneous_map=false;
+            } catch(const std::length_error&) {
+              // A map may exceed its resource budgets even when a direct
+              // rational chart works. Recover the established ordering.
+              homogeneous_map.reset();reduced_homogeneous_map=false;centered_map_unavailable=true;
               if(options.conditioning_stats)++options.conditioning_stats->centered_first_fallbacks;
             }
           }
@@ -936,8 +944,8 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
         return centered_guard(input,std::move(output),midpoint);
       };
       if(batch_rows==r) {
-        const auto reference=[&](const Boundary& input){ensure_rational();AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->reference_seconds:nullptr};return adjoint_detail::chart(compiled,input,c,end-c,options.taylor_order);};
-        const auto fast=[&](const Boundary& input){return circuits.empty()?polynomial_transport::chart(*polynomial,input,c,end-c,options.taylor_order):circuit_chart(0,input);};
+        const auto reference=[&](const Boundary& input){ensure_rational();AdjointPhaseTimer timer{options.conditioning_stats?&options.conditioning_stats->reference_seconds:nullptr};return rational_reference(compiled,input);};
+        const auto fast=[&](const Boundary& input){return circuits.empty()?polynomial_chart(*polynomial,input):circuit_chart(0,input);};
         const auto midpoint_chart=[&](const Boundary& input) {
           if(polynomial || !circuits.empty())return adjoint_detail::conditioned_midpoint_chart(input,fast,reference,options.conditioning_stats);
           if(options.conditioning_stats)++options.conditioning_stats->rational_midpoint_charts;
@@ -965,7 +973,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
                 selected.positions.emplace_back(row-begin,remap(column));
               if(!selected.positions.empty())view.push_back(std::move(selected));
             }
-            return adjoint_detail::chart(view,input,c,end-c,options.taylor_order);
+            return rational_reference(view,input);
           };
           if(!circuits.empty()) {
             const auto fast=[&](const Boundary& input){return circuit_chart(first/batch_rows,input);};
@@ -986,7 +994,7 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
               if(!selected.positions.empty())view.fallback.push_back(std::move(selected));
             }
             view.polynomials=std::move(polynomial->polynomials);
-            const auto fast=[&](const Boundary& input){return polynomial_transport::chart(view,input,c,end-c,options.taylor_order);};
+            const auto fast=[&](const Boundary& input){return polynomial_chart(view,input);};
             batch=polynomial_advance(batch,fast,rational_batch,[&](const Boundary& input) {
               return adjoint_detail::conditioned_midpoint_chart(input,fast,rational_batch,options.conditioning_stats);
             });
@@ -998,12 +1006,22 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
           for(std::size_t j=0;j<count;++j)state[begin+j]=std::move(batch[j]);
         }
       }
+      // Truncation first: a step the pole distance does not control is not
+      // an arithmetic-conditioning failure and has its own budget.
+      if(options.max_truncation_halvings && truncation_excess>0) {
+        const auto smaller=center+(next-center)/2;
+        if(truncation_halvings>=options.max_truncation_halvings || !(smaller>center) || !(smaller<next))
+          throw std::runtime_error("adjoint transport Taylor truncation step budget exhausted");
+        state=std::move(before);next=smaller;++truncation_halvings;
+        if(options.conditioning_stats)++options.conditioning_stats->truncation_subdivisions;
+        continue;
+      }
       if(options.max_conditioning_halvings && adjoint_detail::needs_conditioning_subdivision(before,state)) {
         if(halvings>=options.max_conditioning_halvings)
           throw ArithmeticConditioningFailure("adjoint arithmetic-conditioning step budget exhausted");
         const auto smaller=center+(next-center)/2;
         if(!(smaller>center) || !(smaller<next))throw ArithmeticConditioningFailure("adjoint conditioning step reached floating-point geometry floor");
-        state=std::move(before);next=smaller;
+        state=std::move(before);next=smaller;++halvings;
         if(options.conditioning_stats)++options.conditioning_stats->conditioning_subdivisions;
         continue;
       }

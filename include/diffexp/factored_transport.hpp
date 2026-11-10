@@ -172,12 +172,9 @@ inline ComponentResult evolve_components(const ExactEpsilonMatrix& a,
       negative_transpose[j][i]=-coefficient;
     }
   }
-  LaurentRows transported=packed;
-  if(!active.empty()) {
-    const auto dispatch=options.transport_dispatch?options.transport_dispatch:transport_adjoint_rows;
-    transported=dispatch(negative_transpose,std::move(packed),
-      ExactEpsilonMatrix(s,std::vector<Exact>(active.size(),z)),vertices,options.transport);
-  }
+  const auto dispatch=options.transport_dispatch?options.transport_dispatch:transport_adjoint_rows;
+  const LaurentRows transported=active.empty()?std::move(packed):dispatch(negative_transpose,std::move(packed),
+    ExactEpsilonMatrix(s,std::vector<Exact>(active.size(),z)),vertices,options.transport);
   const auto extract=[&](std::size_t begin,const ed::Highs& requested) {
     const int high=ed::maximum(requested,input_low);
     int out_low=std::min(input_low,high);

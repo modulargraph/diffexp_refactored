@@ -19,42 +19,120 @@ inline std::vector<PreparedRationalEntry> compile_rational_entries(const std::ve
   return result;
 }
 
-// Ordinary physical-basis evolution for an epsilon-polynomial connection. No
-// homogeneous basis or spectral transform is constructed for a regular step.
-inline Boundary rational_chart(const std::vector<PreparedRationalEntry>& entries,
-    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order) {
-  using B=Jet::Ball;
-  if(boundary.empty() || boundary[0].empty() || !order)throw std::invalid_argument("empty rational-chart boundary or Taylor order");
-  const unsigned d=boundary.size(),kmax=boundary.at(0).size()-1;
-  for(const auto& row:boundary)if(row.size()!=kmax+1)throw std::invalid_argument("rational-chart boundary window mismatch");
-  const auto bits=B::precision();Jet x(0,order+1,bits);x.set(0,center);x.set(1,B(1));
-  struct Entry {unsigned row,col,epsilon;std::vector<B> coefficients;};std::vector<Entry> matrix;
-  auto imaginary=x.constant(0);imaginary.set(0,B::from_strings("0","1"));
-  for(const auto& entry:entries) {
-    if(entry.row>=d || entry.column>=d)throw std::invalid_argument("rational matrix index exceeds boundary size");
-    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});
-    Entry e{entry.row,entry.column,entry.epsilon,{}};
-    for(unsigned n=0;n<order;++n)e.coefficients.push_back(jet.at(n));matrix.push_back(std::move(e));
+// Heuristic size of the omitted tail of one retained Taylor polynomial: the
+// last four |y_n h^n| relative to 1+|value|, as a base-2 logarithm maximised
+// over all components. Ball midpoints are used so inherited input radii do not
+// masquerade as slow convergence; nonfinite enclosures are left to the
+// callers' own finiteness checks. This is a step-control signal, never a
+// remainder certificate.
+class TaylorTailEstimate {
+ public:
+  TaylorTailEstimate(const kernel::ComplexBall& step,unsigned order)
+      :step_(log2_midpoint(step.raw())),first_(order>3?order-3:1),order_(order) {}
+  // coefficient(n) returns the acb_struct pointer of this component's y_n.
+  template<class Coefficient> void component(const acb_struct* value,Coefficient&& coefficient) {
+    const double scale=log2_midpoint(value);
+    if(scale==std::numeric_limits<double>::infinity())return;
+    double terms[4],top=-std::numeric_limits<double>::infinity();unsigned count=0;
+    for(unsigned n=first_;n<=order_;++n) {
+      const double term=log2_midpoint(coefficient(n))+static_cast<double>(n)*step_;
+      if(!std::isfinite(term))continue; // exact zero terms carry no tail; nonfinite ones no information
+      terms[count++]=term;top=std::max(top,term);
+    }
+    if(!count)return;
+    double sum=0;for(unsigned i=0;i<count;++i)sum+=std::exp2(terms[i]-top);
+    const double denominator=scale>0?scale+std::log2(1+std::exp2(-scale)):std::log2(1+std::exp2(scale));
+    worst_=std::max(worst_,top+std::log2(sum)-denominator);
   }
+  double log2_relative()const {return worst_;}
+ private:
+  static double log2_midpoint(const acb_struct* value) {
+    mag_t real,imaginary;mag_init(real);mag_init(imaginary);
+    arf_get_mag(real,arb_midref(acb_realref(value)));arf_get_mag(imaginary,arb_midref(acb_imagref(value)));
+    mag_hypot(real,real,imaginary);
+    const double result=mag_is_zero(real)?-std::numeric_limits<double>::infinity():
+      mag_is_inf(real)?std::numeric_limits<double>::infinity():mag_get_d_log2_approx(real);
+    mag_clear(imaginary);mag_clear(real);return result;
+  }
+  double step_,worst_=-std::numeric_limits<double>::infinity();unsigned first_,order_;
+};
+// Ordinary charts step a quarter of the distance to the nearest pole, so a
+// Fuchsian solution has late terms of relative size about 4^-order. A tail
+// estimate far above that (the constant 2^32 absorbs polynomial growth and
+// component scale separation) means the pole distance does not control this
+// chart, e.g. an entire but stiff direction, and its step must be shortened.
+// Terms below the working precision cannot be resolved and are not required.
+inline double taylor_tail_excess(double log2_relative,unsigned order,slong bits) {
+  return log2_relative-(32.0-std::min(2.0*static_cast<double>(order),static_cast<double>(bits)));
+}
+inline bool taylor_tail_consistent(double log2_relative,unsigned order,slong bits) {
+  return !(taylor_tail_excess(log2_relative,order,bits)>0);
+}
+
+namespace rational_transport_detail {
+// One Taylor-expanded coefficient and every (row,column) position sharing it.
+struct ConvolutionTerm {
+  unsigned epsilon;const std::pair<unsigned,unsigned>* positions;std::size_t count;std::vector<Jet::Ball> coefficients;
+};
+// (n+1) y_{n+1} = sum_m A_m y_{n-m} with the complete Cauchy product, followed
+// by Horner evaluation at step. The physical-basis chart and the adjoint
+// scalar reference are this one recurrence.
+inline Boundary convolution_chart(const std::vector<ConvolutionTerm>& terms,const Boundary& initial,
+    const Jet::Ball& step,unsigned order,double* truncation_log2) {
+  using B=Jet::Ball;const unsigned d=initial.size(),kmax=initial[0].size()-1;const auto bits=B::precision();
   std::vector<B> values(static_cast<std::size_t>(order+1)*d*(kmax+1),B(0));
   const auto at=[&](unsigned n,unsigned i,unsigned k)->B&{return values[(static_cast<std::size_t>(n)*d+i)*(kmax+1)+k];};
-  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)at(0,i,k)=boundary[i][k];
+  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)at(0,i,k)=initial[i][k];
   for(unsigned n=0;n<order;++n) {
-    for(const auto& e:matrix)for(unsigned k=e.epsilon;k<=kmax;++k)
-      for(unsigned m=0;m<=n;++m)
-        if(!e.coefficients[m].is_zero() && !at(n-m,e.col,k-e.epsilon).is_zero())
-          acb_addmul(at(n+1,e.row,k).raw(),e.coefficients[m].raw(),at(n-m,e.col,k-e.epsilon).raw(),bits);
+    for(const auto& e:terms)for(std::size_t p=0;p<e.count;++p) {
+      const auto [row,column]=e.positions[p];
+      for(unsigned k=e.epsilon;k<=kmax;++k)for(unsigned m=0;m<=n;++m)
+        if(!e.coefficients[m].is_zero() && !at(n-m,column,k-e.epsilon).is_zero())
+          acb_addmul(at(n+1,row,k).raw(),e.coefficients[m].raw(),at(n-m,column,k-e.epsilon).raw(),bits);
+    }
     for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)
       acb_div_ui(at(n+1,i,k).raw(),at(n+1,i,k).raw(),n+1,bits);
   }
   Boundary out(d,std::vector<B>(kmax+1,B(0)));
   for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)
     for(unsigned n=order+1;n-->0;)out[i][k]=out[i][k]*step+at(n,i,k);
+  if(truncation_log2) {
+    TaylorTailEstimate tail(step,order);
+    for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)
+      tail.component(out[i][k].raw(),[&](unsigned n){return at(n,i,k).raw();});
+    *truncation_log2=tail.log2_relative();
+  }
   return out;
 }
+} // namespace rational_transport_detail
+
+// Ordinary physical-basis evolution for an epsilon-polynomial connection. No
+// homogeneous basis or spectral transform is constructed for a regular step.
+// truncation_log2, when requested, receives the TaylorTailEstimate of this chart.
+inline Boundary rational_chart(const std::vector<PreparedRationalEntry>& entries,
+    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order,
+    double* truncation_log2=nullptr) {
+  using B=Jet::Ball;
+  if(boundary.empty() || boundary[0].empty() || !order)throw std::invalid_argument("empty rational-chart boundary or Taylor order");
+  const unsigned d=boundary.size(),kmax=boundary.at(0).size()-1;
+  for(const auto& row:boundary)if(row.size()!=kmax+1)throw std::invalid_argument("rational-chart boundary window mismatch");
+  const auto bits=B::precision();Jet x(0,order+1,bits);x.set(0,center);x.set(1,B(1));
+  std::vector<std::pair<unsigned,unsigned>> positions;positions.reserve(entries.size());
+  std::vector<rational_transport_detail::ConvolutionTerm> matrix;matrix.reserve(entries.size());
+  auto imaginary=x.constant(0);imaginary.set(0,B::from_strings("0","1"));
+  for(const auto& entry:entries) {
+    if(entry.row>=d || entry.column>=d)throw std::invalid_argument("rational matrix index exceeds boundary size");
+    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});
+    positions.emplace_back(entry.row,entry.column);
+    rational_transport_detail::ConvolutionTerm e{entry.epsilon,&positions.back(),1,{}};
+    for(unsigned n=0;n<order;++n)e.coefficients.push_back(jet.at(n));matrix.push_back(std::move(e));
+  }
+  return rational_transport_detail::convolution_chart(matrix,boundary,step,order,truncation_log2);
+}
 inline Boundary rational_chart(const std::vector<RationalLineEntry>& entries,
-    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order) {
-  return rational_chart(compile_rational_entries(entries),boundary,center,step,order);
+    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order,
+    double* truncation_log2=nullptr) {
+  return rational_chart(compile_rational_entries(entries),boundary,center,step,order,truncation_log2);
 }
 
 inline Boundary rational_line(const std::vector<RationalLineEntry>& entries,Boundary boundary,unsigned order=64) {
@@ -77,8 +155,19 @@ inline Boundary rational_line(const std::vector<RationalLineEntry>& entries,Boun
   while(center<1) {
     if(++charts>20000)throw std::runtime_error("physical-basis transport chart budget exhausted");
     double next=clearance_endpoint(center,roots);
-    B c,end;acb_set_d(c.raw(),center);acb_set_d(end.raw(),next);
-    boundary=rational_chart(compiled,boundary,c,end-c,order);center=next;
+    B c;acb_set_d(c.raw(),center);
+    // The geometric step only bounds late terms for pole-controlled growth.
+    // Reject a chart whose retained tail contradicts it and halve its step.
+    for(unsigned halvings=0;;++halvings) {
+      B end;acb_set_d(end.raw(),next);double tail=-std::numeric_limits<double>::infinity();
+      auto candidate=rational_chart(compiled,boundary,c,end-c,order,&tail);
+      if(taylor_tail_consistent(tail,order,B::precision())){boundary=std::move(candidate);break;}
+      const double smaller=center+(next-center)/2;
+      if(halvings>=40 || !(smaller>center) || !(smaller<next))
+        throw std::runtime_error("physical-basis transport Taylor truncation step budget exhausted");
+      next=smaller;
+    }
+    center=next;
   }
   return boundary;
 }

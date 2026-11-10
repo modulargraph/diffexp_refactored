@@ -12,6 +12,8 @@ namespace diffexp::transport {
 struct SpectralOptions {
   unsigned accuracy_goal=30;
   unsigned max_nodes=128;
+  // Zero selects the working precision. A larger value governs the node
+  // samples, the collocation operator, its inverse and its products.
   slong matrix_bits=0;
   double seconds_budget=30;
   std::uint64_t work_budget=100000000;
@@ -35,9 +37,9 @@ struct SpectralResult {
 };
 namespace spectral_detail {
 // A cost/sampling guard, not a theorem about the solution's convergence rate.
-inline double node_forecast(const Compiled& c,unsigned goal) {
+inline double node_forecast(const std::vector<B>& singularities,unsigned goal) {
   double log_rho=std::numeric_limits<double>::infinity();
-  for(const auto& singularity:c.singularities) {
+  for(const auto& singularity:singularities) {
     const std::complex<double> z(2*arf_get_d(arb_midref(acb_realref(singularity.raw())),ARF_RND_NEAR)-1,
         2*arf_get_d(arb_midref(acb_imagref(singularity.raw())),ARF_RND_NEAR));
     const auto root=std::sqrt(z*z-std::complex<double>(1));
@@ -46,12 +48,11 @@ inline double node_forecast(const Compiled& c,unsigned goal) {
   }
   return log_rho>0?(goal+4)*std::log(10.)/log_rho:std::numeric_limits<double>::infinity();
 }
+inline double node_forecast(const Compiled& c,unsigned goal){return node_forecast(c.singularities,goal);}
 struct Rejected:std::runtime_error {using std::runtime_error::runtime_error;};
-struct PrecisionScope {
-  slong previous;
-  explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}
-  ~PrecisionScope(){B::set_precision(previous);}
-};
+using PrecisionScope=kernel::PrecisionScope;
+// Refinement levels shared by the collocation backends.
+inline constexpr std::array<unsigned,9> ladder{8,12,16,24,32,48,64,96,128};
 struct Matrix {
   acb_mat_t value;
   Matrix(unsigned rows,unsigned columns){acb_mat_init(value,rows,columns);}
@@ -91,6 +92,21 @@ inline std::optional<double> tail_factor(double ratio,unsigned a,unsigned b) {
   const double remaining=std::max(std::pow(high,b),std::numeric_limits<double>::min());
   if(!(remaining<0.75))return std::nullopt;
   return 16.0*remaining/(1.0-remaining);
+}
+// Estimated omitted tail of one component from its last two refinement
+// differences (node increments previous_increment, then increment). Changes
+// below the rounding floor carry only that floor. Relative decay is
+// meaningless for tiny cancellation/noise terms: without resolved geometric
+// decay, demand two small absolute changes with a safety factor instead and
+// report the component as absolute.
+struct TailEstimate {B tail;bool absolute;};
+inline TailEstimate estimate_tail(const B& before,const B& after,const B& floor,
+    unsigned previous_increment,unsigned increment) {
+  std::optional<double> factor;
+  if(le(before+after,floor))factor=0;
+  else if(!before.is_zero())factor=tail_factor(ratio_upper(after,before),previous_increment,increment);
+  if(!factor)return {upper(B(16)*(before+after)+floor),true};
+  B multiplier;acb_set_d(multiplier.raw(),*factor);return {upper(after*multiplier+floor),false};
 }
 // The same nonzero-image-disk proof as geometry's continuation, with checks
 // inside recursive subdivisions so a difficult root cannot consume the budget.
@@ -196,7 +212,7 @@ inline std::optional<SpectralResult> spectral_try(const Compiled& c,const Bounda
     prepared=std::chrono::steady_clock::now();preparation_done=true;
     std::uint64_t work=0;Boundary previous,previous_difference;unsigned previous_nodes=0,previous_increment=0;
     std::string last_reason="three refinement levels are required";
-    for(unsigned n:std::array<unsigned,9>{8,12,16,24,32,48,64,96,128}) {
+    for(unsigned n:ladder) {
       if(n>options.max_nodes)break;check();const unsigned m=n+1;
       const std::uint64_t candidate=static_cast<std::uint64_t>(m)*m*m+static_cast<std::uint64_t>(k)*n*(c.canonical_entries.size()+products.size()+static_cast<std::uint64_t>(m)*d);
       if(candidate>options.work_budget || work>options.work_budget-candidate)throw Rejected("spectral arithmetic work budget exhausted");work+=candidate;
@@ -204,16 +220,22 @@ inline std::optional<SpectralResult> spectral_try(const Compiled& c,const Bounda
       diagnostics.nodes_tried.push_back(n);
       std::vector<const Node*> nodes(m);nodes[0]=&cache.begin()->second;for(unsigned j=1;j<m;++j)nodes[j]=&node(j,n);
       Matrix derivative(m,m),integral(m,m),state(m,d),rhs(m,d),next(m,d);
-      std::vector<B> weights(m);for(unsigned j=0;j<m;++j){weights[j]=B(j%2?-1:1);if(j==0||j==n)weights[j]=weights[j]/B(2);}
-      acb_one(acb_mat_entry(derivative.value,0,0));
-      for(unsigned row=1;row<m;++row){check();B diagonal(0);for(unsigned column=0;column<m;++column)if(column!=row){auto entry=weights[column]/weights[row]/(nodes[row]->point-nodes[column]->point);acb_set(acb_mat_entry(derivative.value,row,column),entry.raw());diagonal=diagonal-entry;}acb_set(acb_mat_entry(derivative.value,row,row),diagonal.raw());}
-      if(!acb_mat_inv(integral.value,derivative.value,bits))throw Rejected("spectral scalar collocation inverse is unresolved");check();
+      {
+        // Ball operators follow the ambient precision, so the operator is
+        // assembled and inverted inside the matrix-precision scope.
+        PrecisionScope precision(matrix_bits);
+        std::vector<B> weights(m);for(unsigned j=0;j<m;++j){weights[j]=B(j%2?-1:1);if(j==0||j==n)weights[j]=weights[j]/B(2);}
+        acb_one(acb_mat_entry(derivative.value,0,0));
+        for(unsigned row=1;row<m;++row){check();B diagonal(0);for(unsigned column=0;column<m;++column)if(column!=row){auto entry=weights[column]/weights[row]/(nodes[row]->point-nodes[column]->point);acb_set(acb_mat_entry(derivative.value,row,column),entry.raw());diagonal=diagonal-entry;}acb_set(acb_mat_entry(derivative.value,row,row),diagonal.raw());}
+        if(!acb_mat_inv(integral.value,derivative.value,matrix_bits))throw Rejected("spectral scalar collocation inverse is unresolved");
+      }
+      check();
       Boundary values(d,std::vector<B>(k+1,B(0)));
       for(unsigned row=0;row<d;++row){values[row][0]=initial[row][0];for(unsigned j=0;j<m;++j)acb_set(acb_mat_entry(state.value,j,row),initial[row][0].raw());}
       for(unsigned epsilon=1;epsilon<=k;++epsilon) {
         acb_mat_zero(rhs.value);B product;
         for(unsigned j=1;j<m;++j){check();unsigned group=0;for(const auto& p:products){if((++group%256)==0)check();acb_mul(product.raw(),nodes[j]->forms[p.letter].raw(),acb_mat_entry(state.value,j,p.column),bits);for(const auto& target:p.targets){auto destination=acb_mat_entry(rhs.value,j,target.row);if(target.integer)acb_addmul_si(destination,product.raw(),target.integer_weight,bits);else acb_addmul(destination,target.weight.raw(),product.raw(),bits);}}}
-        acb_mat_mul(next.value,integral.value,rhs.value,bits);check();
+        acb_mat_mul(next.value,integral.value,rhs.value,matrix_bits);check();
         // The inverse's boundary column is exactly the constant function one;
         // add it directly, avoiding artificial loss of boundary-box correlation.
         for(unsigned j=0;j<m;++j)for(unsigned row=0;row<d;++row)acb_add(acb_mat_entry(next.value,j,row),acb_mat_entry(next.value,j,row),initial[row][epsilon].raw(),bits);
@@ -232,17 +254,9 @@ inline std::optional<SpectralResult> spectral_try(const Compiled& c,const Bounda
           if(epsilon==0)continue;
           const auto floor=roundoff_floor*(midpoint_scale(value)+midpoint_scale(previous[row][epsilon]));
           const auto& before=previous_difference[row][epsilon];const auto& after=current_difference[row][epsilon];
-          std::optional<double> factor;
-          if(le(before+after,floor))factor=0;
-          else if(!before.is_zero())factor=tail_factor(ratio_upper(after,before),previous_increment,increment);
-          if(!factor) {
-            ++absolute_stability;
-            // Relative decay is meaningless for tiny cancellation/noise terms.
-            // Demand two small absolute changes with a safety factor instead.
-            tails[row][epsilon]=upper(B(16)*(before+after)+floor);
-          } else {
-            B multiplier;acb_set_d(multiplier.raw(),*factor);tails[row][epsilon]=upper(after*multiplier+floor);
-          }
+          auto estimate=estimate_tail(before,after,floor,previous_increment,increment);
+          if(estimate.absolute)++absolute_stability;
+          tails[row][epsilon]=std::move(estimate.tail);
           if(!acceptable(value,tails[row][epsilon])){converged=false;last_reason="estimated spectral tail exceeds accuracy budget";}
         }
         if(!boxes_ok)throw Rejected("spectral arithmetic or input boxes exceed accuracy budget");

@@ -9,14 +9,26 @@ struct Options {
   std::filesystem::path cache_directory;
   unsigned dots=1,numerators=2,max_degree=16,max_variable_degree=64,max_primes=8,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
-  std::size_t sample_checkpoint_interval=1;
-  bool degree_slices=false,dots_first=false,target_sector_seeds=false,selected_source_rows=false;
+  // Ordinary samples are recomputed from their deterministic points in a few
+  // milliseconds, so only every n-th is made durable; held-out validation
+  // samples, which the completion record replays, are always retained.
+  std::size_t sample_checkpoint_interval=32;
+  bool degree_slices=false,dots_first=false,target_sector_seeds=false;
+  // Fresh primal eliminations certify a reconstruction (see Sampler). By
+  // default each eliminates ALL generated equations. With selected_source_rows
+  // only the complete pilot does; later ones eliminate the pilot's dependency
+  // subset of ORIGINAL equations. complete_validation_anchor additionally
+  // eliminates all equations at the first held-out point of every validation
+  // attempt, i.e. at a fresh prime and point.
+  bool selected_source_rows=false,complete_validation_anchor=false;
+  // Zero derives the arithmetic-trace node budget from the memory budget.
+  std::size_t max_trace_nodes=0;
   std::optional<std::size_t> closure_parameter;
   unsigned max_planning_passes=6;
   std::function<void(const std::string&)> progress;
 };
 struct Statistics {
-  std::size_t probes=0,equations=0,templates=0,full_solves=0,trace_replays=0,trace_fallbacks=0;
+  std::size_t probes=0,equations=0,templates=0,full_solves=0,trace_replays=0,trace_fallbacks=0,trace_disabled=0;
   std::size_t selected_solves=0,selected_equations=0,selection_fallbacks=0;
   double generation_seconds=0,elimination_seconds=0,full_solve_seconds=0,trace_learning_seconds=0,trace_replay_seconds=0;
   double selected_solve_seconds=0;
@@ -53,8 +65,18 @@ class Sampler {
     input_geometry_.inputs=inputs_.size();
   }
   const Statistics& statistics()const{return stats_;}
+  // `independent` solves by fresh primal elimination of original rows, without
+  // the arithmetic trace. `complete` forces that elimination to use every
+  // generated equation even when a dependency subset is available.
+  //
+  // What a subset elimination establishes: its rows are combinations of original
+  // IBP equations at this point, hence identities of the complete system too.
+  // If the terminal integrals are free columns of the complete system at this
+  // point, uniqueness of the normal form makes them equal to the complete
+  // system's rows. What only a complete elimination establishes: that no
+  // omitted equation reduces a terminal integral here (rank and minimality).
   fire::Result operator()(const std::vector<ibp::Integral>& requested,const std::vector<modular::Word>& point,
-      modular::Word modulus,const fire::Options& limits,bool independent=false) {
+      modular::Word modulus,const fire::Options& limits,bool independent=false,bool complete=false) {
     fire::Result out;
     try {
       if(!limits.timeout_seconds||!limits.memory_bytes||requested.empty()||requested.size()>10000)
@@ -89,7 +111,10 @@ class Sampler {
       auto& parametric=plan_->program;auto& program=parametric.program;
       const auto generated=std::chrono::steady_clock::now();
       ::ibp::SolveOptions solve;solve.seconds=remaining();solve.max_fill=std::min<std::size_t>(12000000,limits.memory_bytes/64);
-      std::vector<::ibp::Row> rows;auto& learned=plan_->primes[modulus];bool replayed=false;
+      // Reconstruction visits primes in order and never returns to one, so a
+      // trace is dropped once ordinary sampling has moved to another prime.
+      if(!independent&&plan_->sampling_modulus!=modulus){for(auto& [other,state]:plan_->primes)if(other!=modulus){state.trace.reset();state.workspace={};}plan_->sampling_modulus=modulus;}
+      std::vector<::ibp::Row> rows;auto& learned=plan_->primes[modulus];bool replayed=false,learning_overran=false;
       if(!independent&&learned.trace){const auto replay_begin=std::chrono::steady_clock::now();try{rows=learned.trace->evaluate_inputs(values,field,learned.workspace);++stats_.trace_replays;replayed=true;}
         catch(const std::domain_error&){learned.trace.reset();++stats_.trace_fallbacks;}stats_.trace_replay_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-replay_begin).count();}
       // Held-out samples use fresh primal elimination of original IBP rows,
@@ -110,9 +135,11 @@ class Sampler {
           if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
-        bool selected=options_.selected_source_rows&&plan_->selection.has_value();primal(selected);
+        bool selected=options_.selected_source_rows&&plan_->selection.has_value()&&!complete;primal(selected);
         if(selected&&terminals(full)!=plan_->terminal_columns){++stats_.selection_fallbacks;selected=false;primal(false);}
-        if(options_.selected_source_rows&&!selected){
+        // A complete anchor compares against the pilot; it does not replace the
+        // pilot's subset, which the reconstruction samples were drawn from.
+        if(options_.selected_source_rows&&!selected&&!(complete&&plan_->selection)){
           plan_->selection=solver->selection();plan_->terminal_columns=terminals(full);
           if(options_.progress)options_.progress("full IBP pilot: "+std::to_string(program.equations.size())+" equations, "+std::to_string(plan_->selection->size())+" original rows needed for target identities");
         }
@@ -120,14 +147,21 @@ class Sampler {
         rows=std::move(full);
         if(!independent){
           if(replayed)learned.checked=true;
-          else {const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.seconds=remaining();tracing.max_fill=solve.max_fill;
-            tracing.max_nodes=std::min<std::size_t>(std::numeric_limits<std::uint32_t>::max(),limits.memory_bytes/128);
-            learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,solver->selection(),tracing);
-            if(learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
+          else if(!learned.disabled){const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.seconds=remaining();tracing.max_fill=solve.max_fill;
+            tracing.max_nodes=options_.max_trace_nodes?options_.max_trace_nodes:std::min<std::size_t>(std::numeric_limits<std::uint32_t>::max(),limits.memory_bytes/128);
+            // The primal rows above are already a valid reduction. A trace that
+            // does not fit its node, fill or time budget only costs the replay
+            // shortcut: this prime continues with primal elimination alone.
+            try{learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,solver->selection(),tracing);}
+            catch(const std::length_error&){learned.disabled=true;}
+            catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
+            if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;if(options_.progress)options_.progress("arithmetic trace exceeds its budget at this prime; continuing with primal elimination");}
+            else if(learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
             learned.checked=false;stats_.trace_learning_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-learning_begin).count();}
         }
       }
-      remaining();
+      // Time spent on an abandoned trace is not charged to the valid reduction.
+      if(!learning_overran)remaining();
       auto indices=[&](const ::ibp::Integral& a){ibp::Integral r;for(unsigned i=0;i<geometry.n;++i)r.push_back(a.powers[i]);return r;};
       std::set<ibp::Integral> terminal;
       for(unsigned i=0;i<rows.size();++i){ibp::Relation row;for(const auto& term:rows[i]){auto a=indices(program.integrals[term.column]);terminal.insert(a);ibp::add(row,a,dimension_.parse(std::to_string(term.value)));}out.reductions.emplace(requested[i],std::move(row));}
@@ -136,13 +170,17 @@ class Sampler {
       out.success=true;fire_batch::validate(out,basis_,dimension_,requested);
       ++stats_.probes;stats_.generation_seconds+=std::chrono::duration<double>(generated-begin).count();
       stats_.elimination_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-generated).count();
+    }catch(const std::domain_error& e){
+      // Raised only while evaluating the input coefficients: a pole at this
+      // point (or modulo this prime). Elimination itself never inverts zero.
+      out.success=false;out.exceptional_point=true;out.reason=e.what();
     }catch(const std::exception& e){out.success=false;out.reason=e.what();}
     return out;
   }
  private:
   std::size_t sector(const ibp::Integral& a)const {std::size_t mask=0;for(unsigned i=0;i<basis_.physical_count;++i)if(a[i]>0)mask|=std::size_t(1)<<i;return mask;}
-  struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false;};
-  struct Plan {::ibp::ParametricProgram program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0;std::map<modular::Word,Learned> primes;
+  struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
+  struct Plan {::ibp::ParametricProgram program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
     std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;};
   ::ibp::InputGeometry input_geometry_;std::vector<Exact> inputs_;std::unique_ptr<Plan> plan_;
   ibp::PropagatorBasis basis_;Exact dimension_;Options options_;Statistics stats_;
@@ -194,7 +232,7 @@ class Session {
       for(unsigned check=0;check<2;++check){
         auto elapsed=duration<double>(steady_clock::now()-started).count();if(elapsed>=limits.timeout_seconds)throw std::runtime_error("IBP closure planning time budget");
         auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
-        auto point=modular::point(dimension_.variable_count(),1,60000+2*pass+check);
+        auto point=modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass+check);
         auto reduced=(*sampler_)(batch,point,prime(1),receiving);++planning_.probes;
         if(!reduced.success)throw std::runtime_error("IBP closure planning probe failed: "+reduced.reason);
         std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.reductions)for(const auto& [master,c]:row)if(!c.is_zero())found.insert(master);
@@ -221,11 +259,15 @@ class Session {
     out.provider_identity=std::string("ibp-solver-parametric-")+(o.dots_first?"dots-first":"total-degree")+"-v1-dots-"+std::to_string(o.dots)+"-numerators-"+std::to_string(o.numerators);
     if(o.target_sector_seeds)out.provider_identity+="-subsector-seeds-v1";
     if(o.selected_source_rows)out.provider_identity+="-fresh-original-row-subset-validation-v1";
+    const bool anchored=o.selected_source_rows&&o.complete_validation_anchor;
+    if(anchored)out.provider_identity+="-complete-anchor-v1";
     out.prime_table="descending-61-bit-primes-v1";out.sparse_lifting=true;out.degree_slices=o.degree_slices;
     out.sample_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits);};
-    out.validation_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true);};return out;
+    out.validation_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true);};
+    if(anchored)out.anchor_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true,true);};
+    return out;
   }
   std::shared_ptr<Sampler> sampler_;fire_modular::Session session_;
-  ibp::PropagatorBasis basis_;Exact dimension_;const ExactField& field_;Options options_;ClosurePlanningStatistics planning_;
+  ibp::PropagatorBasis basis_;Exact dimension_;ExactField field_;Options options_;ClosurePlanningStatistics planning_;
 };
 } // namespace diffexp::ibp_solver

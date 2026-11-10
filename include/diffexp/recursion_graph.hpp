@@ -179,7 +179,8 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf};
     const bool done=node.scalar_leaf || node.closure.ordered_basis.empty();
     graph.nodes.push_back(std::move(node));graph.events.push_back(event);if(progress)progress(event);
-    if(total>options.total_timeout_seconds)throw std::runtime_error("recursive preparation total time budget exhausted");
+    // The total budget gates the START of a level (top of this loop). A level
+    // that has just completed is never discarded for finishing late.
     if(done)break;
   }
   return graph;

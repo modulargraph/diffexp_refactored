@@ -20,8 +20,8 @@ class UnivariateRational {
   bool is_zero()const{return fmpz_poly_q_is_zero(value_);}
   UnivariateRational constant(long n)const{return UnivariateRational(n);}
   UnivariateRational constant(const Rational& value)const {
-    fmpq_t q;fmpq_init(q);fmpq_set_str(q,value.str().c_str(),10);fmpq_canonicalise(q);
-    UnivariateRational out;fmpz_poly_set_fmpz(out.value_->num,fmpq_numref(q));fmpz_poly_set_fmpz(out.value_->den,fmpq_denref(q));fmpq_clear(q);return out;
+    // A Rational is always canonical, which is the fmpz_poly_q normal form of a constant.
+    UnivariateRational out;fmpz_poly_set_fmpz(out.value_->num,fmpq_numref(value.raw()));fmpz_poly_set_fmpz(out.value_->den,fmpq_denref(value.raw()));return out;
   }
   Exact exact(const Exact& sample,std::size_t variable)const{return sample.from_univariate_polynomials(value_->num,value_->den,variable);}
   friend UnivariateRational operator+(const UnivariateRational& a,const UnivariateRational& b){UnivariateRational out;fmpz_poly_q_add(out.value_,a.value_,b.value_);return out;}

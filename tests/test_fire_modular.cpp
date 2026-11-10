@@ -8,6 +8,18 @@ int main(int argc,char** argv){try{
   fire::SymbolMap symbols(field.variables());auto parsed=fire::import_table_text(text,field,2,&symbols);
   if(parsed.at({2,0}).at({1,0})!=(d-d.constant(2))/d.constant(3))throw std::runtime_error("modular reconstructed table roundtrip");
   if(fire_modular::detail::active_variables("devara+devarab",fire::SymbolMap({"x","eps"}))!=std::vector<std::size_t>{0})throw std::runtime_error("active variable token detection");
+  // Residues are read once into machine words; absent terms are zero.
+  {const auto p=modular::prime(1);const auto third=d.constant(7)/d.constant(3);
+    auto words=fire_modular::detail::residues({{{1,0},{{{1,0},d.constant(1)}}},{{2,0},{{{1,0},third}}}},{5},p);fire_modular::detail::Probe sample{{5},words,7};
+    if(fire_modular::detail::coefficient(sample,{{2,0},{1,0}})!=modular::rational_mod(Rational("7/3"),p)||fire_modular::detail::coefficient(sample,{{1,0},{1,0}})!=1||fire_modular::detail::coefficient(sample,{{1,0},{2,0}})!=0)
+      throw std::runtime_error("finite-field residue rows");
+    if(fire_modular::detail::masters(sample)!=std::set<ibp::Integral>{{1,0}})throw std::runtime_error("residue row terminal integrals");
+    bool nonconstant=false;try{fire_modular::detail::residues({{{2,0},{{{1,0},d}}}},{5},p);}catch(const std::runtime_error&){nonconstant=true;}
+    if(!nonconstant)throw std::runtime_error("symbolic finite-field output accepted");}
+  // Ordinary, slice, planning and held-out points never share an ordinal.
+  namespace ordinals=fire_modular::ordinals;
+  if(ordinals::slice(4096)||!ordinals::slice(ordinals::slice_base)||!ordinals::slice(ordinals::slice_base+ordinals::slice_stride*ordinals::slice_axes-1)||ordinals::slice(ordinals::planning_base)||
+     ordinals::validation(ordinals::planning_base+32)||!ordinals::validation(ordinals::validation_point(2,0))||ordinals::validation_point(14,2)!=101402)throw std::runtime_error("sample ordinal ranges overlap");
   if(argc==1){std::cout<<"modular provider codecs passed; supply FIRE7p for integration\n";return 0;}
   fire_modular::Options opts;opts.executable=argv[1];
   if(argc>2)opts.cache_directory=argv[2];else {auto name=(std::filesystem::temp_directory_path()/"de3-modular-validation-XXXXXX").string();std::vector<char> tmp(name.begin(),name.end());tmp.push_back(0);if(!mkdtemp(tmp.data()))throw std::runtime_error("cannot create private modular validation directory");opts.cache_directory=tmp.data();}

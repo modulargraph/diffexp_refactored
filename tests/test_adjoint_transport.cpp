@@ -21,6 +21,23 @@ int main(){try {
   auto exponential=transport_adjoint_rows({{one+one}},exact_laurent_rows({{one}},zero,4),{{zero}},{zero,one});
   B expected;acb_exp(expected.raw(),B(-2).raw(),384);
   require(size(exponential.coefficients[0][0][0]-expected)<1e-75,"adjoint scalar exponential independent solution");
+  // A pole-free but stiff connection: g'=a*g over one unit leg. The pole
+  // distance allows a single chart, whose order-80 polynomial is wrong at
+  // 8e-9 (a=40) and 6e-3 (a=60); every executor must subdivide instead.
+  AdjointConditioningStats calm;AdjointOptions watched;watched.conditioning_stats=&calm;
+  (void)transport_adjoint_rows({{one+one}},exact_laurent_rows({{one}},zero,4),{{zero}},{zero,one},watched);
+  require(calm.truncation_subdivisions==0,"converged chart was subdivided by the truncation guard");
+  for(const char* rate:{"40","60"})for(unsigned route=0;route<3;++route) {
+    AdjointConditioningStats work;AdjointOptions stiff;stiff.conditioning_stats=&work;
+    if(route==1)stiff.rational_circuit_recurrence=false;
+    if(route==2)stiff.polynomial_recurrence=false;
+    auto grown=transport_adjoint_rows({{-Exact(field,rate)}},exact_laurent_rows({{one}},zero,0),{{zero}},{zero,one},stiff);
+    B truth;acb_exp(truth.raw(),B::from_strings(rate).raw(),384);
+    require(work.truncation_subdivisions>0 && size(grown.coefficients[0][0][0]/truth-B(1))<1e-30,
+      "stiff pole-free adjoint chart was not subdivided to its Taylor accuracy");
+    stiff.max_truncation_halvings=1;
+    fails([&]{transport_adjoint_rows({{-Exact(field,rate)}},exact_laurent_rows({{one}},zero,0),{{zero}},{zero,one},stiff);},"truncation step budget");
+  }
   // Combine shared-source coefficients before the one uncertain application.
   auto left=exact_laurent_rows({{Exact(field,"100000000000000000000+1")}},zero,0);
   auto right=exact_laurent_rows({{Exact(field,"-100000000000000000000")}},zero,0);

@@ -137,6 +137,16 @@ int main() {
     rejects<std::length_error>([&]{rc::prepare(rc::compile(entries,3,0,1,4,32,options),center,32);},"storage budget ignored");
     options=rc::Options{};options.max_operations=10;
     rejects<std::length_error>([&]{rc::prepare(rc::compile(entries,3,0,1,4,32,options),center,32);},"operation budget ignored");
+    check(rc::operation_upper_bound(rc::compile(entries,3,0,1,4,32).data(),32,5)==rc::prepare(rc::compile(entries,3,0,1,4,32),center,32).data().operation_upper_bound,
+          "operation estimate differs from preparation");
+    rejects<std::length_error>([&]{rc::operation_upper_bound(rc::compile(entries,3,0,1,4,32,options).data(),32,5);},"operation estimate ignored budget");
+    // The retained tail of a pole-free but stiff chart contradicts the
+    // quarter-radius step; a converged chart does not.
+    rc::Statistics stiff,calm;
+    (void)rc::chart(rc::compile({{0,0,0,e("40")}},1,0,1,0,80),{{B(1)}},B(0),B(1),80,&stiff);
+    (void)rc::chart(rc::compile({{0,0,0,e("2")}},1,0,1,0,80),{{B(1)}},B(0),B(1),80,&calm);
+    check(!taylor_tail_consistent(stiff.truncation_log2,80,B::precision()) && taylor_tail_consistent(calm.truncation_log2,80,B::precision()),
+          "rational circuit Taylor tail estimate");
     std::cout << "Rational circuit reference, epsilon, complex, ring, alias, independent RHS, budgets and domain checks passed\n";
   } catch (const std::exception &error) {std::cerr<<error.what()<<'\n';return 1;}
 }

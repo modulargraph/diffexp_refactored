@@ -65,6 +65,10 @@ inline Configuration parse(const json::value& value) {
   if(auto p=o.if_contains("integrals"))for(const auto& row:p->as_array()) {
     ibp::Integral indices;for(const auto& v:row.as_array())indices.push_back(integer(v,-100,100,"integral power"));
     if(indices.size()<f.physical_count || indices.size()>slots)throw std::invalid_argument("integral indices must cover physical slots and fit the scalar-product basis");
+    // Slots beyond the physical denominators are numerators (irreducible scalar
+    // products): a positive power there would name a propagator the family lacks.
+    for(std::size_t k=f.physical_count;k<indices.size();++k)if(indices[k]>0)
+      throw std::invalid_argument("integral power "+std::to_string(indices[k])+" in auxiliary slot "+std::to_string(k)+" must be zero or negative (a numerator)");
     indices.resize(slots,0);c.integrals.push_back(std::move(indices));
   }
   if(c.integrals.size()>5000)throw std::invalid_argument("integral request count exceeds 5000");

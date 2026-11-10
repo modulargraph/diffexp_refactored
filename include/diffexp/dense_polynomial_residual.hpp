@@ -28,7 +28,7 @@ class Polynomial {
   }
   bool zero()const{return fmpq_poly_is_zero(value_);}
   std::size_t terms()const{std::size_t n=0;for(slong i=0;i<fmpq_poly_length(value_);++i)n+=!fmpz_is_zero(value_->coeffs+i);return n;}
-  void set(unsigned exponent,const Rational& coefficient){fmpq_t q;fmpq_init(q);if(fmpq_set_str(q,coefficient.str().c_str(),10)){fmpq_clear(q);throw std::invalid_argument("polynomial coefficient");}fmpq_canonicalise(q);fmpq_poly_set_coeff_fmpq(value_,exponent,q);fmpq_clear(q);}
+  void set(unsigned exponent,const Rational& coefficient){fmpq_poly_set_coeff_fmpq(value_,exponent,coefficient.raw());}
   Polynomial& operator+=(const Polynomial& p){fmpq_poly_add(value_,value_,p.value_);return *this;}
   Polynomial& operator-=(const Polynomial& p){fmpq_poly_sub(value_,value_,p.value_);return *this;}
   Polynomial scaled(long n)const{Polynomial p;fmpq_poly_scalar_mul_si(p.value_,value_,n);return p;}

@@ -66,6 +66,9 @@ struct Statistics {
   // including terms executed together by a FLINT dot product.
   std::size_t addmul_operations = 0, scalar_operations = 0, dot_products = 0;
   std::size_t live_cells = 0, auxiliary_cells = 0, coefficient_cells = 0;
+  // TaylorTailEstimate of the evaluated chart (see rational_transport.hpp);
+  // -infinity when every late term is an exact zero.
+  double truncation_log2 = -std::numeric_limits<double>::infinity();
 };
 namespace detail {
 inline bool zero(const Scalar &a) {
@@ -281,6 +284,41 @@ inline std::size_t dot_capacity(const PlanData& plan,unsigned order,unsigned wid
   return capacity;
 }
 
+// Conservative count of executor arithmetic terms, including zero terms, for
+// one chart of this plan. Taylor-shift internals are preparation work and are
+// not chart operations. Throws std::length_error beyond plan.options.max_operations,
+// so orchestration can test a candidate batch before any numerical preparation.
+inline std::size_t operation_upper_bound(const PlanData& plan,unsigned order,unsigned max_width) {
+  if(!order || !max_width || max_width>plan.epsilon_high+1)
+    throw std::invalid_argument("rational circuit operation estimate order/window");
+  std::size_t total=0;
+  auto spend=[&](std::size_t count) {
+    total=detail::add(total,count,plan.options.max_operations,
+                      "rational circuit predicted operation budget exhausted");
+  };
+  spend(detail::mul(detail::mul(order,plan.dimension,plan.options.max_operations,"rational circuit operation budget"),
+                    max_width,plan.options.max_operations,"rational circuit operation budget"));
+  spend(detail::mul(detail::mul(2*(order+1),plan.dimension,plan.options.max_operations,"rational circuit operation budget"),
+                    max_width,plan.options.max_operations,"rational circuit operation budget"));
+  for (unsigned n=0;n<order;++n) {
+    for (const auto &stream:plan.streams) {
+      const auto &q=plan.denominators[stream.denominator];
+      if (q.one) continue;
+      spend(max_width); // cached inverse pivot multiplication
+      for (auto b:q.blocks) if (b.epsilon<max_width) {
+        std::size_t length=std::min<std::size_t>(n+1,plan.polynomials[b.polynomial].size());
+        if (b.epsilon==0) --length;
+        spend(detail::mul(length,max_width-b.epsilon,plan.options.max_operations,"rational circuit operation budget"));
+      }
+    }
+    for (const auto &entry:plan.entries)
+      for (auto b:entry.numerator) if (b.epsilon<max_width)
+        spend(detail::mul(std::min<std::size_t>(n+1,plan.polynomials[b.polynomial].size()),
+                          max_width-b.epsilon,plan.options.max_operations,"rational circuit operation budget"));
+  }
+  return total;
+}
+
 struct PreparedData {
   Compiled compiled;
   B center;
@@ -341,32 +379,7 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
       detail::cells(2,largest_polynomial,limit),limit,"rational circuit preparation storage budget exhausted");
   out.preparation_cells=detail::add(out.preparation_cells,plan.denominators.size()+3,limit,
       "rational circuit preparation pivot storage budget exhausted");
-  // Conservative count of executor arithmetic terms, including zero terms.
-  // Taylor-shift internals are preparation work and are not chart operations.
-  auto spend=[&](std::size_t count) {
-    out.operation_upper_bound=detail::add(out.operation_upper_bound,count,plan.options.max_operations,
-                                         "rational circuit predicted operation budget exhausted");
-  };
-  spend(detail::mul(detail::mul(order,plan.dimension,plan.options.max_operations,"rational circuit operation budget"),
-                    max_width,plan.options.max_operations,"rational circuit operation budget"));
-  spend(detail::mul(detail::mul(2*(order+1),plan.dimension,plan.options.max_operations,"rational circuit operation budget"),
-                    max_width,plan.options.max_operations,"rational circuit operation budget"));
-  for (unsigned n=0;n<order;++n) {
-    for (const auto &stream:plan.streams) {
-      const auto &q=plan.denominators[stream.denominator];
-      if (q.one) continue;
-      spend(max_width); // cached inverse pivot multiplication
-      for (auto b:q.blocks) if (b.epsilon<max_width) {
-        std::size_t length=std::min<std::size_t>(n+1,plan.polynomials[b.polynomial].size());
-        if (b.epsilon==0) --length;
-        spend(detail::mul(length,max_width-b.epsilon,plan.options.max_operations,"rational circuit operation budget"));
-      }
-    }
-    for (const auto &entry:plan.entries)
-      for (auto b:entry.numerator) if (b.epsilon<max_width)
-        spend(detail::mul(std::min<std::size_t>(n+1,plan.polynomials[b.polynomial].size()),
-                          max_width-b.epsilon,plan.options.max_operations,"rational circuit operation budget"));
-  }
+  out.operation_upper_bound=operation_upper_bound(plan,order,max_width);
   out.polynomials.reserve(plan.polynomials.size());
   for (const auto &p:plan.polynomials) {
     detail::AcbPolynomial input,shifted;
@@ -549,6 +562,13 @@ inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B 
         spend(false); acb_mul(result[i][k].raw(),result[i][k].raw(),step.raw(),p.precision);
         spend(false); acb_add(result[i][k].raw(),result[i][k].raw(),yat(n,i,k).raw(),p.precision);
       }
+  if (statistics) {
+    TaylorTailEstimate tail(step,order);
+    for (auto i:queue)
+      for (unsigned k=0;k<width;++k)
+        tail.component(result[i][k].raw(),[&](unsigned n){return yat(n,i,k).raw();});
+    stats.truncation_log2=tail.log2_relative();
+  }
   return result;
 }
 inline Boundary chart(const Compiled &compiled,const Boundary &boundary,const B &center,

@@ -1,6 +1,6 @@
 #pragma once
 // Cache-only bounded discovery of exact internal physical coordinates.
-// scan_candidates exposes a demand-first frontier; scan retains the legacy compatibility behavior.
+// scan_candidates exposes a demand-first frontier to a caller-supplied cost.
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/recursion_physical_basis.hpp"
 #include <chrono>
@@ -8,7 +8,6 @@
 #include <cmath>
 #include <map>
 #include <optional>
-#include <random>
 #include <set>
 
 namespace diffexp::physical_basis_scan {
@@ -16,7 +15,6 @@ using Matrix = ExactEpsilonMatrix;
 struct Options {
   double seconds = 1;
   std::size_t max_trials = 256, max_source_equations = 4096;
-  unsigned seed = 20260907;
   std::size_t epsilon_variable = 1;
   bool use_source_identities = true;
   // Discovery bounds, separate from the caller's complete demand acceptance.
@@ -33,16 +31,11 @@ struct Stats {
   std::size_t original_characters = 0, selected_characters = 0;
   std::size_t recovered_coordinates = 0;
   double seconds = 0, source_recovery_seconds = 0;
-  bool budget_reached = false, exact_verified = false;
+  // budget_reached also covers the deterministic trial bound; time_expired is
+  // the wall-clock part alone. Only the latter makes a search incomplete in a
+  // machine-dependent way, so only it forbids persisting a negative decision.
+  bool budget_reached = false, time_expired = false, exact_verified = false;
   std::string reason;
-};
-struct Result {
-  std::optional<recursion::PhysicalBasisTransform> transform;
-  // Up to three earlier exact improvements, smallest connection first.
-  // The caller can try these when the best candidate fails its endpoint gate.
-  std::vector<recursion::PhysicalBasisTransform> alternatives;
-  Stats stats;
-  std::vector<ibp::Integral> selected_integrals;
 };
 inline std::size_t expression_characters(const Matrix &a) {
   std::size_t count = 0;
@@ -102,217 +95,6 @@ inline Sector sector(const ibp::Integral &a, std::size_t physical) {
   return s;
 }
 } // namespace detail
-
-// The budget is cooperative: an in-flight exact algebra operation finishes.
-// No IBP identities are generated. Input requests and their coordinates are
-// immutable. Full endpoint demand and conditioning remain caller acceptance
-// gates; a smaller rational connection alone does not imply fewer epsilon
-// orders.
-inline Result scan(const level::Result &level, std::size_t physical_count,
-                   std::size_t parameter, const Options &options = {}) {
-  using namespace fuchsify::detail;
-  Result result;
-  const auto began = std::chrono::steady_clock::now();
-  auto elapsed = [&] {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                         began)
-        .count();
-  };
-  auto expired = [&] { return elapsed() >= options.seconds; };
-  try {
-    const auto d = level.ordered_basis.size();
-    if (!(options.seconds > 0) || options.seconds > 60 || !options.max_trials)
-      throw std::invalid_argument(
-          "physical basis scan requires finite positive budgets");
-    if (!d || level.matrix.size() != d ||
-        level.requested_integrals.size() != level.target_rows.size())
-      throw std::invalid_argument("physical basis scan input dimensions");
-    if (level.matrix[0].size() != d)
-      throw std::invalid_argument("basis scan matrix width");
-    const auto &z = level.matrix[0][0];
-    if (parameter >= z.variable_count())
-      throw std::invalid_argument("basis scan parameter");
-    Matrix t = identity(d, z), inverse_t = t, connection = level.matrix;
-    recursion::verify_physical_basis({level.matrix, t, t, level.matrix},
-                                     level.matrix, parameter);
-    result.stats.original_characters = expression_characters(
-        epsilon_diagonal_gauge(connection, options.epsilon_variable).matrix);
-    result.stats.selected_characters = result.stats.original_characters;
-    auto selected = level.ordered_basis;
-    std::vector<ibp::Integral> integrals;
-    Matrix rows;
-    std::set<ibp::Integral> seen;
-    std::set<detail::Sector> sectors;
-    for (const auto &a : selected)
-      sectors.insert(detail::sector(a, physical_count));
-    auto add = [&](const ibp::Integral &a, const std::vector<Exact> &row) {
-      if (row.size() != d)
-        throw std::invalid_argument("basis candidate coordinate width");
-      if (sectors.contains(detail::sector(a, physical_count)) &&
-          seen.insert(a).second) {
-        integrals.push_back(a);
-        rows.push_back(row);
-      }
-    };
-    for (std::size_t i = 0; i < d; ++i)
-      add(selected[i], t[i]);
-    for (std::size_t i = 0; i < level.target_rows.size(); ++i)
-      add(level.requested_integrals[i], level.target_rows[i]);
-    // Reuse source identities only while a small part of the total budget
-    // remains. Each appended row gets an exact reduction witness check.
-    if (options.use_source_identities && !level.source_identities.empty() &&
-        level.source_identities.size() <= options.max_source_equations &&
-        elapsed() < options.seconds * .2) {
-      const auto recovery_began = elapsed();
-      ibp::ExactReducer reducer(z, level.source_identities.size());
-      std::set<ibp::Integral> possible;
-      for (const auto &relation : level.source_identities) {
-        if (elapsed() >= options.seconds * .2)
-          break;
-        reducer.insert(relation);
-        for (const auto &[a, c] : relation)
-          if (!seen.contains(a) &&
-              sectors.contains(detail::sector(a, physical_count)))
-            possible.insert(a);
-      }
-      ibp::BasisReduction coordinates(reducer, level.ordered_basis, z);
-      for (const auto &a : possible) {
-        if (elapsed() >= options.seconds * .3)
-          break;
-        try {
-          auto row = coordinates.resolve({{a, z.constant(1)}});
-          ibp::Relation residual{{a, z.constant(1)}};
-          for (std::size_t k = 0; k < d; ++k)
-            ibp::add(residual, selected[k], -row[k]);
-          auto proof = reducer.reduce(residual);
-          if (!proof.remainder.empty() || !reducer.verify(residual, proof))
-            continue;
-          add(a, row);
-          ++result.stats.recovered_coordinates;
-        } catch (const std::runtime_error &) {
-        }
-      }
-      result.stats.source_recovery_seconds = elapsed() - recovery_began;
-    }
-    result.stats.candidates = rows.size();
-    for (const auto &a : integrals)
-      result.stats.numerator_candidates +=
-          std::any_of(a.begin(), a.end(), [](int p) { return p < 0; });
-    std::vector<std::pair<std::size_t, std::size_t>> trials;
-    for (std::size_t pos = 0; pos < d; ++pos)
-      for (std::size_t id = 0; id < rows.size(); ++id)
-        if (integrals[id] != selected[pos] &&
-            detail::sector(integrals[id], physical_count) ==
-                detail::sector(selected[pos], physical_count))
-          trials.emplace_back(pos, id);
-    std::mt19937 random(options.seed);
-    std::shuffle(trials.begin(), trials.end(), random);
-    for (std::size_t cursor = 0;
-         !trials.empty() && result.stats.trials < options.max_trials &&
-         !expired();
-         ++cursor) {
-      const auto [pos, id] = trials[cursor % trials.size()];
-      ++result.stats.trials;
-      if (integrals[id] == selected[pos])
-        continue;
-      try {
-        // H differs from identity in one row, so its exact inverse is explicit.
-        auto q = multiply(Matrix{rows[id]}, inverse_t)[0];
-        if (q[pos].is_zero()) {
-          ++result.stats.singular;
-          continue;
-        }
-        auto h = identity(d, z), hi = h;
-        h[pos] = q;
-        for (std::size_t k = 0; k < d; ++k)
-          hi[pos][k] = k == pos ? z.constant(1) / q[pos] : -q[k] / q[pos];
-        auto next_t = t;
-        next_t[pos] = rows[id];
-        auto next_inverse = multiply(inverse_t, hi);
-        auto rhs = multiply(h, connection);
-        for (std::size_t k = 0; k < d; ++k)
-          rhs[pos][k] = rhs[pos][k] + q[k].derivative(parameter);
-        auto next_connection = multiply(rhs, hi);
-        auto regular =
-            epsilon_diagonal_gauge(next_connection, options.epsilon_variable);
-        const auto size = expression_characters(regular.matrix);
-        if (size >= result.stats.selected_characters)
-          continue;
-        if (!no_new_parameter_poles(level.matrix,
-                                    {&next_t, &next_inverse, &next_connection},
-                                    parameter)) {
-          ++result.stats.new_poles;
-          continue;
-        }
-        recursion::PhysicalBasisTransform candidate{
-            level.matrix, next_t, next_inverse, next_connection};
-        recursion::verify_physical_basis(candidate, level.matrix, parameter);
-        // Public requested rows are unchanged. Verify their coordinate
-        // roundtrip.
-        if (!level.target_rows.empty() &&
-            multiply(multiply(level.target_rows, next_inverse), next_t) !=
-                level.target_rows)
-          throw std::logic_error("basis scan requested-coordinate identity");
-        // Compose the x-independent epsilon gauge into the returned map.
-        for (std::size_t i = 0; i < d; ++i)
-          for (std::size_t k = 0; k < d; ++k) {
-            candidate.to_basis[i][k] = epsilon_gauge_detail::multiply_power(
-                candidate.to_basis[i][k], options.epsilon_variable,
-                -regular.shifts[i]);
-            candidate.from_basis[i][k] = epsilon_gauge_detail::multiply_power(
-                candidate.from_basis[i][k], options.epsilon_variable,
-                regular.shifts[k]);
-          }
-        candidate.connection = std::move(regular.matrix);
-        recursion::verify_physical_basis(candidate, level.matrix, parameter);
-        t = std::move(next_t);
-        inverse_t = std::move(next_inverse);
-        connection = std::move(next_connection);
-        selected[pos] = integrals[id];
-        if (result.transform) {
-          const auto same = [&](const auto &prior) {
-            return prior.to_basis == result.transform->to_basis &&
-                   prior.from_basis == result.transform->from_basis &&
-                   prior.connection == result.transform->connection;
-          };
-          if (std::none_of(result.alternatives.begin(),
-                           result.alternatives.end(), same))
-            result.alternatives.push_back(std::move(*result.transform));
-          std::stable_sort(result.alternatives.begin(),
-                           result.alternatives.end(),
-                           [](const auto &a, const auto &b) {
-                             return expression_characters(a.connection) <
-                                    expression_characters(b.connection);
-                           });
-          if (result.alternatives.size() > 3)
-            result.alternatives.resize(3);
-        }
-        result.transform = std::move(candidate);
-        result.stats.selected_characters = size;
-        ++result.stats.accepted;
-        result.stats.exact_verified = true;
-      } catch (const std::exception &) {
-        ++result.stats.failures;
-      }
-      // Repeat a sweep only after a successful change, enabling combinations.
-      if (cursor + 1 == trials.size() && !result.stats.accepted)
-        break;
-    }
-    result.selected_integrals = std::move(selected);
-    result.stats.reason =
-        result.transform
-            ? "simpler exact candidate; full endpoint acceptance pending"
-            : "retained original basis";
-  } catch (const std::exception &e) {
-    result.transform.reset();
-    result.alternatives.clear();
-    result.stats.exact_verified = false;
-    result.stats.reason = e.what();
-  }
-  result.stats.seconds = elapsed();
-  result.stats.budget_reached = expired();
-  return result;
-}
 
 // Local metadata is diagnostic only: no epsilon profile here certifies the
 // whole recursion's source demand, singular endpoint prescription or contour.
@@ -548,8 +330,11 @@ inline CandidateResult scan_candidates(const level::Result &level,
         }
       const auto rows_limit = result.stats.trials + (depth_limit-result.stats.trials+1)/2;
       for(const auto &row:rows) {
+        if(!available() || result.stats.trials>=rows_limit) break;
+        // The row in the base coordinates does not depend on the replaced position.
+        const auto q=multiply(Matrix{row.values},base.transform.from_basis)[0];
         for(std::size_t pos=0;pos<d && available() && result.stats.trials<rows_limit;++pos)
-          trial(base,pos,multiply(Matrix{row.values},base.transform.from_basis)[0],row.why);
+          trial(base,pos,q,row.why);
         if(!available() || result.stats.trials>=rows_limit) break;
       }
       // Interleave destination rows at each distance to avoid first-row bias.
@@ -571,7 +356,8 @@ inline CandidateResult scan_candidates(const level::Result &level,
     if(bases.empty() || result.stats.trials>=options.max_trials) break;
   }
   result.stats.seconds=elapsed();
-  result.stats.budget_reached=expired() || result.stats.trials>=options.max_trials;
+  result.stats.time_expired=expired();
+  result.stats.budget_reached=result.stats.time_expired || result.stats.trials>=options.max_trials;
   result.stats.selected_characters=result.candidates.empty()?result.stats.original_characters:
       result.candidates.front().metadata.connection_characters;
   result.stats.reason="bounded exact candidate frontier; full demand and endpoint acceptance belongs to caller";

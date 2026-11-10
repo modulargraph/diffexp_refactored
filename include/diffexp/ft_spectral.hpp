@@ -114,6 +114,378 @@ components(unsigned d, const std::vector<Edge> &edges) {
   return result;
 }
 inline B scale(const B &value) { return B(1) + transport::magnitude(value); }
+// The remainder of this namespace is the part of g'=forcing-g*A transport
+// that does not depend on how one refinement level is solved; the collocation
+// and coefficient backends share it.
+inline void check_request(const ExactEpsilonMatrix &matrix,
+                          const LaurentRows &initial,
+                          const ExactEpsilonMatrix &forcing,
+                          const std::vector<Exact> &vertices,
+                          const Options &options, slong bits) {
+  const auto d = initial.columns(), r = initial.coefficients.size();
+  if (matrix.size() != d || forcing.size() != r || vertices.empty())
+    throw sp::Rejected("FT spectral shape mismatch");
+  if (!options.accuracy_goal || options.accuracy_goal>100000 || options.max_nodes < 16 ||
+      options.max_nodes > 128 ||
+      (!std::isfinite(options.seconds_budget) ||
+       !(options.seconds_budget > 0)) ||
+      (options.accuracy_goal + 2) * 3.321928094887362 > bits - 32)
+    throw sp::Rejected("FT spectral accuracy/node/precision budget");
+  if (!d || !r || initial.high < initial.low)
+    throw sp::Rejected("FT spectral empty or invalid boundary");
+  for (const auto &row : initial.coefficients) {
+    if (row.size() != d)
+      throw sp::Rejected("FT spectral ragged boundary");
+    for (const auto &series : row)
+      if (series.size() !=
+          static_cast<std::size_t>(initial.high - initial.low + 1))
+        throw sp::Rejected("FT spectral boundary epsilon shape");
+  }
+}
+// Epsilon window [low,high] (w coefficients), the state carried from leg to
+// leg, and the acceptance budgets.
+struct Window {
+  std::size_t xi = 0, ei = 0;
+  int low = 0;
+  unsigned w = 0;
+  LaurentRows current;
+  B tolerance, arithmetic_tolerance, floor;
+};
+inline Window open_window(const ExactEpsilonMatrix &matrix,
+                          const LaurentRows &initial,
+                          const ExactEpsilonMatrix &forcing,
+                          const std::vector<Exact> &vertices,
+                          const Options &options,
+                          unsigned arithmetic_accuracy_goal) {
+  const auto d = initial.columns(), r = initial.coefficients.size();
+  auto [xi, ei] = path_epsilon_variables(vertices[0]);
+  int low = std::min(0, initial.low);
+  for (const auto &row : matrix)
+    if (row.size() != d)
+      throw sp::Rejected("FT spectral connection is not square");
+  for (const auto &row : forcing) {
+    if (row.size() != d)
+      throw sp::Rejected("FT spectral forcing shape");
+    for (const auto &q : row)
+      if (!q.is_zero())
+        low =
+            std::min(low, static_cast<int>(*exact_epsilon_valuation(q, ei)));
+  }
+  if (low < -1000 || initial.high - low > 1000)
+    throw sp::Rejected("FT spectral epsilon window budget");
+  const unsigned w = initial.high - low + 1;
+  if(d*r*w>options.max_cells)throw sp::Rejected("FT spectral boundary storage budget");
+  Window window{xi, ei, low, w,
+                LaurentRows{low, initial.high,
+                            std::vector(r, std::vector(d, std::vector<B>(w, B(0))))},
+                B(0), B(0), B(1)};
+  for (unsigned a = 0; a < r; ++a)
+    for (unsigned i = 0; i < d; ++i)
+      for (int e = initial.low; e <= initial.high; ++e) {
+        const auto &v = initial.coefficients[a][i][e - initial.low];
+        if (!v.is_finite())
+          throw sp::Rejected("FT spectral nonfinite boundary");
+        window.current.coefficients[a][i][e - low] = v;
+      }
+  window.tolerance =
+      B::from_strings("1e-" + std::to_string(options.accuracy_goal + 2));
+  // A subdivided arm spends a stricter local discretization budget, but
+  // inherited enclosures are tested against the unchanged whole-arm goal.
+  // Never discard input radii or classify them as new discretization error.
+  window.arithmetic_tolerance=arithmetic_accuracy_goal
+      ? B::from_strings("1e-"+std::to_string(arithmetic_accuracy_goal+2))
+      : window.tolerance;
+  acb_mul_2exp_si(window.floor.raw(), window.floor.raw(), 16 - B::precision());
+  return window;
+}
+// False when some inherited ball is already wider than the arm budget.
+// Neither refinement nor subdivision of the path can narrow such a ball.
+inline bool inherited_within(const LaurentRows &rows, const B &tolerance) {
+  for (const auto &row : rows.coefficients)
+    for (const auto &series : row)
+      for (const auto &value : series)
+        if (!sp::le(transport::arithmetic_error(value),
+                    tolerance * sp::midpoint_scale(value)))
+          return false;
+  return true;
+}
+// Edges and sources of one straight leg in its unit parameter. intern(q,
+// numerator, denominator) returns the backend's scalar id and whether q is
+// new; removed_diagonal[i], when set, is the epsilon-zero diagonal already
+// absorbed by a gauge. Every denominator is recorded at epsilon zero.
+struct Coupling {
+  std::vector<Edge> edges;
+  std::vector<Source> sources;
+  std::vector<Exact> denominators;
+  unsigned minimum_degree = 0;
+};
+template <class Intern>
+Coupling couple(const ExactEpsilonMatrix &matrix,
+                const ExactEpsilonMatrix &forcing,
+                const std::vector<Exact> &point, const Exact &width,
+                const Window &window, unsigned max_nodes,
+                const std::vector<const Exact *> &removed_diagonal,
+                Intern intern) {
+  const unsigned d = matrix.size(), r = forcing.size();
+  const auto xi = window.xi, ei = window.ei;
+  Coupling out;
+  const auto scalar = [&](const Exact &q, unsigned numerator,
+                          unsigned denominator) {
+    for (const auto &terms : {q.numerator_terms(), q.denominator_terms()})
+      for (const auto &term : terms) {
+        if (term.powers[xi] > max_nodes)
+          throw sp::Rejected("FT spectral polynomial degree budget");
+        out.minimum_degree = std::max(out.minimum_degree,
+                                      static_cast<unsigned>(term.powers[xi]));
+      }
+    const std::pair<unsigned, bool> interned =
+        intern(q, numerator, denominator);
+    if (interned.second)
+      out.denominators.push_back(
+          q.denominator().substitute(exact_point(q, ei, q.constant(0))));
+    return interned.first;
+  };
+  for (unsigned i = 0; i < d; ++i)
+    for (unsigned j = 0; j < d; ++j)
+      if (!matrix[j][i].is_zero()) {
+        out.denominators.push_back(
+            matrix[j][i].substitute(point).denominator().substitute(
+                exact_point(matrix[j][i], ei, matrix[j][i].constant(0))));
+        auto physical = matrix[j][i];
+        if (i == j && removed_diagonal[i])
+          physical = physical - *removed_diagonal[i];
+        if (physical.is_zero())
+          continue;
+        auto valuation = *exact_epsilon_valuation(physical, ei);
+        if (valuation < 0)
+          throw sp::Rejected(
+              "FT spectral connection needs epsilon normalization");
+        if (valuation >= window.w)
+          continue;
+        auto q = -width * physical.substitute(point);
+        out.edges.push_back({i, j, scalar(q, j, i), valuation == 0});
+      }
+  for (unsigned a = 0; a < r; ++a)
+    for (unsigned i = 0; i < d; ++i)
+      if (!forcing[a][i].is_zero()) {
+        auto q = forcing[a][i];
+        q = window.low < 0 ? q * q.variable(ei).pow(-window.low)
+                           : q / q.variable(ei).pow(window.low);
+        if (*exact_epsilon_valuation(q, ei) < window.w)
+          out.sources.push_back(
+              {a, i, scalar(width * q.substitute(point), d, i)});
+      }
+  return out;
+}
+// Epsilon-zero strongly connected blocks in dependency order.
+struct Blocks {
+  std::vector<std::vector<unsigned>> members;
+  std::vector<unsigned> block_id, position;
+  unsigned largest = 0;
+};
+inline Blocks partition(unsigned d, const std::vector<Edge> &edges,
+                        const Options &options, Diagnostics &diagnostics) {
+  Blocks out{components(d, edges), std::vector<unsigned>(d),
+             std::vector<unsigned>(d)};
+  for (unsigned b = 0; b < out.members.size(); ++b) {
+    const auto &block = out.members[b];
+    diagnostics.block_sizes.push_back(block.size());
+    if (block.size() > options.max_block_size)
+      throw sp::Rejected("FT spectral epsilon-zero block exceeds budget");
+    out.largest = std::max(out.largest, static_cast<unsigned>(block.size()));
+    for (unsigned i = 0; i < block.size(); ++i) {
+      out.block_id[block[i]] = b;
+      out.position[block[i]] = i;
+    }
+  }
+  for (const auto &edge : edges)
+    if (edge.zero_order && out.block_id[edge.column] > out.block_id[edge.row])
+      throw std::logic_error("FT spectral dependency order");
+  return out;
+}
+// Known rational singularities guard against unresolved narrow features.
+struct Geometry {
+  std::vector<B> singularities;
+  double left_distance = 1, right_distance = 1;
+};
+template <class Check>
+Geometry path_geometry(const std::vector<Exact> &denominators, std::size_t xi,
+                       slong bits, Check &check) {
+  Geometry geometry;
+  std::set<std::string> seen;
+  for (auto q : denominators) {
+    check();
+    if (q.is_zero())
+      throw sp::Rejected("FT spectral unresolved epsilon denominator");
+    if (q.is_rational())
+      continue;
+    const auto &names = q.variables();
+    auto im = std::find(names.begin(), names.end(), "I");
+    if (im != names.end())
+      q = polynomial_norm(q, im - names.begin(), q.constant(-1));
+    q = q / q.constant(q.numerator_terms().front().coefficient);
+    if (!seen.insert(q.str()).second)
+      continue;
+    auto roots = polynomial_roots(q, xi, bits);
+    geometry.singularities.insert(geometry.singularities.end(), roots.begin(),
+                                  roots.end());
+  }
+  B domain = B::from_strings("1/2");
+  arb_add_error_2exp_si(acb_realref(domain.raw()), -1);
+  for (const auto &pole : geometry.singularities)
+    if (arb_contains_zero(acb_imagref(pole.raw())) &&
+        arb_overlaps(acb_realref(pole.raw()), acb_realref(domain.raw())))
+      throw sp::Rejected(
+          "FT spectral path intersects singularity or branch point");
+  for (const auto &pole : geometry.singularities) {
+    const std::complex<double> z(
+        arf_get_d(arb_midref(acb_realref(pole.raw())), ARF_RND_NEAR),
+        arf_get_d(arb_midref(acb_imagref(pole.raw())), ARF_RND_NEAR));
+    geometry.left_distance = std::min(geometry.left_distance, std::abs(z));
+    geometry.right_distance =
+        std::min(geometry.right_distance, std::abs(z - std::complex<double>(1)));
+  }
+  return geometry;
+}
+// Refinement state of one leg: the endpoint values of the last level and the
+// last two differences between levels, in (observable, component, epsilon)
+// order. A level is accepted only when every component's estimated tail and
+// its arithmetic radius fit their budgets.
+struct Refinement {
+  std::vector<B> previous, previous_difference;
+  unsigned previous_n = 0, previous_increment = 0;
+  // Outcome of the last tested level, kept to classify an exhausted ladder.
+  bool tested = false, discretization_met = false, arithmetic_excess = false;
+  std::optional<std::vector<B>> converged(const std::vector<B> &values,
+                                          const std::vector<B> &difference,
+                                          unsigned n, const Window &window,
+                                          unsigned &absolute) {
+    std::vector<B> tails(values.size());
+    bool all = true;
+    tested = discretization_met = true;
+    arithmetic_excess = false;
+    absolute = 0;
+    for (unsigned i = 0; i < values.size(); ++i) {
+      auto roundoff = window.floor * (scale(values[i]) + scale(previous[i]));
+      auto estimate =
+          sp::estimate_tail(previous_difference[i], difference[i], roundoff,
+                            previous_increment, n - previous_n);
+      if (estimate.absolute)
+        ++absolute;
+      tails[i] = std::move(estimate.tail);
+      const auto size = scale(values[i]);
+      const auto radius = transport::arithmetic_error(values[i]);
+      if (!sp::le(B(2)*tails[i],window.tolerance*size))
+        all = discretization_met = false;
+      if (!sp::le(radius+B(2)*tails[i],window.arithmetic_tolerance*size))
+        all = false;
+      if (!sp::le(radius, window.arithmetic_tolerance * size))
+        arithmetic_excess = true;
+    }
+    if (!all)
+      return std::nullopt;
+    return tails;
+  }
+  void advance(std::vector<B> values, std::vector<B> difference, unsigned n) {
+    if (!previous.empty())
+      previous_difference = std::move(difference);
+    previous = std::move(values);
+    previous_increment = n - previous_n;
+    previous_n = n;
+  }
+};
+// Accepted values absorb their estimated tails and become the next state.
+inline void commit(LaurentRows &current, std::vector<B> &values,
+                   const std::vector<B> &tails) {
+  std::size_t id = 0;
+  for (auto &row : current.coefficients)
+    for (auto &series : row)
+      for (auto &coefficient : series) {
+        arb_add_error(acb_realref(values[id].raw()),
+                      acb_realref(tails[id].raw()));
+        arb_add_error(acb_imagref(values[id].raw()),
+                      acb_realref(tails[id].raw()));
+        coefficient = std::move(values[id]);
+        ++id;
+      }
+}
+// The inverse of the scalar collocation operator depends only on the node
+// count and the working precision, not on the leg or the system.
+using PlainInverses =
+    std::map<std::pair<unsigned, slong>, std::shared_ptr<sp::Matrix>>;
+// Subdivision changes only the parametrization of each original straight leg.
+// Failed attempts never update the accepted state. No pole/structural rejection
+// is retried; every child goes through the complete original geometry checks.
+// single(state, path, options, diagnostics, arithmetic_goal) transports one
+// path; arithmetic_goal is zero for an unsubdivided arm. progress(leg,
+// fraction) reports the accepted part of an original leg.
+template <class BackendOptions, class Single, class Progress>
+std::optional<LaurentRows> subdivide(const LaurentRows &initial,
+                                     const std::vector<Exact> &vertices,
+                                     const BackendOptions &options,
+                                     Diagnostics &diagnostics, Single single,
+                                     Progress progress) {
+  if(!options.max_subdivisions)
+    return single(initial,vertices,options,diagnostics,0u);
+  diagnostics={};
+  if(options.max_subdivisions>4096 || vertices.empty() ||
+     !std::isfinite(options.seconds_budget) || options.seconds_budget<=0 ||
+     !options.accuracy_goal || options.accuracy_goal>100000) {
+    diagnostics.reason="FT spectral subdivision/options budget";return std::nullopt;
+  }
+  if(std::adjacent_find(vertices.begin(),vertices.end(),[](const Exact& a,const Exact& b){return a!=b;})==vertices.end())
+    return single(initial,vertices,options,diagnostics,0u);
+  const auto started=std::chrono::steady_clock::now();
+  auto elapsed=[&]{return std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();};
+  auto fail=[&](const std::string& reason)->std::optional<LaurentRows>{diagnostics.reason=reason;return std::nullopt;};
+  BackendOptions local=options;local.max_subdivisions=0;
+  // A decimal reserve distributes a conservative local accuracy target over
+  // the maximum number of accepted segments; propagated balls remain intact.
+  std::size_t segments=vertices.size()-1+options.max_subdivisions;
+  unsigned reserve=1;for(auto n=segments;n>1;n=(n+9)/10)++reserve;
+  local.accuracy_goal+=reserve;
+  LaurentRows state=initial;
+  try {
+    for(std::size_t leg=0;leg+1<vertices.size();++leg) {
+      if(vertices[leg]==vertices[leg+1])continue;
+      struct Segment{Exact first,second;double from,to;};
+      std::vector<Segment> pending{{vertices[leg],vertices[leg+1],0.,1.}};
+      while(!pending.empty()) {
+        local.seconds_budget=options.seconds_budget-elapsed();
+        if(local.seconds_budget<=0)return fail("FT spectral total subdivision time budget exhausted");
+        auto segment=std::move(pending.back());pending.pop_back();Diagnostics attempt;
+        auto value=single(state,std::vector<Exact>{segment.first,segment.second},local,attempt,options.accuracy_goal);
+        diagnostics.preparation_seconds+=attempt.preparation_seconds;
+        diagnostics.numerical_seconds+=attempt.numerical_seconds;
+        diagnostics.factorizations+=attempt.factorizations;
+        if(elapsed()>options.seconds_budget)return fail("FT spectral total subdivision time budget exhausted");
+        if(value) {
+          state=std::move(*value);++diagnostics.accepted_subsegments;
+          progress(static_cast<unsigned>(leg),segment.to);
+          diagnostics.nodes.insert(diagnostics.nodes.end(),attempt.nodes.begin(),attempt.nodes.end());
+          diagnostics.block_sizes.insert(diagnostics.block_sizes.end(),attempt.block_sizes.begin(),attempt.block_sizes.end());
+          diagnostics.normalized_diagonals=std::max(diagnostics.normalized_diagonals,attempt.normalized_diagonals);
+          diagnostics.clustered_legs+=attempt.clustered_legs;
+          diagnostics.absolute_stability_components+=attempt.absolute_stability_components;
+          continue;
+        }
+        diagnostics.last_failure=attempt.reason;
+        const bool retry=attempt.reason=="FT spectral resolution or arithmetic accuracy exhausted" ||
+                         attempt.reason=="FT spectral interval too close to singularities";
+        if(!retry)return fail(attempt.reason);
+        if(diagnostics.subdivisions>=options.max_subdivisions)
+          return fail("FT spectral subdivision count exhausted: "+attempt.reason);
+        const auto midpoint=(segment.first+segment.second)/segment.first.constant(2);
+        ++diagnostics.subdivisions;
+        const auto fraction=(segment.from+segment.to)/2;
+        pending.push_back({midpoint,segment.second,fraction,segment.to});
+        pending.push_back({segment.first,midpoint,segment.from,fraction});
+      }
+      ++diagnostics.legs;
+    }
+    return state;
+  }catch(const std::exception& error){return fail(error.what());}
+}
 } // namespace detail
 // Solve g'=forcing-g*A. Epsilon-zero strongly connected blocks are factored
 // once per resolution; epsilon-positive terms and preceding blocks form known
@@ -122,7 +494,8 @@ inline std::optional<LaurentRows>
 try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initial,
               const ExactEpsilonMatrix &forcing,
               const std::vector<Exact> &vertices, const Options &options,
-              Diagnostics &diagnostics, unsigned arithmetic_accuracy_goal = 0) {
+              Diagnostics &diagnostics, unsigned arithmetic_accuracy_goal = 0,
+              detail::PlainInverses *shared_inverses = nullptr) {
   using namespace detail;
   diagnostics = {};
   auto started = std::chrono::steady_clock::now();
@@ -137,64 +510,14 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       throw sp::Rejected("FT spectral time budget exhausted");
   };
   try {
-    const auto d = initial.columns(), r = initial.coefficients.size();
     const auto bits = B::precision();
-    if (matrix.size() != d || forcing.size() != r || vertices.empty())
-      throw sp::Rejected("FT spectral shape mismatch");
-    if (!options.accuracy_goal || options.accuracy_goal>100000 || options.max_nodes < 16 ||
-        options.max_nodes > 128 ||
-        (!std::isfinite(options.seconds_budget) ||
-         !(options.seconds_budget > 0)) ||
-        (options.accuracy_goal + 2) * 3.321928094887362 > bits - 32)
-      throw sp::Rejected("FT spectral accuracy/node/precision budget");
-    if (!d || !r || initial.high < initial.low)
-      throw sp::Rejected("FT spectral empty or invalid boundary");
-    for (const auto &row : initial.coefficients) {
-      if (row.size() != d)
-        throw sp::Rejected("FT spectral ragged boundary");
-      for (const auto &series : row)
-        if (series.size() !=
-            static_cast<std::size_t>(initial.high - initial.low + 1))
-          throw sp::Rejected("FT spectral boundary epsilon shape");
-    }
-    auto [xi, ei] = path_epsilon_variables(vertices[0]);
-    int low = std::min(0, initial.low);
-    for (const auto &row : matrix)
-      if (row.size() != d)
-        throw sp::Rejected("FT spectral connection is not square");
-    for (const auto &row : forcing) {
-      if (row.size() != d)
-        throw sp::Rejected("FT spectral forcing shape");
-      for (const auto &q : row)
-        if (!q.is_zero())
-          low =
-              std::min(low, static_cast<int>(*exact_epsilon_valuation(q, ei)));
-    }
-    if (low < -1000 || initial.high - low > 1000)
-      throw sp::Rejected("FT spectral epsilon window budget");
-    const unsigned w = initial.high - low + 1;
-    if(d*r*w>options.max_cells)throw sp::Rejected("FT spectral boundary storage budget");
-    LaurentRows current{
-        low, initial.high,
-        std::vector(r, std::vector(d, std::vector<B>(w, B(0))))};
-    for (unsigned a = 0; a < r; ++a)
-      for (unsigned i = 0; i < d; ++i)
-        for (int e = initial.low; e <= initial.high; ++e) {
-          const auto &v = initial.coefficients[a][i][e - initial.low];
-          if (!v.is_finite())
-            throw sp::Rejected("FT spectral nonfinite boundary");
-          current.coefficients[a][i][e - low] = v;
-        }
-    auto tolerance =
-        B::from_strings("1e-" + std::to_string(options.accuracy_goal + 2));
-    // A subdivided arm spends a stricter local discretization budget, but
-    // inherited enclosures are tested against the unchanged whole-arm goal.
-    // Never discard input radii or classify them as new discretization error.
-    const auto arithmetic_tolerance=arithmetic_accuracy_goal
-        ? B::from_strings("1e-"+std::to_string(arithmetic_accuracy_goal+2))
-        : tolerance;
-    B floor(1);
-    acb_mul_2exp_si(floor.raw(), floor.raw(), 16 - bits);
+    check_request(matrix, initial, forcing, vertices, options, bits);
+    const auto d = initial.columns(), r = initial.coefficients.size();
+    auto window = open_window(matrix, initial, forcing, vertices, options,
+                              arithmetic_accuracy_goal);
+    const auto xi = window.xi, ei = window.ei;
+    const unsigned w = window.w;
+    auto &current = window.current;
     std::vector<DiagonalLogGaugeResult> gauges(d);
     std::vector<Exact> diagonal_zero(d, vertices[0].constant(0));
     if (options.diagonal_gauge)
@@ -214,7 +537,8 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
         if (gauges[i].supported && !gauges[i].factors.empty())
           ++diagnostics.normalized_diagonals;
       }
-    std::map<unsigned, std::shared_ptr<sp::Matrix>> plain_inverses;
+    PlainInverses local_inverses;
+    auto &plain_inverses = shared_inverses ? *shared_inverses : local_inverses;
     for (unsigned leg = 0; leg + 1 < vertices.size(); ++leg) {
       const auto prep = std::chrono::steady_clock::now();
       check();
@@ -223,68 +547,33 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       if (width.is_zero())
         continue;
       auto point = exact_point(from, xi, from + width * from.variable(xi));
+      const bool inherited_excess =
+          !inherited_within(current, window.arithmetic_tolerance);
       std::vector<Scalar> scalars;
       std::map<std::string, unsigned> ids;
-      std::vector<Exact> denominators;
-      unsigned minimum_degree = 0;
-      const auto degree_guard = [&](const Exact &q) {
-        for (const auto &terms : {q.numerator_terms(), q.denominator_terms()})
-          for (const auto &term : terms) {
-            if (term.powers[xi] > options.max_nodes)
-              throw sp::Rejected("FT spectral polynomial degree budget");
-            minimum_degree = std::max(minimum_degree,
-                                      static_cast<unsigned>(term.powers[xi]));
-          }
-      };
-      auto intern = [&](const Exact &q, unsigned numerator,
-                        unsigned denominator) {
-        degree_guard(q);
-        auto text = q.str();
-        auto key = text + "#" + std::to_string(numerator) + "/" +
-                   std::to_string(denominator);
-        auto [it, added] = ids.try_emplace(key, scalars.size());
-        if (added) {
-          scalars.push_back(
-              {compile_polynomial(q.numerator(), xi, ei, w, bits),
-               compile_polynomial(q.denominator(), xi, ei, w, bits), numerator,
-               denominator});
-          denominators.push_back(
-              q.denominator().substitute(exact_point(q, ei, q.constant(0))));
-        }
-        return it->second;
-      };
-      std::vector<Edge> edges;
-      std::vector<Source> sources;
+      std::vector<const Exact *> removed_diagonal(d, nullptr);
       for (unsigned i = 0; i < d; ++i)
-        for (unsigned j = 0; j < d; ++j)
-          if (!matrix[j][i].is_zero()) {
-            denominators.push_back(
-                matrix[j][i].substitute(point).denominator().substitute(
-                    exact_point(matrix[j][i], ei, matrix[j][i].constant(0))));
-            auto physical = matrix[j][i];
-            if (i == j && gauges[i].supported)
-              physical = physical - diagonal_zero[i];
-            if (physical.is_zero())
-              continue;
-            auto valuation = *exact_epsilon_valuation(physical, ei);
-            if (valuation < 0)
-              throw sp::Rejected(
-                  "FT spectral connection needs epsilon normalization");
-            if (valuation >= w)
-              continue;
-            auto q = -width * physical.substitute(point);
-            edges.push_back({i, j, intern(q, j, i), valuation == 0});
-          }
-      for (unsigned a = 0; a < r; ++a)
-        for (unsigned i = 0; i < d; ++i)
-          if (!forcing[a][i].is_zero()) {
-            auto q = forcing[a][i];
-            q = low < 0 ? q * q.variable(ei).pow(-low)
-                        : q / q.variable(ei).pow(low);
-            if (*exact_epsilon_valuation(q, ei) < w)
-              sources.push_back(
-                  {a, i, intern(width * q.substitute(point), d, i)});
-          }
+        if (gauges[i].supported)
+          removed_diagonal[i] = &diagonal_zero[i];
+      auto coupling = couple(
+          matrix, forcing, point, width, window, options.max_nodes,
+          removed_diagonal,
+          [&](const Exact &q, unsigned numerator, unsigned denominator) {
+            auto text = q.str();
+            auto key = text + "#" + std::to_string(numerator) + "/" +
+                       std::to_string(denominator);
+            auto [it, added] = ids.try_emplace(key, scalars.size());
+            if (added)
+              scalars.push_back(
+                  {compile_polynomial(q.numerator(), xi, ei, w, bits),
+                   compile_polynomial(q.denominator(), xi, ei, w, bits),
+                   numerator, denominator});
+            return std::pair<unsigned, bool>{it->second, added};
+          });
+      const auto &edges = coupling.edges;
+      const auto &sources = coupling.sources;
+      auto &denominators = coupling.denominators;
+      const unsigned minimum_degree = coupling.minimum_degree;
       std::vector<Jet> gauge_polynomials;
       std::vector<B> initial_roots;
       std::vector<bool> root_needed;
@@ -321,62 +610,18 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
             if (power % 2)
               root_needed[it->second] = true;
           }
-      auto blocks = components(d, edges);
-      std::vector<unsigned> block_id(d), position(d);
-      for (unsigned b = 0; b < blocks.size(); ++b) {
-        diagnostics.block_sizes.push_back(blocks[b].size());
-        if (blocks[b].size() > options.max_block_size)
-          throw sp::Rejected("FT spectral epsilon-zero block exceeds budget");
-        for (unsigned i = 0; i < blocks[b].size(); ++i) {
-          block_id[blocks[b][i]] = b;
-          position[blocks[b][i]] = i;
-        }
-      }
+      const auto partitioned = partition(d, edges, options, diagnostics);
+      const auto &blocks = partitioned.members;
+      const auto &block_id = partitioned.block_id;
+      const auto &position = partitioned.position;
       std::vector<std::vector<unsigned>> incoming(d), inhomogeneous(d);
-      for (unsigned e = 0; e < edges.size(); ++e) {
+      for (unsigned e = 0; e < edges.size(); ++e)
         incoming[edges[e].row].push_back(e);
-        if (edges[e].zero_order &&
-            block_id[edges[e].column] > block_id[edges[e].row])
-          throw std::logic_error("FT spectral dependency order");
-      }
       for (unsigned s = 0; s < sources.size(); ++s)
         inhomogeneous[sources[s].row].push_back(s);
-      // Known rational singularities guard against unresolved narrow features.
-      std::set<std::string> seen;
-      transport::Compiled geometry(from.variables(), 1, 0);
-      for (auto q : denominators) {
-        check();
-        if (q.is_zero())
-          throw sp::Rejected("FT spectral unresolved epsilon denominator");
-        if (q.is_rational())
-          continue;
-        const auto &names = q.variables();
-        auto im = std::find(names.begin(), names.end(), "I");
-        if (im != names.end())
-          q = polynomial_norm(q, im - names.begin(), q.constant(-1));
-        q = q / q.constant(q.numerator_terms().front().coefficient);
-        if (!seen.insert(q.str()).second)
-          continue;
-        auto roots = polynomial_roots(q, xi, bits);
-        geometry.singularities.insert(geometry.singularities.end(),
-                                      roots.begin(), roots.end());
-      }
-      B domain = B::from_strings("1/2");
-      arb_add_error_2exp_si(acb_realref(domain.raw()), -1);
-      for (const auto &pole : geometry.singularities)
-        if (arb_contains_zero(acb_imagref(pole.raw())) &&
-            arb_overlaps(acb_realref(pole.raw()), acb_realref(domain.raw())))
-          throw sp::Rejected(
-              "FT spectral path intersects singularity or branch point");
-      double left_distance = 1, right_distance = 1;
-      for (const auto &pole : geometry.singularities) {
-        const std::complex<double> z(
-            arf_get_d(arb_midref(acb_realref(pole.raw())), ARF_RND_NEAR),
-            arf_get_d(arb_midref(acb_imagref(pole.raw())), ARF_RND_NEAR));
-        left_distance = std::min(left_distance, std::abs(z));
-        right_distance =
-            std::min(right_distance, std::abs(z - std::complex<double>(1)));
-      }
+      const auto geometry = path_geometry(denominators, xi, bits, check);
+      const double left_distance = geometry.left_distance,
+                   right_distance = geometry.right_distance;
       const bool cluster = options.endpoint_clustering &&
                            std::min(left_distance, right_distance) < 0.1;
       const bool cluster_right = right_distance < left_distance;
@@ -388,7 +633,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
                                                        right_distance))));
         acb_expm1(exponential_range.raw(), strength.raw(), bits);
       }
-      if (!cluster && sp::node_forecast(geometry, options.accuracy_goal) >
+      if (!cluster && sp::node_forecast(geometry.singularities, options.accuracy_goal) >
                           (options.conservative ? 2 * options.max_nodes : 512))
         throw sp::Rejected("FT spectral interval too close to singularities");
       std::map<Key, Node, sp::NodeLess> cache;
@@ -474,13 +719,22 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
       preparing +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - prep)
               .count();
-      std::vector<B> previous, previous_difference;
-      unsigned previous_n = 0, previous_increment = 0;
+      Refinement refinement;
       bool accepted = false;
-      for (unsigned n : {8u, 12u, 16u, 24u, 32u, 48u, 64u, 96u, 128u}) {
+      for (unsigned n : sp::ladder) {
         if (n > options.max_nodes)
           break;
         check();
+        // The budget counts intervals: 4x64 and 2x128 are the intended
+        // limits, and the closing node must not exclude them. A level beyond
+        // the budget ends refinement like an exhausted ladder, so shorter
+        // segments may still converge below it; a block too large for the
+        // first level cannot be helped by subdivision.
+        if (partitioned.largest * n > options.max_block_nodes) {
+          if (!refinement.previous_n)
+            throw sp::Rejected("FT spectral coupled-node budget");
+          break;
+        }
         const unsigned m = n + 1;
         if (static_cast<std::uint64_t>(m) * w * d * r > options.max_cells)
           throw sp::Rejected("FT spectral solution storage budget");
@@ -508,14 +762,10 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
           acb_set(acb_mat_entry(derivative.value, j, j), diagonal.raw());
         }
         std::vector<std::shared_ptr<sp::Matrix>> inverses;
-        std::shared_ptr<sp::Matrix> plain = plain_inverses[n];
+        std::shared_ptr<sp::Matrix> plain = plain_inverses[{n, bits}];
         for (unsigned b = 0; b < blocks.size(); ++b) {
           check();
           unsigned size = blocks[b].size(), z = size * m;
-          // The budget counts intervals: 4x64 and 2x128 are the intended
-          // limits, and the closing node must not exclude them.
-          if (size * n > options.max_block_nodes)
-            throw sp::Rejected("FT spectral coupled-node budget");
           bool zero = true;
           for (auto i : blocks[b])
             for (auto e : incoming[i])
@@ -551,7 +801,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
           inverses.push_back(inverse);
           if (zero) {
             plain = inverse;
-            plain_inverses[n] = inverse;
+            plain_inverses[{n, bits}] = inverse;
           }
         }
         for (unsigned e = 0; e < w; ++e)
@@ -599,8 +849,7 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
                                         (e * m + j) * d + blocks[b][i], a),
                           acb_mat_entry(solution.value, j * size + i, a));
           }
-        std::vector<B> values(r * d * w), difference(r * d * w),
-            tails(r * d * w);
+        std::vector<B> values(r * d * w), difference(r * d * w);
         for (unsigned a = 0; a < r; ++a)
           for (unsigned i = 0; i < d; ++i)
             for (unsigned e = 0; e < w; ++e) {
@@ -610,61 +859,34 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
                       nodes[n]->gauges[i].raw(), bits);
               if (!values[id].is_finite())
                 throw sp::Rejected("FT spectral nonfinite endpoint");
-              if (!previous.empty())
-                difference[id] = sp::difference(values[id], previous[id]);
+              if (!refinement.previous.empty())
+                difference[id] =
+                    sp::difference(values[id], refinement.previous[id]);
             }
-        if (!previous_difference.empty() && n > minimum_degree) {
-          bool converged = true;
+        if (!refinement.previous_difference.empty() && n > minimum_degree) {
           unsigned absolute = 0;
-          for (unsigned i = 0; i < values.size(); ++i) {
-            auto roundoff = floor * (scale(values[i]) + scale(previous[i]));
-            std::optional<double> factor;
-            if (sp::le(previous_difference[i] + difference[i], roundoff))
-              factor = 0;
-            else if (!previous_difference[i].is_zero())
-              factor = sp::tail_factor(
-                  sp::ratio_upper(difference[i], previous_difference[i]),
-                  previous_increment, n - previous_n);
-            if (factor) {
-              B multiplier;
-              acb_set_d(multiplier.raw(), *factor);
-              tails[i] = sp::upper(difference[i] * multiplier + roundoff);
-            } else {
-              ++absolute;
-              tails[i] = sp::upper(
-                  B(16) * (previous_difference[i] + difference[i]) + roundoff);
-            }
-            if (!sp::le(B(2)*tails[i],tolerance*scale(values[i])) ||
-                !sp::le(transport::arithmetic_error(values[i])+B(2)*tails[i],
-                        arithmetic_tolerance*scale(values[i])))
-              converged = false;
-          }
-          if (converged) {
-            for (unsigned a = 0; a < r; ++a)
-              for (unsigned i = 0; i < d; ++i)
-                for (unsigned e = 0; e < w; ++e) {
-                  auto id = (a * d + i) * w + e;
-                  arb_add_error(acb_realref(values[id].raw()),
-                                acb_realref(tails[id].raw()));
-                  arb_add_error(acb_imagref(values[id].raw()),
-                                acb_realref(tails[id].raw()));
-                  current.coefficients[a][i][e] = std::move(values[id]);
-                }
+          if (auto tails = refinement.converged(values, difference, n, window,
+                                                absolute)) {
+            commit(current, values, *tails);
             accepted = true;
             diagnostics.absolute_stability_components += absolute;
             ++diagnostics.legs;
             break;
           }
         }
-        if (!previous.empty())
-          previous_difference = std::move(difference);
-        previous = std::move(values);
-        previous_increment = n - previous_n;
-        previous_n = n;
+        refinement.advance(std::move(values), std::move(difference), n);
       }
-      if (!accepted)
+      if (!accepted) {
+        // Shorter segments reduce discretization error only. When the last
+        // level resolved the solution and the radius inherited from the
+        // boundary alone exceeds the arm budget, subdividing cannot help.
+        if (inherited_excess && refinement.tested &&
+            refinement.discretization_met && refinement.arithmetic_excess)
+          throw sp::Rejected(
+              "FT spectral inherited input uncertainty exceeds arm budget");
         throw sp::Rejected(
             "FT spectral resolution or arithmetic accuracy exhausted");
+      }
     }
     diagnostics.preparation_seconds = preparing;
     diagnostics.numerical_seconds = elapsed() - preparing;
@@ -676,69 +898,16 @@ try_transport_single(const ExactEpsilonMatrix &matrix, const LaurentRows &initia
     return std::nullopt;
   }
 }
-// Subdivision changes only the parametrization of each original straight leg.
-// Failed attempts never update the accepted state. No pole/structural rejection
-// is retried; every child goes through the complete original geometry checks.
+// Completed-arm transport with optional bisection of legs; see
+// detail::subdivide for the retry contract.
 inline std::optional<LaurentRows>
 try_transport(const ExactEpsilonMatrix& matrix,const LaurentRows& initial,
               const ExactEpsilonMatrix& forcing,const std::vector<Exact>& vertices,
               const Options& options,Diagnostics& diagnostics) {
-  if(!options.max_subdivisions)
-    return try_transport_single(matrix,initial,forcing,vertices,options,diagnostics);
-  diagnostics={};
-  if(options.max_subdivisions>4096 || vertices.empty() ||
-     !std::isfinite(options.seconds_budget) || options.seconds_budget<=0 ||
-     !options.accuracy_goal || options.accuracy_goal>100000) {
-    diagnostics.reason="FT spectral subdivision/options budget";return std::nullopt;
-  }
-  if(std::adjacent_find(vertices.begin(),vertices.end(),[](const Exact& a,const Exact& b){return a!=b;})==vertices.end())
-    return try_transport_single(matrix,initial,forcing,vertices,options,diagnostics);
-  const auto started=std::chrono::steady_clock::now();
-  auto elapsed=[&]{return std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();};
-  auto fail=[&](const std::string& reason)->std::optional<LaurentRows>{diagnostics.reason=reason;return std::nullopt;};
-  Options local=options;local.max_subdivisions=0;
-  // A decimal reserve distributes a conservative local accuracy target over
-  // the maximum number of accepted segments; propagated balls remain intact.
-  std::size_t segments=vertices.size()-1+options.max_subdivisions;
-  unsigned reserve=1;for(auto n=segments;n>1;n=(n+9)/10)++reserve;
-  local.accuracy_goal+=reserve;
-  LaurentRows state=initial;
-  try {
-    for(std::size_t leg=0;leg+1<vertices.size();++leg) {
-      if(vertices[leg]==vertices[leg+1])continue;
-      std::vector<std::pair<Exact,Exact>> pending{{vertices[leg],vertices[leg+1]}};
-      while(!pending.empty()) {
-        local.seconds_budget=options.seconds_budget-elapsed();
-        if(local.seconds_budget<=0)return fail("FT spectral total subdivision time budget exhausted");
-        auto segment=std::move(pending.back());pending.pop_back();Diagnostics attempt;
-        auto value=try_transport_single(matrix,state,forcing,{segment.first,segment.second},local,attempt,options.accuracy_goal);
-        diagnostics.preparation_seconds+=attempt.preparation_seconds;
-        diagnostics.numerical_seconds+=attempt.numerical_seconds;
-        diagnostics.factorizations+=attempt.factorizations;
-        if(elapsed()>options.seconds_budget)return fail("FT spectral total subdivision time budget exhausted");
-        if(value) {
-          state=std::move(*value);++diagnostics.accepted_subsegments;
-          diagnostics.nodes.insert(diagnostics.nodes.end(),attempt.nodes.begin(),attempt.nodes.end());
-          diagnostics.block_sizes.insert(diagnostics.block_sizes.end(),attempt.block_sizes.begin(),attempt.block_sizes.end());
-          diagnostics.normalized_diagonals=std::max(diagnostics.normalized_diagonals,attempt.normalized_diagonals);
-          diagnostics.clustered_legs+=attempt.clustered_legs;
-          diagnostics.absolute_stability_components+=attempt.absolute_stability_components;
-          continue;
-        }
-        diagnostics.last_failure=attempt.reason;
-        const bool retry=attempt.reason=="FT spectral resolution or arithmetic accuracy exhausted" ||
-                         attempt.reason=="FT spectral interval too close to singularities";
-        if(!retry)return fail(attempt.reason);
-        if(diagnostics.subdivisions>=options.max_subdivisions)
-          return fail("FT spectral subdivision count exhausted: "+attempt.reason);
-        const auto midpoint=(segment.first+segment.second)/segment.first.constant(2);
-        ++diagnostics.subdivisions;
-        pending.emplace_back(midpoint,segment.second);
-        pending.emplace_back(segment.first,midpoint);
-      }
-      ++diagnostics.legs;
-    }
-    return state;
-  }catch(const std::exception& error){return fail(error.what());}
+  detail::PlainInverses inverses;
+  return detail::subdivide(initial,vertices,options,diagnostics,
+    [&](const LaurentRows& state,const std::vector<Exact>& path,const Options& local,Diagnostics& attempt,unsigned goal) {
+      return try_transport_single(matrix,state,forcing,path,local,attempt,goal,&inverses);
+    },[](unsigned,double){});
 }
 } // namespace diffexp::ft_spectral

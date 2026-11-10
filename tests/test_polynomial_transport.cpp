@@ -149,6 +149,18 @@ int main(int argc, char **argv) {
                 << std::chrono::duration<double>(finish - middle).count()
                 << " s\n";
     }
+    {
+      // The retained tail of a pole-free but stiff chart contradicts the
+      // quarter-radius step; a converged chart does not.
+      double stiff = 0, calm = 0;
+      (void)pt::chart(pt::compile({{0, 0, 0, e("40")}}, 1, 0, 1, 0, 80),
+                      {{B(1)}}, B(0), B(1), 80, &stiff);
+      (void)pt::chart(pt::compile({{0, 0, 0, e("2")}}, 1, 0, 1, 0, 80),
+                      {{B(1)}}, B(0), B(1), 80, &calm);
+      check(!taylor_tail_consistent(stiff, 80, B::precision()) &&
+                taylor_tail_consistent(calm, 80, B::precision()),
+            "polynomial transport Taylor tail estimate");
+    }
     std::cout << "Finite-lag polynomial recurrence, compact epsilon "
                  "denominator, shared blocks and fallback passed\n";
   } catch (const std::exception &e) {

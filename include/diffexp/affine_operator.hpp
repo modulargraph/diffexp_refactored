@@ -57,25 +57,11 @@ inline BallMatrix zeros(unsigned rows, unsigned cols) {
   return BallMatrix(rows, std::vector<B>(cols, B(0)));
 }
 inline BallMatrix inverse(const BallMatrix &matrix) {
-  unsigned d = matrix.size();
-  acb_mat_t a, b;
-  acb_mat_init(a, d, d);
-  acb_mat_init(b, d, d);
-  for (unsigned i = 0; i < d; ++i)
-    for (unsigned j = 0; j < d; ++j)
-      acb_set(acb_mat_entry(a, i, j), matrix[i][j].raw());
-  bool ok = acb_mat_inv(b, a, B::precision());
-  auto out = zeros(d, d);
-  if (ok)
-    for (unsigned i = 0; i < d; ++i)
-      for (unsigned j = 0; j < d; ++j)
-        acb_set(out[i][j].raw(), acb_mat_entry(b, i, j));
-  acb_mat_clear(a);
-  acb_mat_clear(b);
-  if (!ok)
+  auto out = affine_matching::detail::verified_inverse(matrix);
+  if (!out)
     throw affine_matching::detail::PrecisionNeeded(
         "prepared affine unit-leading matrix is not verifiably invertible");
-  return out;
+  return std::move(*out);
 }
 // Arithmetic enclosure guard only; this does not estimate omitted x terms.
 // Use an upper radius norm and a lower midpoint norm so the test is conservative.
@@ -299,8 +285,12 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
         static_cast<long>(inverse_high) - low + 1 > options.max_epsilon_depth)
       throw std::length_error(
           "prepared affine inverse exceeds epsilon-depth budget");
-    auto original = am::exact_coefficients(series, physical, shifts,
-                                           depth + loss, zero, budget);
+    // The gauge already generated (and paid for) the leading orders. Keep
+    // exactly depth+loss+1 of them: the principal-part depth test reads this size.
+    auto original = std::move(gauge.coefficients);
+    am::extend_exact_coefficients(original, series, physical, shifts,
+                                  depth + loss, zero, budget);
+    original.resize(depth + loss + 1);
     for (unsigned q = 1; q <= loss; ++q) {
       auto residual = fuchsify::detail::zeros(d, d, zero);
       for (unsigned p = q; p <= loss; ++p) {
@@ -425,14 +415,15 @@ inline Operator compose(const Prepared &prepared,
     const long infinity = AffineFrobeniusSeries::Valuations::zero_valuation;
     std::vector<std::vector<long>> valuations(functional.rows,
                                               std::vector<long>(d, infinity));
-    for (const auto &t : functional.terms)
-      if (!t.coefficient.is_zero()) {
-        AffineFrobeniusSeries::Expansion singleton{
-            functional.rows, functional.columns, {t}};
-        valuations[t.row][t.column] = std::min(
-            valuations[t.row][t.column],
-            series.valuation_metadata(singleton).minimum_by_column[t.column]);
-      }
+    for (const auto &t : functional.terms) {
+      if (t.row >= functional.rows || t.column >= d)
+        throw std::invalid_argument(
+            "affine operator functional coordinate outside shape");
+      if (!t.coefficient.is_zero())
+        valuations[t.row][t.column] =
+            std::min(valuations[t.row][t.column],
+                     series.epsilon_valuation(t.coefficient));
+    }
     long minimum = infinity, required = std::numeric_limits<long>::min();
     int low = operator_high;
     for (unsigned i = 0; i < functional.rows; ++i) {

@@ -95,6 +95,14 @@ struct NumericalStatistics {
   std::size_t endpoint_constraint_rows=0,endpoint_constraint_coefficients=0;
   double maximum_endpoint_constraint_residual=0;
   double ordinary_seconds=0,spectral_seconds=0;
+  // Wall time of the phases that precede transport. basis_selection_seconds
+  // covers discovery, screening and installation, not the original plan.
+  double endpoint_series_seconds=0,endpoint_operator_seconds=0,basis_selection_seconds=0,leaf_seconds=0;
+  std::size_t basis_scans_skipped=0;
+  // Local-operator coefficients below a child component's structural window:
+  // rounding noise replaced by the exact zero, and (never expected) values
+  // excluding zero, which are kept together with their wider child demand.
+  std::size_t structural_zero_coefficients=0,structural_zero_conflicts=0;
   std::size_t spectral_attempts=0,spectral_accepted=0,spectral_legs=0,spectral_reused=0;
   std::size_t spectral_subdivisions=0,spectral_accepted_subsegments=0;
   std::vector<std::string> spectral_rejections;
@@ -279,10 +287,23 @@ class Evaluator {
     bool has_physical_basis=false;
     epsilon_demand::Highs component_child_loss;
     std::optional<Matrix> rewritten_lower,rewritten_upper;
+    // An internal basis change Y=D_base U_base=D U leaves every endpoint
+    // functional unchanged: E=E_base V(cut) with the exact V=D_base^-1 D.
+    // Such a plan owns the plan whose endpoint frames it reuses; its own
+    // lower/upper members only carry the functional count.
+    std::unique_ptr<Plan> pullback_base;
+    Matrix pullback_map;
+    // Exact valuations read by every demand propagation of this plan.
+    std::optional<epsilon_demand::Valuations> connection_valuations,anchor_inverse_valuations;
+  };
+  struct DirectDemand {int low=0;epsilon_demand::Highs needs;};
+  struct Seconds {
+    double& total;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    ~Seconds(){total+=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();}
   };
  public:
   explicit Evaluator(const Graph& graph,NumericalOptions options={})
-      :graph_(graph),options_(std::move(options)),plans_(graph.nodes.size()),cache_(graph.nodes.size()),expressions_(graph.nodes.size()) {
+      :graph_(graph),options_(std::move(options)),plans_(graph.nodes.size()),cache_(graph.nodes.size()),expressions_(graph.nodes.size()),direct_demands_(graph.nodes.size()) {
     if(options_.adjoint.continuation)
       throw std::invalid_argument("a continuation belongs to one adjoint arm; use ordinary_cache_directory for recursive continuation");
     if(graph_.nodes.empty() || options_.working_bits<64 || options_.working_bits>1000000 ||
@@ -457,7 +478,7 @@ class Evaluator {
       feynman::CertifiedDeepestBetaOptions leaf;leaf.working_bits=options_.working_bits;
       leaf.f_rim=prescription_.f_rim;
       leaf.requested_digits=options_.leaf_digits;leaf.taylor_order=options_.ordinary_order;
-      auto value=evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);
+      auto value=[&]{Seconds timer{statistics_.leaf_seconds};return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);}();
       ++statistics_.leaf_evaluations;
       auto result=LaurentBoundary{value.epsilon_low,std::move(value.values),value.taylor_tail_certified};
       if(options_.observable_adjoint) {
@@ -617,13 +638,15 @@ class Evaluator {
   std::vector<BasisSelection> basis_selections_;
   std::vector<std::optional<LaurentBoundary>> cache_;
   std::vector<std::optional<linear_boundary::Expression>> expressions_;
+  std::vector<std::optional<DirectDemand>> direct_demands_;
   LaurentRows ordinary_transport(const Matrix& matrix,LaurentRows initial,const Matrix& forcing,
       const std::vector<Exact>& vertices,const AdjointOptions& settings) {
     if(options_.ordinary_problem_observer)options_.ordinary_problem_observer(matrix,initial,forcing,vertices);
-    const auto start=std::chrono::steady_clock::now();
+    // Time spent in a transport that throws (a conditioning failure followed
+    // by a method fallback, a rejected budget) is still transport time.
+    Seconds timer{statistics_.ordinary_seconds};
     if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(0);
-    const auto finish=[&]{statistics_.ordinary_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-      if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);};
+    const auto finish=[&]{if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);};
     if(options_.ordinary_method!=OrdinaryMethod::taylor && !settings.continuation && !settings.continuation_observer && !settings.chart_observer) {
       // Existing checkpoints remain authoritative and are verified by their original adapter.
       bool saved=false;
@@ -762,6 +785,7 @@ class Evaluator {
       report(depth,side+" exact endpoint columns "+std::to_string(completed)+"/"+std::to_string(total),high);
     };
     auto series=[&] {
+      Seconds timer{statistics_.endpoint_series_seconds};
       if(endpoint_store_) {
         auto verification=options_.endpoint_cache_verification;
         const auto caller_verification=verification.column_progress;

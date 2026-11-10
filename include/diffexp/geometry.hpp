@@ -73,20 +73,32 @@ inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial
     for(unsigned i=0;i<term.powers.size();++i)
       if(i!=variable && term.powers[i])throw std::invalid_argument("singularity polynomial not univariate");
     if(term.powers[variable]>10000)throw std::invalid_argument("root isolation degree limit");
-    fmpq_t q;fmpq_init(q);fmpq_set_str(q,(term.coefficient/denominator).str().c_str(),10);fmpq_canonicalise(q);
-    fmpq_poly_set_coeff_fmpq(p.q,term.powers[variable],q);fmpq_clear(q);
+    const auto coefficient=term.coefficient/denominator;
+    fmpq_poly_set_coeff_fmpq(p.q,term.powers[variable],coefficient.raw());
   }
   fmpq_poly_get_numerator(p.z,p.q);fmpz_poly_factor_squarefree(p.factors,p.z);
+  struct Roots {
+    acb_ptr values;slong size;
+    explicit Roots(slong n):values(_acb_vec_init(n)),size(n){}
+    ~Roots(){_acb_vec_clear(values,size);}
+    Roots(const Roots&)=delete;
+  };
   std::vector<B> out;
   for(slong i=0;i<p.factors->num;++i) {
     auto degree=fmpz_poly_degree(p.factors->p+i);
     if(degree<1)continue;
-    acb_poly_set_fmpz_poly(p.a,p.factors->p+i,bits);
-    acb_ptr roots=_acb_vec_init(degree);
-    auto found=acb_poly_find_roots(roots,p.a,nullptr,1000,bits);
-    if(found!=degree) {_acb_vec_clear(roots,degree);throw std::runtime_error("complex root isolation incomplete");}
-    for(slong j=0;j<degree;++j){B b;acb_set(b.raw(),roots+j);out.push_back(std::move(b));}
-    _acb_vec_clear(roots,degree);
+    Roots roots(degree);
+    // The factor is exact and squarefree, so its roots are simple: failure to
+    // isolate them is a precision shortfall of this attempt, not of the input.
+    slong working=bits,found=0;
+    for(unsigned attempt=0;;++attempt) {
+      acb_poly_set_fmpz_poly(p.a,p.factors->p+i,working);
+      found=acb_poly_find_roots(roots.values,p.a,nullptr,1000,working);
+      if(found==degree || attempt==4)break;
+      working*=2;
+    }
+    if(found!=degree)throw std::runtime_error("complex root isolation incomplete");
+    for(slong j=0;j<degree;++j){B b;acb_set(b.raw(),roots.values+j);out.push_back(std::move(b));}
   }
   return out;
 }

@@ -159,20 +159,11 @@ int main(int argc, char** argv) {
         diffexp::level::Provider fallback;
         std::shared_ptr<diffexp::ibp_solver::Session> native_session;
         if(ibp_provider=="ibp-solver"){
-          diffexp::ibp_solver::Options native;native.cache_directory=cache/"ibp-solver";native.dots=ibp_dots;native.numerators=ibp_numerators;
-          // Coefficients are typically of low degree in epsilon and high degree in
-          // the merge parameter. Per-variable degree slices fit that shape with far
-          // fewer points than the dense total-degree scan, whose cap they also avoid.
-          native.degree_slices=true;native.max_samples_per_prime=1024;
-          // One reconstruction per level instead of one per closure pass, and
-          // held-out validation on the pilot's dependency subset of original
-          // equations with one complete elimination as anchor per attempt.
-          // "strict" eliminates every generated equation at every point.
-          native.closure_parameter=parameter;
-          // One finite-field elimination may take as long as one provider call:
-          // --fire-seconds bounds it for the built-in solver as it does for FIRE.
-          native.probe_timeout_seconds=options.reduction.provider.timeout_seconds;
-          if(ibp_validation!="strict"){native.selected_source_rows=true;native.complete_validation_anchor=true;}
+          // --fire-seconds bounds one finite-field elimination of the built-in
+          // solver as it bounds one FIRE call.
+          auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,
+            options.reduction.provider.timeout_seconds,ibp_validation=="strict");
+          native.dots=ibp_dots;native.numerators=ibp_numerators;
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {

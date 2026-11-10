@@ -10,16 +10,16 @@ For an independent comparison, the opt-in acceptance runner reports coefficients
 reference differences and forbidden-pole checks as JSON:
 
 ```sh
-build/diffexp_ft_examples sunrise /path/to/cache /path/to/FIRE7
-build/diffexp_ft_examples banana4 /path/to/cache /path/to/FIRE7
-build/diffexp_ft_examples banana4_unequal /path/to/cache /path/to/FIRE7
+build/diffexp_ft_examples sunrise /path/to/cache
+build/diffexp_ft_examples banana4 /path/to/cache
+build/diffexp_ft_examples banana4_unequal /path/to/cache
 ```
 
 Its optional arguments are `FAMILY CACHE FIRE ENDPOINT_ORDER ORDINARY_ORDER BITS
-GRAPH_SECONDS METHOD`, with defaults 32/80/384/600/adjoint. Use `-` for FIRE to
-require previously prepared exact caches. These calculations can take minutes
-or longer and do not run automatically. The full Henn FT reconstruction is
-frozen and is excluded from release acceptance.
+GRAPH_SECONDS METHOD`, with defaults 32/80/384/600/adjoint. Without a FIRE
+path (or with `-` in its place) the built-in IBP solver prepares the levels,
+with the settings of `diffexp ft`. The four-loop bananas take minutes and none
+of these runs automatically.
 
 ## Original DiffExp examples
 

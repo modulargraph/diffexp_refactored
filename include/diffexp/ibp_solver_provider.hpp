@@ -274,4 +274,20 @@ class Session {
   std::shared_ptr<Sampler> sampler_;fire_modular::Session session_;
   ibp::PropagatorBasis basis_;Exact dimension_;ExactField field_;Options options_;ClosurePlanningStatistics planning_;
 };
+// The settings every recursive Feynman-trick level uses with the built-in
+// solver. Coefficients are typically of low degree in epsilon and high degree
+// in the merge parameter: per-variable degree slices fit that shape with far
+// fewer points than the dense total-degree scan, whose cap they also avoid.
+// The closure is planned once per level, not once per pass. Unless `strict`,
+// held-out validation eliminates the pilot's dependency subset of the original
+// equations with one complete elimination per attempt; strict eliminates every
+// generated equation at every point.
+inline Options recursion_options(const std::filesystem::path& cache_directory,std::size_t parameter,
+    unsigned elimination_seconds,bool strict=false) {
+  Options native;native.cache_directory=cache_directory;
+  native.degree_slices=true;native.max_samples_per_prime=1024;
+  native.closure_parameter=parameter;native.probe_timeout_seconds=elimination_seconds;
+  if(!strict){native.selected_source_rows=true;native.complete_validation_anchor=true;}
+  return native;
+}
 } // namespace diffexp::ibp_solver

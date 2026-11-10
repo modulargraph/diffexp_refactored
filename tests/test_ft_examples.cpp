@@ -2,11 +2,12 @@
 // Usage: test_ft_examples FAMILY [CACHE_DIR [FIRE_PATH_OR_DASH [ENDPOINT_N [ORDINARY_N [BITS [GRAPH_TIMEOUT_SECONDS [METHOD]]]]]]]
 // Supported: bubble, sunrise, banana, banana_unequal, banana4,
 // banana4_unequal, box, pentagon, pentagon_massive, kite, box_bubble, box_triangle, double_box_planar. Defaults N32/N80/384 bits and graph timeout 600s.
-// METHOD is adjoint (default), factored, auto or values.
-// '-' leaves FIRE unavailable; verified durable cache hits still work.
+// METHOD is adjoint (default), factored or auto.
+// '-' (or no FIRE path) prepares the levels with the built-in IBP solver.
 // Output: one Boost.JSON report on stdout, phase progress on stderr.
 #include "diffexp/recursion_pipeline.hpp"
 #include "diffexp/level_cache.hpp"
+#include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/banana_oracle.hpp"
 #include "diffexp/box_oracle.hpp"
 #include "diffexp/pentagon_oracle.hpp"
@@ -69,8 +70,14 @@ int main(int argc,char** argv) {
     report["cache_directory"]=std::filesystem::absolute(cache).string();
     artifacts::Store store(cache);
     auto provider=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget) {
-      level::Provider fallback;
-      if(argc>3 && std::string(argv[3])=="-")fallback=[](const auto&,const auto&){fire::Result result;result.reason="acceptance cache-only mode forbids FIRE";return result;};
+      // Without a FIRE executable the built-in solver prepares the levels, with
+      // the settings of `diffexp ft`.
+      level::Provider fallback;std::shared_ptr<ibp_solver::Session> native;
+      if(exact.reduction.provider.executable.empty())fallback=[&](const auto& batch,const auto& limits) {
+        if(!native)native=std::make_shared<ibp_solver::Session>(basis,dimension,field,
+          ibp_solver::recursion_options(cache/"ibp-solver",parameter,exact.reduction.provider.timeout_seconds));
+        return (*native)(batch,limits);
+      };
       auto result=cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
       if(result.cache_hit)++reused;else if(result.result.success)++built;
       return std::move(result.result);

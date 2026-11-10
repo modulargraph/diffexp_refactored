@@ -21,6 +21,11 @@ struct Options {
   std::size_t max_candidates = 8, max_candidate_rows = 256, max_depth = 2;
   std::vector<int> epsilon_powers{-1, 0, 1};
   bool sparse_combinations = true, allow_lower_sector_mixes = true;
+  // Pure rescalings J_i=eps^p Y_i. Structural per-component child windows are
+  // invariant under every diagonal epsilon gauge, so a consumer that ranks by
+  // them gains nothing from these trials and should switch them off; they
+  // matter only to a consumer bounding all components by one common window.
+  bool epsilon_scalings = true;
   // Additional exact coordinate rows (in the ORIGINAL ordered basis).
   // These are algebraic coordinates, not claims about named IBP integrals.
   Matrix coordinate_rows;
@@ -323,7 +328,7 @@ inline CandidateResult scan_candidates(const level::Result &level,
       auto available = [&] { return !expired() && result.stats.trials<depth_limit; };
       // Cover all component rescalings before allowing a large cached-row or
       // shear family at one position to exhaust the trial budget.
-      for(int p:options.epsilon_powers) if(p)
+      if(options.epsilon_scalings) for(int p:options.epsilon_powers) if(p)
         for(std::size_t pos=0;pos<d && available();++pos) {
           auto q=unit[pos];q[pos]=epsilon_gauge_detail::multiply_power(q[pos],options.epsilon_variable,p);
           trial(base,pos,q,"epsilon scale row "+std::to_string(pos)+" power "+std::to_string(p));

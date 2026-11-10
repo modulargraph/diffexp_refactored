@@ -74,6 +74,16 @@ int main(){try {
     return scan::DemandCost{1};
   });
   check(derivative_candidate,"parameter-dependent candidate missing");
+  // Pure epsilon rescalings can be withheld from a consumer whose cost is
+  // invariant under them; every other candidate family is still offered.
+  options.seconds=10;options.epsilon_scalings=false;bool scaled=false,sheared=false;
+  auto unscaled=scan::scan_candidates(level,2,0,options,[&](const scan::Candidate &c)->std::optional<scan::DemandCost>{
+    scaled=scaled||c.metadata.provenance.find("epsilon scale row")!=std::string::npos;
+    sheared=sheared||c.metadata.provenance.find("sparse row")!=std::string::npos||c.metadata.provenance.find("supplied exact coordinate")!=std::string::npos;
+    return scan::DemandCost{1};
+  });
+  check(!scaled&&sheared&&unscaled.stats.trials>0,"epsilon rescalings offered although disabled, or other candidates lost");
+  options.epsilon_scalings=true;
   // The deterministic trial bound and a wall-clock cut are different ends:
   // only the latter leaves the discovery undecided for a later run.
   options.seconds=10;

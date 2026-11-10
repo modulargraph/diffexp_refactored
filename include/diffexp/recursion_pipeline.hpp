@@ -1017,6 +1017,9 @@ class Evaluator {
           physical_basis_scan::Options scan_options;
           scan_options.seconds=options_.basis_scan_seconds;scan_options.epsilon_variable=ei_;
           scan_options.max_candidates=8;
+          // The structural component windows, and with them the first two
+          // cost axes, do not change under a diagonal epsilon rescaling.
+          scan_options.epsilon_scalings=!options_.component_epsilon_demands;
           auto frontier=physical_basis_scan::scan_candidates(node.closure,node.merged.physical_count,xi_,scan_options,
             [&](const physical_basis_scan::Candidate& candidate) -> std::optional<physical_basis_scan::DemandCost> {
               if(candidate.metadata.provenance=="original")return original_cost;

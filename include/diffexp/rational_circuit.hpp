@@ -73,8 +73,8 @@ class Compiled {
 // Charts with at least this many multiply-adds per Taylor order are expanded
 // on the OpenMP threads, when the build enables OpenMP. Below it the two
 // barriers of an order cost more than the threads save, above all on a
-// machine that is also busy with other work (the CLI therefore lets OpenMP
-// lower the thread count under load).
+// machine that is also busy with other work (the CLI therefore leaves the
+// cores that are busy at start-up to that work).
 inline constexpr std::size_t parallel_work=5000;
 struct Statistics {
   // addmul_operations counts the nonzero terms of the pooled dot products.

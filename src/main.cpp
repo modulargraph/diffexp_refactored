@@ -25,15 +25,20 @@
 #include <charconv>
 #include <optional>
 #include <chrono>
+#include <cstdlib>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
 int main(int argc, char** argv) {
 #ifdef _OPENMP
-  // Fewer threads on a machine that is busy with other work: an oversubscribed
-  // chart expansion waits a scheduler slice at every barrier.
-  omp_set_dynamic(1);
+  // Leave the cores that other work occupies at start-up: an oversubscribed
+  // chart expansion waits a scheduler slice at every barrier. OMP_NUM_THREADS
+  // overrides this.
+  if(!std::getenv("OMP_NUM_THREADS")) {
+    double load=0;
+    if(getloadavg(&load,1)==1)omp_set_num_threads(std::max(1,omp_get_num_procs()-static_cast<int>(load+0.5)));
+  }
 #endif
   bool json_mode=false;
   try {

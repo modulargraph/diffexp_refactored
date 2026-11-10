@@ -10,7 +10,8 @@
   hardware thread. With OpenMP (optional, `DIFFEXP_OPENMP`, on by default)
   the adjoint chart expansion runs the independent streams and rows of each
   Taylor order in parallel once an order costs 5000 multiply-adds or more;
-  the CLI lets OpenMP lower the thread count on a busy machine. Results are
+  the CLI leaves the cores that are busy at start-up to their work
+  (`OMP_NUM_THREADS` overrides). Results are
   bit-identical for any thread count.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.

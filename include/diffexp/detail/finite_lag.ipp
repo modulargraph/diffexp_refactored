@@ -125,18 +125,25 @@ inline const FiniteLagPlan* finite_lag_plan(const Compiled& c) {
   }
   return c.finite_lag.get();
 }
-inline Chart finite_lag_chart(const Compiled& c,const FiniteLagPlan& plan,const Boundary& initial,
+// Gauge-transformed Taylor coefficients about one centre. They do not depend
+// on the step: a shorter step re-evaluates the same retained polynomial.
+struct FiniteLagSeries {
+  unsigned order=0,d=0,w=0;
+  B center;
+  std::vector<B> roots;
+  std::unique_ptr<AcbArray> y;
+  acb_srcptr at(unsigned n,unsigned i,unsigned k)const{return y->p+(static_cast<slong>(n)*d+i)*w+k;}
+};
+// `step` is the longest step this expansion will be evaluated at. It only
+// enters the interval-feedback guard, which shorter steps satisfy a fortiori.
+inline FiniteLagSeries finite_lag_series(const Compiled& c,const FiniteLagPlan& plan,const Boundary& initial,
     const std::vector<B>& roots,const B& center,const B& step,unsigned order) {
   const unsigned d=c.dimension,w=c.epsilon_order+1;const auto bits=B::precision();
   if(roots.size()!=c.squares.size())throw std::runtime_error("finite-lag root dimensions");
-  std::vector<B> factors(d,B(1)),endpoint_factors(d,B(1)),end_roots;
-  for(unsigned r=0;r<roots.size();++r)
-    end_roots.push_back(continue_polynomial_sqrt(c.square_polynomials[r],center,center+step,roots[r]));
-  for(unsigned i=0;i<d;++i)for(unsigned r=0;r<roots.size();++r)if(plan.gauge[i]&(1u<<r)) {
-    factors[i]=factors[i]*roots[r];endpoint_factors[i]=endpoint_factors[i]*end_roots[r];
-  }
-  for(unsigned i=0;i<d;++i)if(factors[i].contains_zero() || endpoint_factors[i].contains_zero())
-    throw std::runtime_error("noninvertible finite-lag gauge");
+  if(order<4)throw std::runtime_error("finite-lag Taylor order");
+  std::vector<B> factors(d,B(1));
+  for(unsigned i=0;i<d;++i)for(unsigned r=0;r<roots.size();++r)if(plan.gauge[i]&(1u<<r))factors[i]=factors[i]*roots[r];
+  for(unsigned i=0;i<d;++i)if(factors[i].contains_zero())throw std::runtime_error("noninvertible finite-lag gauge");
   const auto& groups=plan.products;
   auto coefficients=plan.coefficients;
   // Translate each distinct rational coefficient once, sharing it over sources.
@@ -155,7 +162,8 @@ inline Chart finite_lag_chart(const Compiled& c,const FiniteLagPlan& plan,const 
   std::uint64_t cells=static_cast<std::uint64_t>(order+1)*d*w;
   for(const auto& g:groups)cells+=coefficients[g.coefficient].second.size()*w;
   if(cells>10000000)throw std::runtime_error("finite-lag workspace budget");
-  AcbArray y(static_cast<slong>(order+1)*d*w);
+  FiniteLagSeries series{order,d,w,center,roots,std::make_unique<AcbArray>(static_cast<slong>(order+1)*d*w)};
+  auto& y=*series.y;
   std::vector<std::unique_ptr<AcbArray>> buffers;
   for(const auto& g:groups)buffers.push_back(std::make_unique<AcbArray>(coefficients[g.coefficient].second.size()*w));
   const auto at=[&](unsigned n,unsigned i,unsigned k){return y.p+(static_cast<slong>(n)*d+i)*w+k;};
@@ -178,22 +186,36 @@ inline Chart finite_lag_chart(const Compiled& c,const FiniteLagPlan& plan,const 
     }
     for(unsigned i=0;i<d;++i)for(unsigned k=0;k<w;++k)acb_div_ui(at(n+1,i,k),at(n+1,i,k),n+1,bits);
   }
+  return series;
+}
+inline Chart finite_lag_evaluate(const Compiled& c,const FiniteLagPlan& plan,const FiniteLagSeries& series,const B& step) {
+  const unsigned d=series.d,w=series.w,order=series.order;const auto bits=B::precision();
+  std::vector<B> endpoint_factors(d,B(1)),end_roots;
+  for(unsigned r=0;r<series.roots.size();++r)
+    end_roots.push_back(continue_polynomial_sqrt(c.square_polynomials[r],series.center,series.center+step,series.roots[r]));
+  for(unsigned i=0;i<d;++i)for(unsigned r=0;r<end_roots.size();++r)if(plan.gauge[i]&(1u<<r))
+    endpoint_factors[i]=endpoint_factors[i]*end_roots[r];
+  for(unsigned i=0;i<d;++i)if(endpoint_factors[i].contains_zero())throw std::runtime_error("noninvertible finite-lag gauge");
   Chart result{Boundary(d,std::vector<B>(w)),Boundary(d,std::vector<B>(w)),Boundary(d,std::vector<B>(w)),{},false,true};
   std::vector<B> powers(order+1,B(1));for(unsigned n=1;n<=order;++n)powers[n]=powers[n-1]*step;
   for(unsigned i=0;i<d;++i)for(unsigned k=0;k<w;++k) {
     auto& v=result.values[i][k];
-    for(unsigned n=order+1;n-->0;){acb_mul(v.raw(),v.raw(),step.raw(),bits);acb_add(v.raw(),v.raw(),at(n,i,k),bits);}
+    for(unsigned n=order+1;n-->0;){acb_mul(v.raw(),v.raw(),step.raw(),bits);acb_add(v.raw(),v.raw(),series.at(n,i,k),bits);}
     v=v/endpoint_factors[i];
     if(!v.is_finite())throw std::runtime_error("nonfinite finite-lag output");
     // Estimate the omitted transformed series in the physical endpoint basis.
     // Input radii remain present in every term; this is not a tail certificate.
     for(unsigned n=order-3;n<=order;++n) {
-      B term;acb_mul(term.raw(),at(n,i,k),powers[n].raw(),bits);
+      B term;acb_mul(term.raw(),series.at(n,i,k),powers[n].raw(),bits);
       result.truncation_errors[i][k]+=magnitude(term/endpoint_factors[i]);
     }
     result.errors[i][k]=result.truncation_errors[i][k]+arithmetic_error(v);
     if(!result.errors[i][k].is_finite())throw std::runtime_error("nonfinite finite-lag error estimate");
   }
   return result;
+}
+inline Chart finite_lag_chart(const Compiled& c,const FiniteLagPlan& plan,const Boundary& initial,
+    const std::vector<B>& roots,const B& center,const B& step,unsigned order) {
+  return finite_lag_evaluate(c,plan,finite_lag_series(c,plan,initial,roots,center,step,order),step);
 }
 } // namespace diffexp::transport

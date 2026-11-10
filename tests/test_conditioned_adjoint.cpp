@@ -63,8 +63,23 @@ int main(){try {
   options.max_rows_per_batch=1;stats={};
   auto many=exact_laurent_rows({{one},{one},{one}},zero,0);
   auto batched=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},many,{{zero},{zero},{zero}},{zero,Exact(f,"1/4")},options);
-  check(stats.rational_cross_checks>0 && stats.rational_compilations==1,"batched fallback did not reuse one lazy compilation per leg");
+  // The default compact centered recovery repairs each ill-conditioned batch
+  // through its rational midpoint chart; the archived ordering intersects a
+  // whole-input rational cross-check instead. Either way the reference is
+  // compiled lazily once per leg and the retained polynomial stays enclosed.
+  check(stats.polynomial_charts==3 && stats.rational_cross_checks+stats.rational_midpoint_charts>0 && stats.rational_compilations==1,
+      "batched fallback did not reuse one lazy compilation per leg");
   check(acb_overlaps(batched.coefficients[0][0][0].raw(),batched.coefficients[2][0][0].raw()),"batched fallback changed independent row result");
+  for(unsigned row=0;row<3;++row) {
+    check(adjoint_detail::enclosure_quality(batched.coefficients[row][0][0]).approximate_upper()<1e-80,"batched fallback did not repair arithmetic wrapping");
+    check(acb_contains(batched.coefficients[row][0][0].raw(),B::from_strings(exact.str()).raw()),"batched fallback excluded independent exact retained polynomial");
+  }
+  // The archived ordering remains selectable and must still cross-check.
+  auto archived=options;AdjointConditioningStats archived_stats;archived.conditioning_stats=&archived_stats;
+  archived.compact_centered_recovery=false;archived.compact_centered_only=false;
+  auto archived_batched=transport_adjoint_rows({{Exact(f,"-1/(1+x)^20")}},many,{{zero},{zero},{zero}},{zero,Exact(f,"1/4")},archived);
+  check(archived_stats.rational_cross_checks>0 && archived_stats.rational_compilations==1,"archived batched ordering lost its rational cross-check");
+  check(acb_overlaps(archived_batched.coefficients[0][0][0].raw(),batched.coefficients[0][0][0].raw()),"archived and compact batched results disagree");
   // A known input radius can flow into an exactly zero accumulator. Its
   // exact solution is y1=y0(0), y2=x*y0(0), including the inherited radius.
   B inherited(1);arb_add_error_2exp_si(acb_realref(inherited.raw()),-130);

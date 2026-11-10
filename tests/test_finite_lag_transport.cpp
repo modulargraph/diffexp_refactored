@@ -73,5 +73,39 @@ int main(){try {
   auto number=result.at("values").as_array()[0].as_array()[1].as_object();
   B actual=B::from_strings(transport::string(number.at("real_midpoint")),transport::string(number.at("imaginary_midpoint"))),expected;
   acb_asinh(expected.raw(),B::from_strings("1/2").raw(),384);close(actual,expected,"full path analytic reference");
+  // A truncation refinement shortens the step of the SAME retained polynomial.
+  // It is independent of the recurrence: the finite-lag chart must neither be
+  // blamed for it nor recomputed, and must agree with a fresh shorter chart.
+  auto dilog=j::parse(R"({"dimension":3,"epsilon_order":2,"taylor_order":50,"working_bits":256,"accuracy_goal":30,"paths":{"t":"3*x/4"},"entries":[{"row":1,"column":0,"epsilon":1,"variable":"dlog","expression":"1-t","coefficient":"-1"},{"row":2,"column":1,"epsilon":1,"variable":"dlog","expression":"t","coefficient":"1"}],"boundary":[["1","0","0"],["0","0","0"],["0","0","0"]]})");
+  auto refined=transport::run(dilog).as_object();const auto& recurrence=refined.at("recurrence").as_object();
+  check(recurrence.at("finite_lag_charts").as_uint64()>0 && recurrence.at("finite_lag_rejections").as_uint64()==0 &&
+      recurrence.at("series_charts").as_uint64()==0,"truncation refinement was charged to the finite-lag recurrence");
+  B::set_precision(256);
+  auto cell=refined.at("values").as_array()[2].as_array()[2].as_object();
+  B li2=B::from_strings(transport::string(cell.at("real_midpoint"))),li2_expected;
+  acb_polylog_si(li2_expected.raw(),2,B::from_strings("3/4").raw(),256);
+  check(arb_lt(acb_realref(transport::magnitude(li2-li2_expected).raw()),acb_realref(B::from_strings("1e-30").raw())),"refined dilogarithm reference");
+  B::set_precision(384);
+  {
+    const B wide=B::from_strings("1/4"),narrow=B::from_strings("1/9");transport::Chart first;
+    auto roots=transport::principal_roots_at(c,at);Boundary initial{{B(0),B(0),B(0)},{B(1),B(0),B(0)}};
+    arb_add_error_2exp_si(acb_realref(initial[1][0].raw()),-100);
+    auto expansion=transport::expand(c,transport::numerical_entries(c),initial,roots,at,wide,80,false,110,first);
+    check(expansion.finite_lag() && first.finite_lag,"expansion did not retain finite-lag coefficients");
+    auto shorter=transport::evaluate_expansion(c,expansion,narrow,false,110);
+    auto fresh=transport::chart(c,transport::numerical_entries(c),initial,roots,at,narrow,80,false,110);
+    check(shorter && shorter->finite_lag && fresh.finite_lag,"finite-lag re-evaluation was not used");
+    transport::Chart series_first;
+    auto series=transport::expand(c,transport::numerical_entries(c),initial,roots,at,wide,80,false,110,series_first,true,10000000,true,false);
+    auto series_shorter=transport::evaluate_expansion(c,series,narrow,false,110);
+    auto series_fresh=transport::chart(c,transport::numerical_entries(c),initial,roots,at,narrow,80,false,110,true,10000000,true,false);
+    check(!series.finite_lag() && series_shorter,"series expansion was not retained");
+    for(unsigned i=0;i<2;++i)for(unsigned e=0;e<3;++e) {
+      check(acb_equal(shorter->values[i][e].raw(),fresh.values[i][e].raw()) &&
+          acb_equal(shorter->truncation_errors[i][e].raw(),fresh.truncation_errors[i][e].raw()),"finite-lag re-evaluation changed retained balls");
+      check(acb_equal(series_shorter->values[i][e].raw(),series_fresh.values[i][e].raw()) &&
+          acb_equal(series_shorter->errors[i][e].raw(),series_fresh.errors[i][e].raw()),"series re-evaluation changed retained balls");
+    }
+  }
   std::cout<<"Finite-lag default, shifted charts, sheets, uncertainty and fallback passed\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

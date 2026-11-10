@@ -46,32 +46,42 @@ struct Graph {
   // The epsilon variable of every exact coefficient is epsilon_total minus
   // this shift: the dimension is d0-2*(epsilon_shift+eps). See shift_epsilon.
   Rational epsilon_shift=Rational(0);
+  // The non-leaf levels hold no epsilon: they are the recursion at the one
+  // dimension d0-2*epsilon_shift.
+  bool specialised=false;
 };
 
-// The same prepared recursion expanded around epsilon_total=shift instead of
-// zero. At a generic shift nothing is singular at eps=0: no level has epsilon
-// poles, so the order-zero coefficient of a numerical evaluation is the value
-// of the integral in d0-2*shift dimensions and needs only the order-zero
-// coefficients of every deeper level. Sampling several shifts and fitting the
-// Laurent coefficients replaces the widening epsilon windows of the expanded
-// recursion.
-inline Graph shift_epsilon(Graph graph,const Rational& shift) {
+// The same prepared recursion at epsilon_total=shift instead of zero. At a
+// generic shift nothing is singular there: no level has epsilon poles, and
+// the integral in d0-2*shift dimensions follows from the equations at that
+// dimension alone. Every level above the scalar leaf is therefore specialised
+// to the number (no epsilon is left in its connection or observables, so its
+// endpoint series, matching and transport work with rational functions of x
+// only); the leaf keeps eps=shift+eps', which its closed form needs. With
+// `specialise` false every level keeps the residual epsilon and higher
+// orders in (epsilon-shift) can be requested.
+// Sampling several shifts and fitting the Laurent coefficients replaces the
+// widening epsilon windows of the expanded recursion.
+inline Graph shift_epsilon(Graph graph,const Rational& shift,bool specialise=true) {
   const auto names=graph.dimension.variables();
   const auto found=std::find(names.begin(),names.end(),"eps");
   if(found==names.end())throw std::invalid_argument("epsilon shift needs the eps variable");
   const std::size_t epsilon=found-names.begin();
-  std::vector<Exact> point;
-  for(std::size_t i=0;i<graph.dimension.variable_count();++i)point.push_back(graph.dimension.variable(i));
-  point[epsilon]=point[epsilon]+graph.dimension.constant(shift);
-  const auto move=[&](Exact& value){if(!value.is_zero())value=value.substitute(point);};
-  move(graph.dimension);
+  std::vector<Exact> moved,fixed;
+  for(std::size_t i=0;i<graph.dimension.variable_count();++i)moved.push_back(graph.dimension.variable(i));
+  fixed=moved;
+  moved[epsilon]=moved[epsilon]+graph.dimension.constant(shift);
+  fixed[epsilon]=graph.dimension.constant(shift);
+  graph.dimension=graph.dimension.substitute(moved);
   for(auto& node:graph.nodes) {
+    const auto& point=specialise&&!node.scalar_leaf?fixed:moved;
+    const auto move=[&](Exact& value){if(!value.is_zero())value=value.substitute(point);};
     for(auto* matrix:{&node.closure.matrix,&node.closure.target_rows,&node.observable_rows})
       for(auto& row:*matrix)for(auto& value:row)move(value);
     for(auto& operation:node.operations)for(auto& [integral,value]:operation.source_row)move(value);
     for(auto& identity:node.closure.source_identities)for(auto& [integral,value]:identity)move(value);
   }
-  graph.epsilon_shift=graph.epsilon_shift+shift;
+  graph.epsilon_shift=graph.epsilon_shift+shift;graph.specialised=specialise;
   return graph;
 }
 

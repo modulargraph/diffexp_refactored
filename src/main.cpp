@@ -249,7 +249,7 @@ int main(int argc, char** argv) {
         // result then multiplies (epsilon-shift)^k.
         if(!epsilon_shift.empty()) {
           if(canonical_basis)throw std::invalid_argument("--epsilon-shift cannot be combined with --henn-basis");
-          graph=diffexp::recursion::shift_epsilon(std::move(graph),diffexp::Rational(epsilon_shift));
+          graph=diffexp::recursion::shift_epsilon(std::move(graph),diffexp::Rational(epsilon_shift),epsilon_order==0);
           report["epsilon_shift"]=epsilon_shift;
         }
         const auto numerical_start=std::chrono::steady_clock::now();

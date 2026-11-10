@@ -639,6 +639,7 @@ class Evaluator {
     }
     report(depth,side+" exact endpoint series",high);
     auto endpoint_options=options_.endpoint;
+    endpoint_options.regulate_noninteger_powers=graph_.specialised;
     const auto caller_progress=endpoint_options.column_progress;
     endpoint_options.column_progress=[&,caller_progress](unsigned completed,unsigned total){
       if(caller_progress)caller_progress(completed,total);

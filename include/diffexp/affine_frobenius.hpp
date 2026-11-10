@@ -744,6 +744,13 @@ public:
     // solved on `threads` threads (0: one per hardware thread).
     std::function<void(unsigned,unsigned)> column_progress;
     unsigned threads = 0;
+    // The system is the recursion at one numeric dimension (no epsilon left).
+    // Its exponents a+b*shift then carry no slope, and the dimensionally
+    // regulated sectors (b nonzero) are recognised by a non-integer power at a
+    // generic shift. Such columns are labelled with a unit slope, so every
+    // endpoint rule treats them as regulated; the recurrence itself uses the
+    // true exponents. Only order zero in epsilon is meaningful afterwards.
+    bool regulate_noninteger_powers = false;
   };
   struct Term {
     unsigned row, column, log_degree;
@@ -836,6 +843,10 @@ private:
     out.frame_ = prepared.transform;
     out.eigen_ = prepared.exponents;
     out.successor_ = prepared.successor;
+    out.slopes_.clear();
+    for (const auto &exponent : out.eigen_)
+      out.slopes_.push_back(options.regulate_noninteger_powers && exponent.slope.is_zero() &&
+                            !is_integer(exponent.power) ? Rational(1) : exponent.slope);
     // Constant Laurent column relations can mix exactly those base powers
     // that differ by integers (epsilon expansion makes slopes logarithms).
     // A common absolute cutoff commutes with these relations; a separate
@@ -982,7 +993,7 @@ private:
               fmpz_poly_div(denominator.raw(), shared.raw(), divisor.raw());
               terms.push_back(
                   {row, column, l, out.eigen_[column].power + Rational(k),
-                   out.eigen_[column].slope,
+                   out.slopes_[column],
                    z.from_reduced_univariate_polynomials(numerator.raw(),
                                                          denominator.raw(), ei)});
             }
@@ -1155,7 +1166,7 @@ private:
         cutoffs[c]=integer_value(frontiers_[c]-eigen_[c].power);
         if(endpoint_only){
           const auto lowest=eigen_[c].power+Rational(valuation);
-          if(!eigen_[c].slope.is_zero()||lowest>Rational(0))cutoffs[c]=-1;
+          if(!slopes_[c].is_zero()||lowest>Rational(0))cutoffs[c]=-1;
           else while(cutoffs[c]&&lowest+Rational(cutoffs[c])>Rational(0))--cutoffs[c];
         }
         top=std::max(top,cutoffs[c]);
@@ -1181,7 +1192,7 @@ private:
           value=value/denominator[0];
           if(!rhs[l][k].is_zero()){
             if(out.terms.size()>=options_.max_terms)throw std::length_error("affine projection accumulated coordinate budget exhausted");
-            out.terms.push_back({i,c,l,eigen_[c].power+Rational(valuation)+Rational(k),eigen_[c].slope,rhs[l][k].exact(zero_,ei_)});
+            out.terms.push_back({i,c,l,eigen_[c].power+Rational(valuation)+Rational(k),slopes_[c],rhs[l][k].exact(zero_,ei_)});
           }
         }
       }
@@ -1402,6 +1413,9 @@ private:
   Options options_;
   Matrix frame_;
   std::vector<Exponent> eigen_;
+  // Slope label of each column's terms: the exponent's own, or one for a
+  // column regulated by Options::regulate_noninteger_powers.
+  std::vector<Rational> slopes_;
   std::vector<Rational> frontiers_;
   std::vector<int> successor_;
   Expansion expansion_{0, 0, {}};
@@ -1421,7 +1435,7 @@ private:
       if (input.row_x_valuations[i] == Valuations::zero_valuation)
         continue;
       for (unsigned c = 0; c < d_; ++c) {
-        if (!eigen_[c].slope.is_zero())
+        if (!slopes_[c].is_zero())
           continue;
         const auto complete = frontiers_[c] + Rational(input.row_x_valuations[i]);
         if (!(complete > bound))

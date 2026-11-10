@@ -191,9 +191,10 @@ records a complete smaller-family test and high-precision chart timings.
 ## Examples and validation
 
 Four [cold FT laptop examples](docs/ft-laptop-examples.md) pass independent
-checks: massive pentagon (7.85 s), box-triangle (18.88 s), unequal three-loop
-banana (23.86 s), and planar double-box (7m 45s). They use generic family JSON
-and `--no-numerical-cache` to avoid large checkpoint files.
+checks: massive pentagon (3.2 s), box-triangle (3.2 s), unequal three-loop
+banana (6.3 s), and planar double-box (49 s), measured on a 4-core Linux
+container with the built-in IBP solver. They use generic family JSON and
+`--no-numerical-cache` to avoid large checkpoint files.
 
 The numerical checks include both four-loop banana examples and all nine
 original DiffExp example groups. The full 108-component Henn Feynman-trick

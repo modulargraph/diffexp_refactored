@@ -58,40 +58,47 @@ class TaylorTailEstimate {
   }
   double step_,worst_=-std::numeric_limits<double>::infinity();unsigned first_,order_;
 };
-// Ordinary charts step a quarter of the distance to the nearest pole, so a
-// Fuchsian solution has late terms of relative size about 4^-order. A tail
-// estimate far above that (the constant 2^32 absorbs polynomial growth and
-// component scale separation) means the pole distance does not control this
-// chart, e.g. an entire but stiff direction, and its step must be shortened.
-// Terms below the working precision cannot be resolved and are not required.
-inline double taylor_tail_excess(double log2_relative,unsigned order,slong bits) {
-  return log2_relative-(32.0-std::min(2.0*static_cast<double>(order),static_cast<double>(bits)));
-}
+// Fixed-step charts (rational_line) step a quarter of the distance to the
+// nearest pole, so a Fuchsian solution has late terms of relative size about
+// 4^-order. A tail estimate far above that (the constant 2^32 absorbs
+// polynomial growth and component scale separation) means the pole distance
+// does not control this chart, e.g. an entire but stiff direction, and its
+// step must be shortened. Terms below the working precision cannot be
+// resolved and are not required.
 inline bool taylor_tail_consistent(double log2_relative,unsigned order,slong bits) {
-  return !(taylor_tail_excess(log2_relative,order,bits)>0);
+  return !(log2_relative>32.0-std::min(2.0*static_cast<double>(order),static_cast<double>(bits)));
 }
 
-namespace rational_transport_detail {
-// One Taylor-expanded coefficient and every (row,column) position sharing it.
-struct ConvolutionTerm {
-  unsigned epsilon;const std::pair<unsigned,unsigned>* positions;std::size_t count;std::vector<Jet::Ball> coefficients;
-};
-// (n+1) y_{n+1} = sum_m A_m y_{n-m} with the complete Cauchy product, followed
-// by Horner evaluation at step. The physical-basis chart and the adjoint
-// scalar reference are this one recurrence.
-inline Boundary convolution_chart(const std::vector<ConvolutionTerm>& terms,const Boundary& initial,
-    const Jet::Ball& step,unsigned order,double* truncation_log2) {
-  using B=Jet::Ball;const unsigned d=initial.size(),kmax=initial[0].size()-1;const auto bits=B::precision();
+// Ordinary physical-basis evolution for an epsilon-polynomial connection by
+// the complete Cauchy product (n+1) y_{n+1} = sum_m A_m y_{n-m}, followed by
+// Horner evaluation at step. No homogeneous basis or spectral transform is
+// constructed for a regular step. This is the independent reference for the
+// finite-lag executor of rational_circuit.hpp. truncation_log2, when
+// requested, receives the TaylorTailEstimate of this chart.
+inline Boundary rational_chart(const std::vector<PreparedRationalEntry>& entries,
+    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order,
+    double* truncation_log2=nullptr) {
+  using B=Jet::Ball;
+  if(boundary.empty() || boundary[0].empty() || !order)throw std::invalid_argument("empty rational-chart boundary or Taylor order");
+  const unsigned d=boundary.size(),kmax=boundary.at(0).size()-1;
+  for(const auto& row:boundary)if(row.size()!=kmax+1)throw std::invalid_argument("rational-chart boundary window mismatch");
+  const auto bits=B::precision();Jet x(0,order+1,bits);x.set(0,center);x.set(1,B(1));
+  struct Entry {unsigned row,col,epsilon;std::vector<B> coefficients;};std::vector<Entry> matrix;
+  auto imaginary=x.constant(0);imaginary.set(0,B::from_strings("0","1"));
+  for(const auto& entry:entries) {
+    if(entry.row>=d || entry.column>=d)throw std::invalid_argument("rational matrix index exceeds boundary size");
+    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});
+    Entry e{entry.row,entry.column,entry.epsilon,{}};
+    for(unsigned n=0;n<order;++n)e.coefficients.push_back(jet.at(n));matrix.push_back(std::move(e));
+  }
   std::vector<B> values(static_cast<std::size_t>(order+1)*d*(kmax+1),B(0));
   const auto at=[&](unsigned n,unsigned i,unsigned k)->B&{return values[(static_cast<std::size_t>(n)*d+i)*(kmax+1)+k];};
-  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)at(0,i,k)=initial[i][k];
+  for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)at(0,i,k)=boundary[i][k];
   for(unsigned n=0;n<order;++n) {
-    for(const auto& e:terms)for(std::size_t p=0;p<e.count;++p) {
-      const auto [row,column]=e.positions[p];
-      for(unsigned k=e.epsilon;k<=kmax;++k)for(unsigned m=0;m<=n;++m)
-        if(!e.coefficients[m].is_zero() && !at(n-m,column,k-e.epsilon).is_zero())
-          acb_addmul(at(n+1,row,k).raw(),e.coefficients[m].raw(),at(n-m,column,k-e.epsilon).raw(),bits);
-    }
+    for(const auto& e:matrix)for(unsigned k=e.epsilon;k<=kmax;++k)
+      for(unsigned m=0;m<=n;++m)
+        if(!e.coefficients[m].is_zero() && !at(n-m,e.col,k-e.epsilon).is_zero())
+          acb_addmul(at(n+1,e.row,k).raw(),e.coefficients[m].raw(),at(n-m,e.col,k-e.epsilon).raw(),bits);
     for(unsigned i=0;i<d;++i)for(unsigned k=0;k<=kmax;++k)
       acb_div_ui(at(n+1,i,k).raw(),at(n+1,i,k).raw(),n+1,bits);
   }
@@ -105,31 +112,6 @@ inline Boundary convolution_chart(const std::vector<ConvolutionTerm>& terms,cons
     *truncation_log2=tail.log2_relative();
   }
   return out;
-}
-} // namespace rational_transport_detail
-
-// Ordinary physical-basis evolution for an epsilon-polynomial connection. No
-// homogeneous basis or spectral transform is constructed for a regular step.
-// truncation_log2, when requested, receives the TaylorTailEstimate of this chart.
-inline Boundary rational_chart(const std::vector<PreparedRationalEntry>& entries,
-    const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order,
-    double* truncation_log2=nullptr) {
-  using B=Jet::Ball;
-  if(boundary.empty() || boundary[0].empty() || !order)throw std::invalid_argument("empty rational-chart boundary or Taylor order");
-  const unsigned d=boundary.size(),kmax=boundary.at(0).size()-1;
-  for(const auto& row:boundary)if(row.size()!=kmax+1)throw std::invalid_argument("rational-chart boundary window mismatch");
-  const auto bits=B::precision();Jet x(0,order+1,bits);x.set(0,center);x.set(1,B(1));
-  std::vector<std::pair<unsigned,unsigned>> positions;positions.reserve(entries.size());
-  std::vector<rational_transport_detail::ConvolutionTerm> matrix;matrix.reserve(entries.size());
-  auto imaginary=x.constant(0);imaginary.set(0,B::from_strings("0","1"));
-  for(const auto& entry:entries) {
-    if(entry.row>=d || entry.column>=d)throw std::invalid_argument("rational matrix index exceeds boundary size");
-    auto jet=evaluate(entry.coefficient,x,{{"x",x},{"I",imaginary}});
-    positions.emplace_back(entry.row,entry.column);
-    rational_transport_detail::ConvolutionTerm e{entry.epsilon,&positions.back(),1,{}};
-    for(unsigned n=0;n<order;++n)e.coefficients.push_back(jet.at(n));matrix.push_back(std::move(e));
-  }
-  return rational_transport_detail::convolution_chart(matrix,boundary,step,order,truncation_log2);
 }
 inline Boundary rational_chart(const std::vector<RationalLineEntry>& entries,
     const Boundary& boundary,const Jet::Ball& center,const Jet::Ball& step,unsigned order,

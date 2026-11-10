@@ -6,7 +6,12 @@
 #include <map>
 #include <memory>
 
-// A compact ordinary-chart executor for epsilon-regular rational connections.
+// The ordinary-chart executor for epsilon-regular rational connections
+// y' = A(x,eps) y. Every entry N/Q of A becomes a stream w = y_column/Q,
+// solved by the finite-lag recurrence Q w = y, and a finite sum
+// (n+1) y_{n+1} = sum N w: a Taylor order costs O(degree), not O(order).
+// expand() computes the Taylor coefficients of one chart, evaluate() sums
+// them at any step chosen afterwards.
 // Storage index k means physical epsilon degree lower+k, with a COMMON certified
 // finite lower bound supplied by the caller. Thus negative physical degrees are
 // supported; missing coefficients above the supplied window are never read.
@@ -94,7 +99,7 @@ using Support = std::map<unsigned, std::map<unsigned, Scalar>>;
 struct Compiler {
   PlanData out;
   std::map<std::string, unsigned> polynomials;
-  // I^2=-1 participates in zero tests, equality, normalization and interning.
+  // I^2=-1 participates in zero tests, equality and interning.
   // Exact has already cancelled factors over its declared rational field.
   // Further polynomial GCD over Q(i) is not attempted: removable chart poles
   // that would require that specialization are rejected by prepare().
@@ -159,12 +164,6 @@ inline unsigned lag(const std::vector<Block> &blocks, const PlanData &data) {
   unsigned result=0;
   for (auto b:blocks)
     result=std::max(result,unsigned(data.polynomials[b.polynomial].size()-1));
-  return result;
-}
-inline B ball(const Scalar &value) {
-  B result;
-  arb_set_fmpq(acb_realref(result.raw()), value.real.raw(), B::precision());
-  arb_set_fmpq(acb_imagref(result.raw()), value.imaginary.raw(), B::precision());
   return result;
 }
 // Integers are converted without rounding; other rationals at bits.

@@ -260,6 +260,10 @@ int main(int argc, char** argv) {
         if(!epsilon_shift.empty()) {
           if(canonical_basis)throw std::invalid_argument("--epsilon-shift cannot be combined with --henn-basis");
           graph=diffexp::recursion::shift_epsilon(std::move(graph),diffexp::Rational(epsilon_shift),epsilon_order==0);
+          // A sample is one point of a fit: a Taylor tail of 2^-128 per chart
+          // is far below what the fit resolves and saves a fifth of the charts.
+          if(!numerical.adjoint.truncation_bits)numerical.adjoint.truncation_bits=
+            std::min<unsigned>(128,2*numerical.ordinary_order);
           report["epsilon_shift"]=epsilon_shift;
         }
         const auto numerical_start=std::chrono::steady_clock::now();

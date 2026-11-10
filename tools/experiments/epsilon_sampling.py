@@ -61,17 +61,22 @@ def main():
         holder = tempfile.TemporaryDirectory(); arguments.cache = holder.name
     step = Fraction(arguments.step)
     nodes = [sign * k * step for k in range(1, arguments.samples // 2 + 1) for sign in (1, -1)]
-    first = sample(arguments, nodes[0])  # fills the exact cache once
+    # The exact preparation is shared: do it once, then all samples in parallel.
+    prepared = subprocess.run([arguments.diffexp, "prepare", arguments.config, "--cache", arguments.cache, "--json"],
+                              capture_output=True, text=True)
+    if prepared.returncode:
+        raise RuntimeError("preparation failed: " + prepared.stdout.strip().splitlines()[-1])
     with concurrent.futures.ThreadPoolExecutor(arguments.jobs) as pool:
-        results = [first] + list(pool.map(lambda q: sample(arguments, q), nodes[1:]))
+        results = list(pool.map(lambda q: sample(arguments, q), nodes))
     if arguments.save:
         with open(arguments.save, "w") as out:
             json.dump([[str(q), str(v[0]), str(v[1]), t] for q, v, t in results], out)
     print(f"{len(results)} samples, numerical seconds: {sum(t for *_, t in results):.1f} in total")
     for part, name in ((0, "real"), (1, "imaginary")):
         points = [(q, value[part]) for q, value, _ in results]
-        if not any(y for _, y in points):
-            continue
+        scale = max(abs(v[0]) + abs(v[1]) for _, v, _ in results)
+        if max(abs(y) for _, y in points) <= scale * Fraction(1, 10 ** 25):
+            continue  # a real integral: the other part is rounding noise
         final, previous = fit(points, arguments.poles), fit(points[:-2], arguments.poles)
         for index in range(min(len(previous), arguments.poles + arguments.orders)):
             print(f"{name:9s} eps^{index - arguments.poles:+d}: {float(final[index]):.17g}   (change from the last two samples {abs(float(final[index] - previous[index])):.2e})")

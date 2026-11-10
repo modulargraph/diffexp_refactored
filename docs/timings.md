@@ -21,13 +21,12 @@ same machine at the start of the transport and recursion rework (commit
 | `kite` | failed | 9.7 s | 0.9 / 8.8 s |
 | `double_box_planar` | not run | 29.4 s | 5.3 / 24.1 s |
 | `banana4` (four loops, equal masses) | not run | 85 s | 30.5 / 53.9 s |
-| `banana4_unequal` (four loops, four masses) | not run | 940 s | 33.5 / 906 s |
+| `banana4_unequal` (four loops, four masses) | not run | 161 s | 34.2 / 126.6 s |
 
-`kite`, `double_box_planar` and `banana4` were measured with the threaded
-chart expansion and probe propagation of uncertainty (four threads); the rows
-above them, and `banana4_unequal`, before.
-The `banana4_unequal` run shared the machine with two other jobs. Its finite
-part and that of `banana4` reproduce the stored acceptance references
+`kite`, `double_box_planar` and the four-loop bananas were measured with the
+threaded chart expansion and probe propagation of uncertainty (four
+threads); the rows above them before. The finite parts of the four-loop
+bananas reproduce the stored acceptance references
 (28.647167500233570163... and 39.655526834297652529...).
 
 `henn_double_pentagon_x0` (two loops, eight propagators, experimental): the

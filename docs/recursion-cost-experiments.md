@@ -138,8 +138,9 @@ that the Taylor recurrences of the 69-row and 33-row levels.
 
 With a sample at 227 s on four threads the whole family is within reach of
 one machine: twelve samples at epsilon = +-k/400, four at a time on one
-thread each, took 48 minutes of wall time (6312 s of CPU), after the
-five-minute exact preparation. The fit of epsilon^4 times the scalar
+thread each, took 48 minutes of wall time (6312 s of CPU; the tool then
+still ran its first sample alone, which costs eight of those minutes),
+after the five-minute exact preparation. The fit of epsilon^4 times the scalar
 integral gives
 
 | Order | Value | Change from the last two samples |
@@ -155,7 +156,7 @@ published boundary values are for a canonical basis whose top-sector members
 carry numerators), so this is not an accepted result. Its leading terms have
 the structure they must have: the epsilon^-4 coefficient is -7/9 to 14
 digits with no imaginary part, and the epsilon^-3 coefficient matches
--1 - (5/9) log 3 + (14/9) gamma_E - (50/9) pi i to 16 digits, with the
+-1 - (5/9) log 3 + (14/9) gamma_E - (50/9) pi i to 15 digits, with the
 14/9 = -2 * (-7/9) that a two-loop integral in this normalisation carries
 and s12 = 3 the only invariant that is not +-1. The sample values are in
 [validation/henn-double-pentagon-epsilon-samples.json](validation/henn-double-pentagon-epsilon-samples.json).

@@ -520,7 +520,8 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         }
         for(const auto& row:output)for(const auto& value:row)if(!value.is_finite())throw std::domain_error("adjoint transport produced a nonfinite coefficient");
         if(stats){++stats->charts;if(!halvings && next<limit)++stats->tail_limited_charts;}
-        state=std::move(output);break;
+        state=std::move(output);
+        break;
       }
       if(options.chart_observer || options.continuation_observer) {
         // One copy of the accepted rows serves both observers.

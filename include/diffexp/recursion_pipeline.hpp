@@ -288,6 +288,9 @@ class Evaluator {
     std::optional<LaurentRows> lower_operator,upper_operator,local_operator;
     std::optional<int> adjoint_child_loss,factored_child_loss;
     bool factored_conditioning_failed=false;
+    // Rational enclosures of the real singular points of the transported
+    // connection and its forcing, ascending; see path().
+    std::optional<std::vector<std::pair<Rational,Rational>>> real_singularities;
     std::vector<std::string> constraint_labels;
     bool has_physical_basis=false;
     epsilon_demand::Highs component_child_loss;
@@ -1237,7 +1240,7 @@ class Evaluator {
     const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),
       end=sample.constant(Rational(1)-prepared.geometry.overlap);
     return {prepared.gauge.matrix,std::move(forcing),std::move(upper_forcing),
-      std::move(left),std::move(right),path(h,anchor,depth),path(end,anchor,depth),prepared.gauge.shifts};
+      std::move(left),std::move(right),path(h,anchor,depth,prepared),path(end,anchor,depth,prepared),prepared.gauge.shifts};
   }
   LaurentBoundary evaluate_adjoint(std::size_t depth,unsigned desired_top,Plan& prepared) {
     const auto& node=graph_.nodes[depth];auto sample=graph_.dimension;
@@ -1345,10 +1348,10 @@ class Evaluator {
             return ordinary_transport(a,std::move(input),b,vertices,options);
           };
           report(depth,"lower factored transport",ed::maximum(initial_needs));
-          auto lower=factored_transport::evolve_components(prepared.gauge.matrix,gauged,{},path(anchor,h,depth),initial_needs,{},settings);
+          auto lower=factored_transport::evolve_components(prepared.gauge.matrix,gauged,{},path(anchor,h,depth,prepared),initial_needs,{},settings);
           observe_operator(depth,"lower factored map",lower.physical.value.transform);
           report(depth,"middle factored transport",ed::maximum(middle_needs));
-          auto middle=factored_transport::evolve_components(prepared.gauge.matrix,lower.physical,beta,path(h,end,depth),right_needs,outputs,settings);
+          auto middle=factored_transport::evolve_components(prepared.gauge.matrix,lower.physical,beta,path(h,end,depth,prepared),right_needs,outputs,settings);
           observe_operator(depth,"upper factored map",middle.physical.value.transform);
           observe_operator(depth,"middle integrated map",middle.integrated.value.transform);
           statistics_.component_transports+=2;
@@ -1390,10 +1393,10 @@ class Evaluator {
         // forward-map backend on the anchor-to-overlap segment.
         auto lower=factored_transport::evolve(prepared.gauge.matrix,gauged,
             Matrix(1,std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0))),
-            path(anchor,h,depth),initial_high,settings).physical;
+            path(anchor,h,depth,prepared),initial_high,settings).physical;
         observe_operator(depth,"lower factored map",lower.transform);
         report(depth,"middle factored transport",middle_high);
-        auto middle=factored_transport::evolve(prepared.gauge.matrix,lower,beta,path(h,end,depth),middle_high,high,settings);
+        auto middle=factored_transport::evolve(prepared.gauge.matrix,lower,beta,path(h,end,depth,prepared),middle_high,high,settings);
         observe_operator(depth,"upper factored map",middle.physical.transform);
         observe_operator(depth,"middle integrated map",middle.integrated.transform);
         auto lower_integral=linear_boundary::compose(left,lower,high);
@@ -1434,13 +1437,74 @@ class Evaluator {
       for(auto demand:endpoint.series->valuation_metadata(*functional).required_source_top(high))result=std::max(result,demand);
     return checked(result);
   }
-  std::vector<Exact> path(const Exact& from,const Exact& to,std::size_t depth)const {
+  // A leg follows the real axis and leaves it only to pass a real singular
+  // point of the level, over a triangle on the causal side whose half-width
+  // is half the free distance around that point (at most the contour
+  // height): passing a pole costs about a dozen charts whatever the size of
+  // the detour, and a wide one saves the charts of the approach. The integral is defined on the real segment, so this is the
+  // path that crosses no other singularity; and wherever centre and rows are
+  // real the Taylor recurrence multiplies real numbers. Vertices are binary
+  // fractions of the triangle size, so shifted coefficients stay short.
+  std::vector<Exact> path(const Exact& from,const Exact& to,std::size_t depth,Plan& prepared)const {
     if(from==to)return {from};
     const auto& names=graph_.dimension.variables();auto ii=std::find(names.begin(),names.end(),"I");
     if(ii==names.end())throw std::invalid_argument("recursive contour requires exact I variable");
-    auto lift=graph_.dimension.variable(ii-names.begin())*graph_.dimension.constant(options_.contour_height)*
-      graph_.dimension.constant(prescription_.levels.at(depth).x_detour_sign);
-    return {from,from+lift,to+lift,to};
+    const auto imaginary=graph_.dimension.variable(ii-names.begin())*
+      graph_.dimension.constant(Rational(prescription_.levels.at(depth).x_detour_sign));
+    if(!prepared.real_singularities) {
+      auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_);
+      for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_))roots.push_back(std::move(root));
+      const auto bound=[](const arb_t value,bool upper) {
+        arf_t side;arf_init(side);
+        if(upper)arb_get_ubound_arf(side,value,ARF_PREC_EXACT);else arb_get_lbound_arf(side,value,ARF_PREC_EXACT);
+        fmpq_t exact;fmpq_init(exact);arf_get_fmpq(exact,side);
+        char* text=fmpq_get_str(nullptr,10,exact);Rational result{std::string(text)};
+        flint_free(text);fmpq_clear(exact);arf_clear(side);return result;
+      };
+      std::vector<std::pair<Rational,Rational>> intervals;
+      for(const auto& root:roots)intervals.emplace_back(bound(acb_realref(root.raw()),false),bound(acb_realref(root.raw()),true));
+      std::sort(intervals.begin(),intervals.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+      // Enclosures of one root found through two denominators overlap.
+      std::vector<std::pair<Rational,Rational>> merged;
+      for(auto& interval:intervals) {
+        if(!merged.empty() && !(merged.back().second<interval.first)) {
+          if(merged.back().second<interval.second)merged.back().second=interval.second;
+        } else merged.push_back(std::move(interval));
+      }
+      prepared.real_singularities=std::move(merged);
+    }
+    const Rational start=from.rational(),finish=to.rational();
+    const bool ascending=start<finish;const Rational& low=ascending?start:finish;const Rational& high=ascending?finish:start;
+    std::vector<std::pair<Rational,Rational>> inside;
+    for(const auto& interval:*prepared.real_singularities) {
+      if(!(low<interval.second) || !(interval.first<high))continue;
+      if(!(low<interval.first) || !(interval.second<high))
+        throw std::domain_error("a transport leg ends on a real singular point of its level");
+      inside.push_back(interval);
+    }
+    std::vector<Exact> vertices{graph_.dimension.constant(low)};
+    const auto floor_to=[](const Rational& value,const Rational& grid,bool up) {
+      const auto ratio=value/grid;fmpz_t whole;fmpz_init(whole);
+      if(up)fmpz_cdiv_q(whole,fmpq_numref(ratio.raw()),fmpq_denref(ratio.raw()));
+      else fmpz_fdiv_q(whole,fmpq_numref(ratio.raw()),fmpq_denref(ratio.raw()));
+      char* text=fmpz_get_str(nullptr,10,whole);Rational result=Rational{std::string(text)}*grid;
+      flint_free(text);fmpz_clear(whole);return result;
+    };
+    for(std::size_t i=0;i<inside.size();++i) {
+      const Rational before=inside[i].first-(i?inside[i-1].second:low);
+      const Rational after=(i+1<inside.size()?inside[i+1].first:high)-inside[i].second;
+      Rational free=(before<after?before:after)/Rational(2);
+      if(options_.contour_height<free)free=options_.contour_height;
+      Rational size(1);while(free<size)size=size/Rational(2);
+      const Rational grid=size/Rational(4);
+      const Rational left=floor_to(inside[i].first-size,grid,false),right=floor_to(inside[i].second+size,grid,true);
+      vertices.push_back(graph_.dimension.constant(left));
+      vertices.push_back(graph_.dimension.constant((left+right)/Rational(2))+imaginary*graph_.dimension.constant((right-left)/Rational(2)));
+      vertices.push_back(graph_.dimension.constant(right));
+    }
+    vertices.push_back(graph_.dimension.constant(high));
+    if(!ascending)std::reverse(vertices.begin(),vertices.end());
+    return vertices;
   }
 };
 } // namespace diffexp::recursion

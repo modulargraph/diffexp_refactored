@@ -47,6 +47,17 @@
   bounds double automatically when met, seed and term counts are bounded by
   memory only, and the default time budgets are an hour per elimination and
   a day per level and in total.
+- The built-in IBP solver takes sectors proved scaleless by the scaling
+  criterion on U + F as zero sectors (`scaleless_sectors.hpp`), not only
+  those with a free loop momentum, and no longer accepts as a master an
+  integral left unreduced outside the seeds of its sector: the seeds of that
+  sector and its subsectors are widened and the elimination repeated
+  (`seed_widenings` in `ibp_statistics`). A level whose requests carry two
+  dots on one line used to close on ever higher dots. Planar double box with
+  its second level merging the two outer lines of the second loop: 9
+  masters in 2 s, where the plan did not settle in 15 minutes; that merge is
+  now the one selected. First level of the double box: 18910 equations
+  instead of 55010. Solver caches written before this change are not reused.
 - With `--transport-bits` below 87 the endpoint-constraint check uses half
   the bits of the admitted Taylor tail as its tolerance.
 - `--ibp-max-degree N` raises the degree of reduction coefficients the

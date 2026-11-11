@@ -1,6 +1,7 @@
 #include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
+#include "diffexp/recursion_graph.hpp"
 #include <iostream>
 using namespace diffexp;
 void require(bool v,const char* s){if(!v)throw std::runtime_error(s);}
@@ -200,6 +201,49 @@ int main(int argc,char** argv){try{
   auto completed=result.directory/"completed.json";auto record=fire_modular::detail::read(completed);auto changed=result.reductions;changed.at(requests[0]).begin()->second=changed.at(requests[0]).begin()->second+d.constant(1);record["tables"]=fire_modular::detail::table(changed,fire::SymbolMap(field.variables()));fire_modular::detail::save(completed,record);
   ibp_solver::Session invalid(basis,d,field,options);require(!invalid(requests,limits).success,"corrupt reconstruction was accepted");
   require(ibp_solver::prime(1)==2305843009213693951ULL&&ibp_solver::prime(2)<ibp_solver::prime(1),"61-bit default and distinct primes");
+  {
+    // Scaleless sectors and seeds that contain what they leave unreduced. The
+    // planar double box with lines 0 and 1 merged at 1/3, then k2 and k2+p123
+    // merged at x: nine sectors have a scale, and the family has nine masters.
+    auto example=feynman::example_family("double_box_planar");
+    auto once=diffexp::ibp::merge(diffexp::ibp::quadratic_family(example.momenta,d,example.physical_count),0,1,x);
+    auto anchored=recursion::at_anchor(diffexp::ibp::PropagatorBasis(once),0,Rational(1)/Rational(3));
+    diffexp::ibp::PropagatorBasis level(diffexp::ibp::merge(anchored,3,5,x));
+    const auto zero=scaleless::sectors(level);const auto count=std::size_t(1)<<level.physical_count;
+    require(zero.size()==count&&std::count(zero.begin(),zero.end(),false)==9,"double-box level: nine sectors with a scale");
+    // Lines 0, 1 and the merged line: the second loop is a massless tadpole.
+    require(zero[0]&&zero[0b01011]&&!zero[0b01111]&&!zero[0b11111]&&!zero[0b10101],"double-box level: scaleless sectors");
+    auto mask=[&](const diffexp::ibp::Integral& a){std::size_t m=0;for(std::size_t k=0;k<level.physical_count;++k)if(a[k]>0)m|=std::size_t(1)<<k;return m;};
+    for(const auto& a:fire::free_loop_sectors(level))require(zero[mask(a)],"a sector with a free loop is scaleless");
+    // The massive bubble above has a scale in every sector.
+    const auto massive=scaleless::sectors(basis);require(massive[0]&&!massive[1]&&!massive[2]&&!massive[3],"massive bubble sectors");
+    // Without the criterion, the IBP equations themselves reduce the corner
+    // integral of every scaleless sector to zero.
+    ibp_solver::Options free_loops;free_loops.scaleless_sectors=false;free_loops.threads=1;
+    ibp_solver::Sampler plain(level,d,free_loops);
+    std::vector<diffexp::ibp::Integral> corners;
+    for(std::size_t m=1;m<count;++m)if(zero[m]){diffexp::ibp::Integral a(level.denominators.size(),0);for(std::size_t k=0;k<level.physical_count;++k)if(m&(std::size_t(1)<<k))a[k]=1;corners.push_back(a);}
+    const std::vector<modular::Word> at{123457,7654321};
+    auto vanishing=plain(corners,at,ibp_solver::prime(1),limits);require(vanishing.success,vanishing.reason.c_str());
+    for(const auto& a:corners)require(vanishing.reductions.at(a).empty(),"the corner integral of a scaleless sector does not reduce to zero");
+    // Two dots on the merged line are outside seeds with one dot: the integral
+    // is left unreduced unless the seeds of its sector are widened.
+    const std::vector<diffexp::ibp::Integral> dotted{{1,1,1,3,0,0,0,0,0}};
+    auto dots=[](const diffexp::ibp::Integral& a){unsigned n=0;for(int v:a)if(v>1)n+=v-1;return n;};
+    ibp_solver::Options narrow;narrow.max_seed_widenings=0;narrow.threads=1;
+    ibp_solver::Sampler edge(level,d,narrow);auto unreduced=edge(dotted,at,ibp_solver::prime(1),limits);
+    require(unreduced.success&&unreduced.reductions.at(dotted[0]).count(dotted[0])&&edge.statistics().seed_widenings==0,"an integral outside the seeds was reduced without widening");
+    ibp_solver::Options widening;widening.threads=1;
+    ibp_solver::Sampler contained(level,d,widening);auto reduced=contained(dotted,at,ibp_solver::prime(1),limits);
+    require(reduced.success&&contained.statistics().seed_widenings==1,"seeds were not widened exactly once");
+    for(const auto& [master,c]:reduced.reductions.at(dotted[0]))require(dots(master)<=1,"an integral outside the seeds was kept as a master");
+    // The same reduction with and without the scaleless sectors declared.
+    auto reference=plain(dotted,at,ibp_solver::prime(1),limits);
+    require(reference.success&&plain.statistics().seed_widenings>=1&&reference.reductions.at(dotted[0])==reduced.reductions.at(dotted[0]),"scaleless sectors changed a reduction");
+    // Widening belongs to the batch: a second point reuses the widened plan.
+    auto second=contained(dotted,{7654321,123457},ibp_solver::prime(1),limits);
+    require(second.success&&contained.statistics().seed_widenings==1&&contained.statistics().templates==2,"widened seeds were not kept for the batch");
+  }
   std::filesystem::remove_all(options.cache_directory);
   if(argc>1){
     ExactField one_field({"d"});Exact dim(one_field,"d");auto example=feynman::example_family("double_box_planar");

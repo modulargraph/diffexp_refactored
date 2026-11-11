@@ -11,6 +11,7 @@
 #include "diffexp/kernel/scalar.hpp"
 #include <boost/json.hpp>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +23,7 @@
 #include <vector>
 #if defined(__unix__) || defined(__APPLE__)
 #include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>

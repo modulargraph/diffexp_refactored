@@ -282,7 +282,10 @@ int main(int argc, char** argv) {
       };
       // Masters without moving poles (docs/moving-poles.md). An expanded run
       // removes them by default; a sample gains nothing from it.
-      if(moving_poles.empty())moving_poles=command=="ft" && epsilon_shift.empty()?"remove":"keep";
+      // A sample exchanges the masters themselves: its endpoint series are then
+      // free of the moving poles too, which otherwise force a tiny overlap and
+      // hundreds of charts next to an endpoint (docs/performance.md).
+      if(moving_poles.empty())moving_poles=command!="ft"?"keep":epsilon_shift.empty() && epsilon_strategy!="sample"?"remove":"exchange";
       boost::json::array moving_pole_levels;double moving_pole_seconds=0;
       const auto describe_moving_poles=[&](std::size_t depth,const diffexp::moving_poles::Result& result) {
         moving_pole_seconds+=result.seconds;
@@ -502,10 +505,8 @@ int main(int argc, char** argv) {
         if(!epsilon_shift.empty()) {
           if(canonical_basis)throw std::invalid_argument("--epsilon-shift cannot be combined with --henn-basis");
           graph=diffexp::recursion::shift_epsilon(std::move(graph),diffexp::Rational(epsilon_shift),epsilon_order==0);
-          // A sample is one point of a fit: a Taylor tail of 2^-128 per chart
-          // is far below what the fit resolves and saves a fifth of the charts.
-          if(!numerical.adjoint.truncation_bits)numerical.adjoint.truncation_bits=
-            std::min<unsigned>(128,2*numerical.ordinary_order);
+          // The Taylor tail of a sample follows its leaf digits like any other
+          // run: the fit cannot resolve more than the leaf delivers.
           report["epsilon_shift"]=epsilon_shift;
         }
         report_moving_poles();
@@ -735,7 +736,7 @@ Feynman-trick recursion
   --moving-poles keep|remove|exchange
                                   per level, the denominator factors of the connection that mix
                                   x with epsilon (docs/moving-poles.md; default remove for ft,
-                                  keep with --epsilon-shift). remove (ft): in an internal basis, a
+                                  exchange for epsilon samples). remove (ft): in an internal basis, a
                                   master replaced by a cached integral or an exact combination;
                                   the basis scan of such a level starts from this basis.
                                   exchange (prepare/ft): the level's masters themselves, a master

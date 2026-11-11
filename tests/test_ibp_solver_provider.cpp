@@ -55,7 +55,7 @@ int main(int argc,char** argv){try{
     auto point=std::vector<modular::Word>{value,12345+value};
     auto subset=selected_points(requests,point,ibp_solver::prime(pi),limits,true);
     auto complete=full_points(requests,point,ibp_solver::prime(pi),limits,true);
-    require(subset.success&&complete.success&&subset.reductions==complete.reductions,"fresh subset/fallback retained stale point or prime bindings");
+    require(subset.success&&complete.success&&subset.residues&&subset.residues==complete.residues,"fresh subset/fallback retained stale point or prime bindings");
   }
   require(selected_points.statistics().selected_solves>0&&selected_points.statistics().selection_fallbacks>0,"exceptional subset support did not trigger complete fallback");
   // One complete elimination at a fresh prime and point anchors every validation
@@ -68,7 +68,7 @@ int main(int argc,char** argv){try{
   ibp_solver::Sampler anchor_points(basis,d,selected_options);const auto first_prime=ibp_solver::prime(1),second_prime=ibp_solver::prime(2);
   auto pilot_rows=anchor_points(requests,{7,12352},first_prime,limits,true),subset_rows=anchor_points(requests,{9,12354},second_prime,limits,true);
   auto complete_rows=anchor_points(requests,{9,12354},second_prime,limits,true,true),later_rows=anchor_points(requests,{11,12356},first_prime,limits,true);
-  require(pilot_rows.success&&subset_rows.success&&complete_rows.success&&later_rows.success&&subset_rows.reductions==complete_rows.reductions,"complete anchor disagrees with the dependency subset at a generic point");
+  require(pilot_rows.success&&subset_rows.success&&complete_rows.success&&later_rows.success&&subset_rows.residues&&subset_rows.residues==complete_rows.residues,"complete anchor disagrees with the dependency subset at a generic point");
   require(anchor_points.statistics().full_solves==2&&anchor_points.statistics().selected_solves==2&&anchor_points.statistics().selection_fallbacks==0,"complete anchor was not a full elimination or replaced the pilot's subset");
   // A trace that cannot fit its node budget costs only the replay shortcut: the
   // primal reduction of the same probe is valid and sampling continues with it.
@@ -82,7 +82,7 @@ int main(int argc,char** argv){try{
   const auto warm=released.statistics();require(warm.full_solves==2&&warm.trace_replays==2,"trace was not learned, checked once and then replayed");
   require(released(requests,{24,424},second_prime,limits).success,"second-prime probe");
   auto returned=released(requests,{25,425},first_prime,limits),expected_rows=unreleased(requests,{25,425},first_prime,limits,true);
-  require(returned.success&&expected_rows.success&&returned.reductions==expected_rows.reductions,"relearned trace disagrees with fresh elimination");
+  require(returned.success&&expected_rows.success&&returned.residues&&returned.residues==expected_rows.residues,"relearned trace disagrees with fresh elimination");
   require(released.statistics().trace_replays==warm.trace_replays&&released.statistics().full_solves==warm.full_solves+2,"a finished prime kept its arithmetic trace");
   // The session owns its exact field; a caller's temporary handle may die first.
   {auto owned_options=sliced_options;owned_options.cache_directory=options.cache_directory/"owned-field";owned_options.closure_parameter=0;
@@ -130,7 +130,7 @@ int main(int argc,char** argv){try{
   skip_options.sample_provider=[&](const auto& r,const auto& point,auto p,const auto& l){
     if((p==first_prime&&point==pole_point)||(p==second_prime&&point==second_pole)){fire::Result pole;pole.exceptional_point=true;pole.reason="deliberate input pole";return pole;}
     auto reduced=fallback_sampler(r,point,p,l);
-    if(reduced.success&&p==first_prime&&point==moved_point){diffexp::ibp::Relation moved{{diffexp::ibp::Integral{3,3},d.constant(1)}};reduced.reductions[diffexp::ibp::Integral{3,3}]=moved;reduced.reductions[requests[0]]=moved;}
+    if(reduced.success&&p==first_prime&&point==moved_point){fire::Residues::mapped_type moved{{diffexp::ibp::Integral{3,3},1}};reduced.residues.value()[diffexp::ibp::Integral{3,3}]=moved;reduced.residues.value()[requests[0]]=moved;}
     return reduced;
   };
   skip_options.validation_provider=[&](const auto& r,const auto& point,auto p,const auto& l){return fallback_sampler(r,point,p,l,true);};
@@ -153,7 +153,7 @@ int main(int argc,char** argv){try{
     ibp_solver::Sampler serial(basis,d,serial_options),threaded(basis,d,threaded_options);
     const std::vector<diffexp::ibp::Integral> other{{3,1}};const auto first=ibp_solver::prime(1);
     auto same=[&](const auto& batch,const auto& point,bool fresh=false){auto a=serial(batch,point,first,limits,fresh),b=threaded(batch,point,first,limits,fresh);
-      require(a.success&&b.success&&a.reductions==b.reductions,"a sample computed ahead differs from the serial one");};
+      require(a.success&&b.success&&a.residues&&a.residues==b.residues,"a sample computed ahead differs from the serial one");};
     threaded.announce(points,first);
     for(std::size_t k=0;k<points.size();++k){
       // Another batch replaces the plan and its trace under the announced points.
@@ -192,7 +192,7 @@ int main(int argc,char** argv){try{
   auto special=guarded(requests,{0,12345},ibp_solver::prime(1),limits);require(special.success,special.reason.c_str());
   auto general=guarded(requests,{7,23456},ibp_solver::prime(1),limits);
   auto reference=independent(requests,{7,23456},ibp_solver::prime(1),limits,true);
-  require(general.success&&reference.success&&general.reductions==reference.reductions,"exceptional point relearning disagrees with full reduction");
+  require(general.success&&reference.success&&general.residues&&general.residues==reference.residues,"exceptional point relearning disagrees with full reduction");
   require(guarded.statistics().trace_fallbacks>0,"sample-specific cancellation was not guarded");
   diffexp::ibp::Generator generator(basis,d);diffexp::ibp::ExactReducer exact(d);
   for(int a=-1;a<=4;++a)for(int b=-1;b<=4;++b)for(auto row:generator.relations({a,b}))exact.insert(std::move(row));
@@ -225,21 +225,21 @@ int main(int argc,char** argv){try{
     for(std::size_t m=1;m<count;++m)if(zero[m]){diffexp::ibp::Integral a(level.denominators.size(),0);for(std::size_t k=0;k<level.physical_count;++k)if(m&(std::size_t(1)<<k))a[k]=1;corners.push_back(a);}
     const std::vector<modular::Word> at{123457,7654321};
     auto vanishing=plain(corners,at,ibp_solver::prime(1),limits);require(vanishing.success,vanishing.reason.c_str());
-    for(const auto& a:corners)require(vanishing.reductions.at(a).empty(),"the corner integral of a scaleless sector does not reduce to zero");
+    for(const auto& a:corners)require(vanishing.residues.value().at(a).empty(),"the corner integral of a scaleless sector does not reduce to zero");
     // Two dots on the merged line are outside seeds with one dot: the integral
     // is left unreduced unless the seeds of its sector are widened.
     const std::vector<diffexp::ibp::Integral> dotted{{1,1,1,3,0,0,0,0,0}};
     auto dots=[](const diffexp::ibp::Integral& a){unsigned n=0;for(int v:a)if(v>1)n+=v-1;return n;};
     ibp_solver::Options narrow;narrow.max_seed_widenings=0;narrow.threads=1;
     ibp_solver::Sampler edge(level,d,narrow);auto unreduced=edge(dotted,at,ibp_solver::prime(1),limits);
-    require(unreduced.success&&unreduced.reductions.at(dotted[0]).count(dotted[0])&&edge.statistics().seed_widenings==0,"an integral outside the seeds was reduced without widening");
+    require(unreduced.success&&unreduced.residues.value().at(dotted[0]).count(dotted[0])&&edge.statistics().seed_widenings==0,"an integral outside the seeds was reduced without widening");
     ibp_solver::Options widening;widening.threads=1;
     ibp_solver::Sampler contained(level,d,widening);auto reduced=contained(dotted,at,ibp_solver::prime(1),limits);
     require(reduced.success&&contained.statistics().seed_widenings==1,"seeds were not widened exactly once");
-    for(const auto& [master,c]:reduced.reductions.at(dotted[0]))require(dots(master)<=1,"an integral outside the seeds was kept as a master");
+    for(const auto& [master,c]:reduced.residues.value().at(dotted[0]))require(dots(master)<=1,"an integral outside the seeds was kept as a master");
     // The same reduction with and without the scaleless sectors declared.
     auto reference=plain(dotted,at,ibp_solver::prime(1),limits);
-    require(reference.success&&plain.statistics().seed_widenings>=1&&reference.reductions.at(dotted[0])==reduced.reductions.at(dotted[0]),"scaleless sectors changed a reduction");
+    require(reference.success&&plain.statistics().seed_widenings>=1&&reference.residues.value().at(dotted[0])==reduced.residues.value().at(dotted[0]),"scaleless sectors changed a reduction");
     // Widening belongs to the batch: a second point reuses the widened plan.
     auto second=contained(dotted,{7654321,123457},ibp_solver::prime(1),limits);
     require(second.success&&contained.statistics().seed_widenings==1&&contained.statistics().templates==2,"widened seeds were not kept for the batch");
@@ -251,14 +251,14 @@ int main(int argc,char** argv){try{
     diffexp::ibp::Integral top(db.denominators.size(),0);std::fill_n(top.begin(),db.physical_count,1);
     std::vector<diffexp::ibp::Integral> targets{top};for(unsigned k=0;k<top.size();++k){auto a=top;a[k]+=k<db.physical_count?1:-1;targets.push_back(a);}
     ibp_solver::Sampler sampler(db,dim,{});auto first=sampler(targets,{1234567},ibp_solver::prime(1),limits);require(first.success,first.reason.c_str());
-    std::set<diffexp::ibp::Integral> all(targets.begin(),targets.end());for(const auto& [a,row]:first.reductions){all.insert(a);for(const auto& [b,c]:row)all.insert(b);}
+    std::set<diffexp::ibp::Integral> all(targets.begin(),targets.end());for(const auto& [a,row]:first.residues.value()){all.insert(a);for(const auto& [b,c]:row)all.insert(b);}
     auto fire_limits=limits;fire_limits.executable=argv[1];auto reference=fire::reduce(db,dim,one_field,{all.begin(),all.end()},fire_limits);require(reference.success,reference.reason.c_str());
     for(unsigned pi=1;pi<=2;++pi)for(modular::Word at:{1234567UL,98765431UL}){
       auto p=ibp_solver::prime(pi);::ibp::Field finite(p);auto native=sampler(targets,{at},p,limits);require(native.success,native.reason.c_str());
       for(const auto& a:targets){std::map<diffexp::ibp::Integral,modular::Word> residual;
         for(const auto& [b,c]:reference.reductions.at(a))residual[b]=modular::evaluate(c,{at},p);
-        for(const auto& [b,c]:native.reductions.at(a))for(const auto& [m,q]:reference.reductions.at(b))
-          residual[m]=finite.sub(residual[m],finite.mul(modular::evaluate(c,{at},p),modular::evaluate(q,{at},p)));
+        for(const auto& [b,c]:native.residues.value().at(a))for(const auto& [m,q]:reference.reductions.at(b))
+          residual[m]=finite.sub(residual[m],finite.mul(c,modular::evaluate(q,{at},p)));
         for(const auto& [m,c]:residual)require(c==0,"double-box basis conversion disagrees with exact FIRE");
       }
     }

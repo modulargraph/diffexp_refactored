@@ -112,6 +112,9 @@ struct Options {
   std::size_t memory_bytes=std::size_t(4)*1024*1024*1024;
   std::vector<ibp::Integral> zero_sectors; // Caller supplies proven scaleless sectors only.
 };
+// Residues of a reduction at one point of a prime field: integral -> terminal
+// integral -> nonzero coefficient.
+using Residues=std::map<ibp::Integral,std::map<ibp::Integral,std::uint64_t>>;
 struct Result {
   bool success=false;
   // A finite-field provider sets this when the failure belongs to the sample
@@ -120,6 +123,9 @@ struct Result {
   std::string reason;
   std::filesystem::path directory;
   std::map<ibp::Integral,ibp::Relation> reductions;
+  // A provider that computes in a prime field returns its sample here, as
+  // machine words, and leaves `reductions` empty.
+  std::optional<Residues> residues;
 };
 // A probe is data for reconstruction, never a completed exact reduction.
 struct ModularPoint {

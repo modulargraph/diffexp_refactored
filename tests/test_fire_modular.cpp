@@ -7,7 +7,17 @@ int main(int argc,char** argv){try{
   auto text=fire_modular::detail::table({{{1,0},{{{1,0},d.constant(1)}}},{{2,0},{{{1,0},(d-d.constant(2))/d.constant(3)}}}},fire::SymbolMap(field.variables()));
   fire::SymbolMap symbols(field.variables());auto parsed=fire::import_table_text(text,field,2,&symbols);
   if(parsed.at({2,0}).at({1,0})!=(d-d.constant(2))/d.constant(3))throw std::runtime_error("modular reconstructed table roundtrip");
-  if(fire_modular::detail::active_variables("devara+devarab",fire::SymbolMap({"x","eps"}))!=std::vector<std::size_t>{0})throw std::runtime_error("active variable token detection");
+  // The active variables are those of the dimension and the contraction coefficients.
+  {ExactField wide({"x","unused","dim"});Exact x(wide,"x"),dim(wide,"dim");
+    auto raw=ibp::quadratic_family(feynman::banana(1,{Rational(1),Rational(2)}),dim);raw.physical[0].constant=x/(x+dim.constant(1));
+    if(fire_modular::detail::active_variables(ibp::PropagatorBasis(raw),dim)!=std::vector<std::size_t>{0,2})throw std::runtime_error("active variable detection");
+    // A text table of residues is what a table of the same constants was.
+    fire::Residues words{{{1,0},{{{1,0},1}}},{{2,0},{{{1,0},12345}}}};
+    if(fire::import_table_text(fire_modular::detail::table(words),field,2)!=fire::import_table_text(fire_modular::detail::table({{{1,0},{{{1,0},d.constant(1)}}},{{2,0},{{{1,0},d.constant(12345)}}}},fire::SymbolMap(field.variables())),field,2))
+      throw std::runtime_error("residue table codec");
+    fire_modular::detail::validate(words,ibp::PropagatorBasis(ibp::quadratic_family(feynman::banana(1,{Rational(1),Rational(2)}),d)),{{2,0}});
+    bool rejected=false;words[{2,0}][{3,0}]=5;try{fire_modular::detail::validate(words,ibp::PropagatorBasis(ibp::quadratic_family(feynman::banana(1,{Rational(1),Rational(2)}),d)),{{2,0}});}catch(const std::invalid_argument&){rejected=true;}
+    if(!rejected)throw std::runtime_error("residues with a missing terminal row accepted");}
   // Residues are read once into machine words; absent terms are zero.
   {const auto p=modular::prime(1);const auto third=d.constant(7)/d.constant(3);
     auto words=fire_modular::detail::residues({{{1,0},{{{1,0},d.constant(1)}}},{{2,0},{{{1,0},third}}}},{5},p);fire_modular::detail::Probe sample{{5},words,7};

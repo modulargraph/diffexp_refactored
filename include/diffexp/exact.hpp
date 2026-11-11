@@ -4,6 +4,8 @@
 #include "diffexp/data.hpp"
 #include <flint/fmpz_mpoly_q.h>
 #include <flint/fmpz_poly.h>
+#include <flint/nmod.h>
+#include <optional>
 #include <algorithm>
 #include <cctype>
 #include <memory>
@@ -137,6 +139,54 @@ class Exact {
     Exact out(ctx_);
     fmpz_mpoly_set(fmpz_mpoly_q_numref(out.value_), fmpz_mpoly_q_denref(value_), ctx_->raw);
     return out;
+  }
+  // The image in a prime field at a point, read from the integer terms of
+  // numerator and denominator; nothing where the denominator vanishes.
+  std::optional<mp_limb_t> modular_value(std::span<const mp_limb_t> point,nmod_t mod) const {
+    if(point.size()!=variable_count())throw std::invalid_argument("modular evaluation point arity");
+    std::vector<ulong> powers(point.size());
+    auto image=[&](const fmpz_mpoly_struct* p) {
+      if(!fmpz_mpoly_degrees_fit_si(p,ctx_->raw))throw std::overflow_error("polynomial exponent range");
+      mp_limb_t sum=0;
+      for(slong i=0;i<fmpz_mpoly_length(p,ctx_->raw);++i) {
+        mp_limb_t c=fmpz_fdiv_ui(p->coeffs+i,mod.n);
+        fmpz_mpoly_get_term_exp_ui(powers.data(),p,i,ctx_->raw);
+        for(std::size_t j=0;j<point.size()&&c;++j)if(powers[j])c=nmod_mul(c,nmod_pow_ui(point[j]%mod.n,powers[j],mod),mod);
+        sum=nmod_add(sum,c,mod);
+      }
+      return sum;
+    };
+    const auto d=image(fmpz_mpoly_q_denref(value_));
+    if(!d)return std::nullopt;
+    return nmod_mul(image(fmpz_mpoly_q_numref(value_)),nmod_inv(d,mod),mod);
+  }
+  // Whether the value depends on a variable.
+  bool depends_on(std::size_t variable) const {
+    if(variable>=variable_count())throw std::out_of_range("exact variable index");
+    for(const auto* p:{fmpz_mpoly_q_numref(value_),fmpz_mpoly_q_denref(value_)}) {
+      if(!fmpz_mpoly_degrees_fit_si(p,ctx_->raw))throw std::overflow_error("polynomial exponent range");
+      if(fmpz_mpoly_degree_si(p,static_cast<slong>(variable),ctx_->raw)>0)return true;
+    }
+    return false;
+  }
+  // The quotient of two integer polynomials given by their terms, brought to
+  // lowest terms once: summing terms as field elements would repeat a gcd
+  // for every term.
+  struct IntegerTerm {const fmpz* coefficient;const std::vector<unsigned long>* powers;};
+  Exact quotient(std::span<const IntegerTerm> numerator,std::span<const IntegerTerm> denominator) const {
+    Exact out(ctx_);
+    auto fill=[&](fmpz_mpoly_struct* p,std::span<const IntegerTerm> terms) {
+      fmpz_mpoly_zero(p,ctx_->raw);
+      for(const auto& term:terms) {
+        if(term.powers->size()!=variable_count())throw std::invalid_argument("exact term arity");
+        fmpz_mpoly_push_term_fmpz_ui(p,term.coefficient,term.powers->data(),ctx_->raw);
+      }
+      fmpz_mpoly_sort_terms(p,ctx_->raw);fmpz_mpoly_combine_like_terms(p,ctx_->raw);
+    };
+    fill(fmpz_mpoly_q_numref(out.value_),numerator);fill(fmpz_mpoly_q_denref(out.value_),denominator);
+    if(fmpz_mpoly_is_zero(fmpz_mpoly_q_denref(out.value_),ctx_->raw))throw std::domain_error("exact division by zero");
+    if(fmpz_mpoly_is_zero(fmpz_mpoly_q_numref(out.value_),ctx_->raw))return constant(0);
+    fmpz_mpoly_q_canonicalise(out.value_,ctx_->raw);return out;
   }
   std::vector<Term> numerator_terms() const { return terms(fmpz_mpoly_q_numref(value_)); }
   std::vector<Term> denominator_terms() const { return terms(fmpz_mpoly_q_denref(value_)); }

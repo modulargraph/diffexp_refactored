@@ -31,20 +31,14 @@ struct Integer {
   ~Integer(){fmpz_clear(value);}
 };
 inline Word rational_mod(const Rational& q,Word p) {
-  fmpq_t raw;fmpq_init(raw);fmpq_set_str(raw,q.str().c_str(),10);fmpq_canonicalise(raw);
-  auto n=fmpz_fdiv_ui(fmpq_numref(raw),p),d=fmpz_fdiv_ui(fmpq_denref(raw),p);fmpq_clear(raw);
+  auto n=fmpz_fdiv_ui(fmpq_numref(q.raw()),p),d=fmpz_fdiv_ui(fmpq_denref(q.raw()),p);
   if(!d)throw std::domain_error("rational coefficient has a pole modulo prime");
   nmod_t mod;nmod_init(&mod,p);return nmod_mul(n,nmod_inv(d,mod),mod);
 }
 inline Word evaluate(const Exact& value,const std::vector<Word>& point,Word p) {
-  if(point.size()!=value.variable_count())throw std::invalid_argument("modular evaluation point arity");
-  nmod_t mod;nmod_init(&mod,p);
-  auto polynomial=[&](const auto& terms){Word sum=0;for(const auto& term:terms){auto c=rational_mod(term.coefficient,p);
-    for(std::size_t i=0;i<point.size();++i)c=nmod_mul(c,nmod_pow_ui(point[i]%p,term.powers[i],mod),mod);
-    sum=nmod_add(sum,c,mod);}return sum;};
-  auto n=polynomial(value.numerator_terms()),d=polynomial(value.denominator_terms());
-  if(!d)throw std::domain_error("rational function has a pole at modular point");
-  return nmod_mul(n,nmod_inv(d,mod),mod);
+  nmod_t mod;nmod_init(&mod,p);auto image=value.modular_value(point,mod);
+  if(!image)throw std::domain_error("rational function has a pole at modular point");
+  return *image;
 }
 using Power=std::vector<unsigned>;
 inline std::vector<Power> monomials(std::size_t variables,unsigned degree,std::size_t limit=1024) {
@@ -182,17 +176,27 @@ struct Lift {
     for(std::size_t i=0;i<residues.size();++i)fmpz_CRT_ui(residues[i].value,residues[i].value,modulus.value,image.coefficients[i],p,0);
     fmpz_mul_ui(modulus.value,modulus.value,p);
   }
+  // The rational coefficients are cleared of denominators together, and the
+  // integer numerator and denominator are divided by their gcd once.
   std::optional<Exact> reconstruct(const Exact& sample,const std::vector<std::size_t>& active)const {
-    auto n=sample.constant(0),d=sample.constant(0);
+    struct Rationals {std::vector<fmpq> q;fmpz_t scale;explicit Rationals(std::size_t n):q(n){for(auto& v:q)fmpq_init(&v);fmpz_init_set_ui(scale,1);}
+      ~Rationals(){for(auto& v:q)fmpq_clear(&v);fmpz_clear(scale);}Rationals(const Rationals&)=delete;}values(residues.size());
     for(std::size_t i=0;i<residues.size();++i) {
-      fmpq_t q;fmpq_init(q);if(!fmpq_reconstruct_fmpz(q,residues[i].value,modulus.value)){fmpq_clear(q);return std::nullopt;}
-      char* text=fmpq_get_str(nullptr,10,q);auto value=sample.parse(text);flint_free(text);fmpq_clear(q);
-      auto& powers=i<ansatz.numerator.size()?ansatz.numerator[i]:ansatz.denominator[i-ansatz.numerator.size()];
-      if(powers.size()!=active.size())throw std::invalid_argument("reconstruction active variable arity");
-      for(std::size_t j=0;j<active.size();++j)if(powers[j])value=value*sample.variable(active[j]).pow(powers[j]);
-      if(i<ansatz.numerator.size())n=n+value;else d=d+value;
+      if(!fmpq_reconstruct_fmpz(&values.q[i],residues[i].value,modulus.value))return std::nullopt;
+      fmpz_lcm(values.scale,values.scale,fmpq_denref(&values.q[i]));
     }
-    if(d.is_zero())return std::nullopt;return n/d;
+    std::vector<std::vector<unsigned long>> powers(residues.size(),std::vector<unsigned long>(sample.variable_count()));
+    std::vector<Exact::IntegerTerm> n,d;
+    for(std::size_t i=0;i<residues.size();++i) {
+      const auto& term=i<ansatz.numerator.size()?ansatz.numerator[i]:ansatz.denominator[i-ansatz.numerator.size()];
+      if(term.size()!=active.size())throw std::invalid_argument("reconstruction active variable arity");
+      for(std::size_t j=0;j<active.size();++j)powers[i].at(active[j])+=term[j];
+      // q = a/b with b | scale: the integer coefficient is a*(scale/b).
+      auto* a=fmpq_numref(&values.q[i]);fmpz_mul(a,a,values.scale);fmpz_divexact(a,a,fmpq_denref(&values.q[i]));
+      if(!fmpz_is_zero(a))(i<ansatz.numerator.size()?n:d).push_back({a,&powers[i]});
+    }
+    if(d.empty())return std::nullopt;
+    try{return sample.quotient(n,d);}catch(const std::domain_error&){return std::nullopt;}
   }
 };
 inline std::uint64_t mix(std::uint64_t x) {

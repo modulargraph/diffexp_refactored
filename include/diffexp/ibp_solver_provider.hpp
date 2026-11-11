@@ -85,11 +85,12 @@ class Sampler {
     input_geometry_.loops=basis_.space.loops;input_geometry_.externals=basis_.space.externals();
     input_geometry_.physical=basis_.physical_count;input_geometry_.n=basis_.space.size();
     input_geometry_.trace=trace_;input_geometry_.zero_sectors=zero_sectors_;
-    std::map<std::string,std::uint32_t> ids;
+    // Equal coefficients share one input slot.
     auto input=[&](const Exact& value){if(value.is_zero())return ::ibp::InputGeometry::zero;
-      auto [it,inserted]=ids.try_emplace(value.str(),inputs_.size());if(inserted){inputs_.push_back(value);input_geometry_.constant_inputs.push_back(value.is_rational());}return it->second;};
+      auto it=std::find(inputs_.begin(),inputs_.end(),value);if(it==inputs_.end()){inputs_.push_back(value);input_geometry_.constant_inputs.push_back(value.is_rational());return std::uint32_t(inputs_.size()-1);}
+      return std::uint32_t(it-inputs_.begin());};
     // Even a constant zero dimension needs a valid explicit input slot.
-    inputs_.push_back(dimension_);input_geometry_.constant_inputs.push_back(dimension_.is_rational());ids.emplace(dimension_.str(),0);input_geometry_.dimension=0;
+    inputs_.push_back(dimension_);input_geometry_.constant_inputs.push_back(dimension_.is_rational());input_geometry_.dimension=0;
     for(const auto& row:contractions_){input_geometry_.contractions.emplace_back();for(const auto& a:row){std::vector<std::uint32_t> c;for(const auto& v:a.linear)c.push_back(input(v));c.push_back(input(a.constant));input_geometry_.contractions.back().push_back(std::move(c));}}
     input_geometry_.inputs=inputs_.size();
   }
@@ -298,11 +299,13 @@ class Sampler {
   // The reduction a probe returns for the rows of its targets.
   void emit(fire::Result& out,const std::vector<::ibp::Row>& rows,const ::ibp::Program& program,const std::vector<ibp::Integral>& requested)const {
     auto indices=[&](const ::ibp::Integral& a){ibp::Integral r;for(unsigned i=0;i<input_geometry_.n;++i)r.push_back(a.powers[i]);return r;};
-    std::set<ibp::Integral> terminal;
-    for(unsigned i=0;i<rows.size();++i){ibp::Relation row;for(const auto& term:rows[i]){auto a=indices(program.integrals[term.column]);terminal.insert(a);ibp::add(row,a,dimension_.parse(std::to_string(term.value)));}out.reductions.emplace(requested[i],std::move(row));}
-    for(const auto& a:terminal){auto [it,inserted]=out.reductions.emplace(a,ibp::Relation{{a,dimension_.constant(1)}});
-      if(!inserted&&it->second!=ibp::Relation{{a,dimension_.constant(1)}})throw std::runtime_error("IBP solver returned a nonterminal output basis");}
-    out.success=true;fire_batch::validate(out,basis_,dimension_,requested);
+    // The residues are handed on as machine words: the fit reads them as they are.
+    auto& residues=out.residues.emplace();std::map<::ibp::Column,ibp::Integral> terminal;
+    for(unsigned i=0;i<rows.size();++i){auto& row=residues[requested[i]];if(!row.empty())continue;
+      for(const auto& term:rows[i])if(term.value)row.emplace(terminal.try_emplace(term.column,indices(program.integrals[term.column])).first->second,term.value);}
+    for(const auto& [column,a]:terminal){auto [it,inserted]=residues.try_emplace(a);
+      if(inserted)it->second.emplace(a,1);else if(it->second.size()!=1||it->second.begin()->first!=a||it->second.begin()->second!=1)throw std::runtime_error("IBP solver returned a nonterminal output basis");}
+    out.success=true;fire_modular::detail::validate(residues,basis_,requested);
   }
   struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
   // `system` names the generated equations: plans that differ in targets alone share it.
@@ -459,7 +462,7 @@ class Session {
       auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
       auto reduced=(*sampler_)({demanded.begin(),demanded.end()},modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass),prime(1),receiving);
       if(!reduced.success)throw std::runtime_error("IBP master count failed: "+reduced.reason);
-      std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.reductions)for(const auto& [master,c]:row)if(!c.is_zero())found.insert(master);
+      std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.residues.value())for(const auto& [master,c]:row)found.insert(master);
       const auto before=demanded.size();
       for(const auto& master:found){demanded.insert(master);for(const auto& [a,c]:generator.derivative(master,parameter))if(!c.is_zero())demanded.insert(a);}
       masters=found.size();stable=demanded.size()==before;
@@ -534,7 +537,7 @@ class Session {
         auto point=modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass+check);
         auto reduced=(*sampler_)(batch,point,prime(1),receiving);++planning_.probes;
         if(!reduced.success)throw std::runtime_error("IBP closure planning probe failed: "+reduced.reason);
-        std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.reductions)for(const auto& [master,c]:row)if(!c.is_zero())found.insert(master);
+        std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.residues.value())for(const auto& [master,c]:row)found.insert(master);
         if(check&&found!=terminal)throw std::runtime_error("IBP closure planning basis changed at a second point");terminal=std::move(found);
       }
       if(terminal.size()>256)throw std::length_error("IBP closure planning master budget");

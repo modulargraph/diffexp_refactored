@@ -81,16 +81,36 @@ inline std::string table(const std::map<ibp::Integral,ibp::Relation>& reductions
     for(const auto& [b,c]:row){if(!term)out<<",";term=false;out<<"{"<<ids.at(b)<<",\""<<fire::rename_symbols(c.str(),symbols.forward)<<"\"}";}out<<"}}";}
   out<<"},{";first=true;for(const auto& [a,id]:ids){if(!first)out<<",";first=false;out<<"{"<<id<<",{1,"<<fire::indices(a)<<"}}";}out<<"}}\n";return out.str();
 }
-inline std::vector<std::size_t> active_variables(const std::string& source,const fire::SymbolMap& symbols) {
-  std::set<std::string> tokens;for(std::size_t i=0;i<source.size();) {
-    if(std::isalpha(static_cast<unsigned char>(source[i]))||source[i]=='_'){auto begin=i++;while(i<source.size()&&(std::isalnum(static_cast<unsigned char>(source[i]))||source[i]=='_'))++i;tokens.insert(source.substr(begin,i-begin));}else ++i;
-  }
-  std::vector<std::size_t> out;for(std::size_t i=0;i<symbols.exported.size();++i)if(tokens.contains(symbols.exported[i]))out.push_back(i);return out;
+// The variables the native IBP input depends on: those of the dimension and
+// of the contraction coefficients, which are what fire::start writes.
+inline std::vector<std::size_t> active_variables(const ibp::PropagatorBasis& basis,const Exact& dimension) {
+  std::vector<bool> used(dimension.variable_count());
+  auto mark=[&](const Exact& c){for(std::size_t i=0;i<used.size();++i)if(!used[i]&&c.depends_on(i))used[i]=true;};
+  mark(dimension);for(const auto& row:ibp::contractions(basis))for(const auto& a:row){mark(a.constant);for(const auto& c:a.linear)mark(c);}
+  std::vector<std::size_t> out;for(std::size_t i=0;i<used.size();++i)if(used[i])out.push_back(i);return out;
 }
 using Key=std::pair<ibp::Integral,ibp::Integral>;
 // A finite-field table holds residues. Each is read once into a machine word;
 // interpolation never returns to the exact-field representation.
-using Rows=std::map<ibp::Integral,std::map<ibp::Integral,modular::Word>>;
+using Rows=fire::Residues;
+// The table of a sample a provider returned as residues, for its record on disk.
+inline std::string table(const Rows& rows) {
+  std::map<ibp::Integral,std::size_t> ids;for(const auto& [a,row]:rows){ids.try_emplace(a,ids.size()+1);for(const auto& [b,c]:row)ids.try_emplace(b,ids.size()+1);}
+  std::ostringstream out;out<<"{{";bool first=true;
+  for(const auto& [a,row]:rows){if(!first)out<<",";first=false;out<<"{"<<ids.at(a)<<",{";bool term=true;
+    for(const auto& [b,c]:row){if(!term)out<<",";term=false;out<<"{"<<ids.at(b)<<",\""<<c<<"\"}";}out<<"}}";}
+  out<<"},{";first=true;for(const auto& [a,id]:ids){if(!first)out<<",";first=false;out<<"{"<<id<<",{1,"<<fire::indices(a)<<"}}";}out<<"}}\n";return out.str();
+}
+// What fire_batch::validate requires of an exact reduction, of residues.
+inline void validate(const Rows& rows,const ibp::PropagatorBasis& basis,const std::vector<ibp::Integral>& requested) {
+  if(requested.empty()||rows.size()>20000)throw std::invalid_argument("invalid finite-field reduction");
+  for(const auto& a:requested){fire_batch::validate_index(a,basis);if(!rows.count(a))throw std::invalid_argument("finite-field reduction omits demand");}
+  for(const auto& [a,row]:rows){fire_batch::validate_index(a,basis);
+    for(const auto& [master,c]:row){fire_batch::validate_index(master,basis);if(!c)throw std::invalid_argument("zero finite-field mapping term");
+      auto found=rows.find(master);
+      if(found==rows.end()||found->second.size()!=1||found->second.begin()->first!=master||found->second.begin()->second!=1)
+        throw std::invalid_argument("finite-field mapping is not a complete terminal-master reduction");}}
+}
 struct Probe {std::vector<modular::Word> point;Rows rows;std::size_t ordinal=0;};
 inline Rows residues(const std::map<ibp::Integral,ibp::Relation>& rows,const std::vector<modular::Word>& point,modular::Word prime) {
   Rows out;for(const auto& [a,row]:rows){auto& target=out[a];for(const auto& [b,c]:row){
@@ -142,7 +162,7 @@ class Session {
       if(exact_batches_)if(auto cached=exact_batches_->lookup(basis_,dimension_,field_,requested,limits))return *cached;
       const auto semantic=fire_batch::identity(basis_,dimension_,field_,requested,limits);
       fire::SymbolMap symbols(field_.variables());auto source=fire::start(basis_,dimension_,limits.zero_sectors,&symbols);
-      auto active=detail::active_variables(source,symbols);
+      auto active=detail::active_variables(basis_,dimension_);
       json::array active_json;for(auto i:active)active_json.push_back(i);
       json::object identity_input{{"schema","DiffExp3.NativeModularProvider/v1"},{"science",semantic.json_value()},{"active",active_json},{"prime_table",options_.prime_table}};
       // Preserve existing FIRE sample/checkpoint identities. Native providers
@@ -179,8 +199,8 @@ class Session {
           for(std::size_t i=0;i<point.size();++i)if(std::find(active.begin(),active.end(),i)==active.end())point[i]=3;
           json::array coordinates;for(auto value:point)coordinates.emplace_back(std::to_string(value));
           if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||payload.at("prime_index").to_number<unsigned>()!=pi||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(pi)))throw std::runtime_error("modular held-out sample identity mismatch");
-          auto check=load_rows(payload);std::map<ibp::Integral,ibp::Relation> image;
-          for(const auto& [a,row]:result.reductions){image.emplace(a,ibp::Relation{});for(const auto& [b,c]:row){auto value=modular::evaluate(c,point,options_.modulus(pi));if(value)image.at(a).emplace(b,dimension_.parse(std::to_string(value)));}}
+          auto check=detail::residues(load_rows(payload),point,options_.modulus(pi));detail::Rows image;
+          for(const auto& [a,row]:result.reductions){auto& target=image[a];for(const auto& [b,c]:row){auto value=modular::evaluate(c,point,options_.modulus(pi));if(value)target.emplace(b,value);}}
           if(image!=check)throw std::runtime_error("cached modular reconstruction fails independent sample replay");
         }
         verify_native(result.reductions);
@@ -226,10 +246,12 @@ class Session {
             if(reduced.exceptional_point)throw detail::ExceptionalPoint(reduced.reason);
             throw std::runtime_error("finite-field probe failed: "+reduced.reason);
           }
-          fire_batch::validate(reduced,basis_,dimension_,requested);
-          auto tables=provider?(retain?detail::table(reduced.reductions,symbols):std::string{}):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
+          if(reduced.residues)detail::validate(*reduced.residues,basis_,requested);else fire_batch::validate(reduced,basis_,dimension_,requested);
+          auto tables=provider?(!retain?std::string{}:reduced.residues?detail::table(*reduced.residues):detail::table(reduced.reductions,symbols)):fire::read_text(reduced.directory/("result_"+input.suffix()+".tables"));
           payload={{"schema","DiffExp3.ModularSample/v1"},{"identity",identity},{"prime_index",prime_index},{"modulus",std::to_string(options_.modulus(prime_index))},{"point",coordinates},{"tables",tables},{"directory",reduced.directory.string()}};
-          if(retain)detail::save(path,payload);if(provider)rows=detail::residues(reduced.reductions,point,options_.modulus(prime_index));++fresh;
+          if(retain)detail::save(path,payload);
+          // Residues pass from the provider to the fit as they are.
+          if(reduced.residues)rows=std::move(*reduced.residues);else if(provider)rows=detail::residues(reduced.reductions,point,options_.modulus(prime_index));++fresh;
         }
         if(artifacts::detail::string(payload.at("identity"))!=identity||payload.at("point")!=coordinates||artifacts::detail::string(payload.at("modulus"))!=std::to_string(options_.modulus(prime_index))||payload.at("prime_index").to_number<unsigned>()!=prime_index)
           throw std::runtime_error("modular sample identity, point or prime mismatch");
@@ -393,7 +415,7 @@ class Session {
   // in the order they are probed. They depend on the family and that number
   // alone, so a provider can be told of them before the batch is known.
   std::vector<Options::HeldOut> held_out(const fire::Options& limits,unsigned primes)const {
-    fire::SymbolMap symbols(field_.variables());return held_out(detail::active_variables(fire::start(basis_,dimension_,limits.zero_sectors,&symbols),symbols),primes);
+    (void)limits;return held_out(detail::active_variables(basis_,dimension_),primes);
   }
  private:
   static bool anchor(unsigned primes,unsigned check_prime,std::size_t j){return check_prime==primes+1&&j==0;}

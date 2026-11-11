@@ -6,5 +6,5 @@ int main(){
   diffexp::ibp_solver::Sampler sampler(basis,d,{});auto result=sampler({{2}},{7},diffexp::ibp_solver::prime(1),{});
   if(!result.success)return 1;
   auto expected=diffexp::modular::rational_mod(diffexp::Rational("-5/2"),diffexp::ibp_solver::prime(1));
-  return result.reductions.at({2}).at({1}).str()!=std::to_string(expected);
+  return result.residues.value().at({2}).at({1})!=expected;
 }

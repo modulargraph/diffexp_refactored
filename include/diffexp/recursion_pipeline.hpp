@@ -211,6 +211,12 @@ inline artifacts::Identity identity(const Graph& graph,std::size_t depth,
     catch(const std::exception& error) {derived=std::string(causal::derivation_revision)+";unavailable: "+error.what();}
     id.branch["derived_orientations"]=derived;
   }
+  if(!prescription.points.empty()) {
+    json::array stated;
+    for(const auto& point:prescription.points)if(point.level==depth+1)
+      stated.push_back(json::object{{"x",point.x.str()},{"side",point.side}});
+    id.branch["point_sides"]=std::move(stated);
+  }
   id.boundary={{"status","basis selection independent of numerical boundary and requested epsilon high"}};
   id.json_value();return id;
 }
@@ -305,6 +311,7 @@ class Evaluator {
     // Why no side could be derived; such a point may not lie on a leg.
     std::string undetermined;
   };
+  struct ComplexPoint {Rational low,high,height;};
   struct Plan {
     EpsilonGaugeResult gauge;
     Matrix diagonal,inverse_diagonal;
@@ -320,6 +327,10 @@ class Evaluator {
     // connection and its forcing, ascending, each with the side on which the
     // contour passes it (zero: free); see path().
     std::optional<std::vector<SingularPoint>> real_singularities;
+    // The complex singular points next to the segment: enclosures of the
+    // real part and a lower bound of |Im|. Kept when points are treated one
+    // by one, to keep them out of every detour.
+    std::vector<ComplexPoint> complex_singularities;
     std::vector<std::string> constraint_labels;
     bool has_physical_basis=false;
     epsilon_demand::Highs component_child_loss;
@@ -669,8 +680,17 @@ class Evaluator {
   // of each.
   const std::vector<SingularPoint>& singular_points(std::size_t depth,Plan& prepared)const {
     if(prepared.real_singularities)return *prepared.real_singularities;
-    auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_);
-    for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_))roots.push_back(std::move(root));
+    std::vector<B> complex;auto* others=prescription_.per_point()?&complex:nullptr;
+    auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_,others);
+    for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_,others))roots.push_back(std::move(root));
+    prepared.complex_singularities.clear();
+    for(const auto& root:complex) {
+      struct Real {arb_t value;Real(){arb_init(value);}~Real(){arb_clear(value);}} magnitude;
+      arb_abs(magnitude.value,acb_imagref(root.raw()));
+      ComplexPoint point{rational_bound(acb_realref(root.raw()),false),rational_bound(acb_realref(root.raw()),true),rational_bound(magnitude.value,false)};
+      if(point.high<Rational(0) || Rational(1)<point.low)continue;
+      prepared.complex_singularities.push_back(std::move(point));
+    }
     std::vector<std::pair<Rational,Rational>> intervals;
     for(const auto& root:roots)intervals.emplace_back(rational_bound(acb_realref(root.raw()),false),rational_bound(acb_realref(root.raw()),true));
     std::sort(intervals.begin(),intervals.end(),[](const auto& a,const auto& b){return a.first<b.first;});
@@ -692,6 +712,26 @@ class Evaluator {
         if(verdict.kind==causal::Orientation::Kind::Oriented)point.side=verdict.side;
         else if(verdict.kind==causal::Orientation::Kind::Undetermined)point.undetermined=verdict.reason.empty()?"undecided":verdict.reason;
       }
+    } else if(!prescription_.points.empty()) {
+      // A stated level side binds every point not stated on its own.
+      for(auto& point:merged)point.side=prescription_.levels.at(depth).x_detour_sign;
+    }
+    const Rational tolerance("1/1000000");
+    for(const auto& stated:prescription_.points) {
+      if(stated.level!=depth+1)continue;
+      bool found=false;
+      for(auto& point:merged)if(!(stated.x<point.low-tolerance) && !(point.high+tolerance<stated.x)) {
+        point.side=stated.side;point.undetermined.clear();found=true;
+      }
+      if(!found) {
+        std::string known;
+        for(const auto& point:merged)if(Rational(0)<point.low && point.high<Rational(1)) {
+          B middle;arb_set_fmpq(acb_realref(middle.raw()),((point.low+point.high)/Rational(2)).raw(),128);
+          known+=(known.empty()?"":", ")+middle.real_midpoint(12);
+        }
+        throw std::invalid_argument("causal.points: level "+std::to_string(depth+1)+" has no real singular point at x = "+stated.x.str()+
+          " (its points in (0,1): "+(known.empty()?"none":known)+")");
+      }
     }
     prepared.real_singularities=std::move(merged);
     return *prepared.real_singularities;
@@ -700,7 +740,8 @@ class Evaluator {
     B middle;arb_set_fmpq(acb_realref(middle.raw()),((point.low+point.high)/Rational(2)).raw(),128);
     throw std::domain_error("the causal side of the real singular point x = "+middle.real_midpoint(20)+" of level "+
       std::to_string(depth+1)+" could not be derived from the level's Symanzik F ("+point.undetermined+
-      "); supply an explicit `causal` object (f_rim and one level_signs entry per level) to state the contour");
+      "); supply an explicit `causal` object that states its side, \"causal\": {\"points\": [{\"level\": "+std::to_string(depth+1)+
+      ", \"x\": \""+middle.real_midpoint(12)+"\", \"side\": 1}]}, with side 1 (above the real axis) or -1");
   }
   void report(std::size_t depth,const std::string& phase,int high)const {if(options_.progress)options_.progress(depth,phase,high);}
   static int checked(long value) {
@@ -1594,7 +1635,8 @@ class Evaluator {
     // points in nearly coincident pairs all along the segment, and the
     // coefficients are long whatever the centre: there the whole leg runs at
     // the contour height, away from them.
-    if(graph_.specialised && !prescription_.derive_orientations) {
+    const bool guard=prescription_.per_point();
+    if(graph_.specialised && !guard) {
       const auto lift=imaginary(free_side)*graph_.dimension.constant(options_.contour_height);
       return {from,from+lift,to+lift,to};
     }
@@ -1608,12 +1650,27 @@ class Evaluator {
       if(!point.undetermined.empty())undetermined(depth,point);
       inside.push_back(point);
     }
+    // No detour may hold a complex singular point of the level between
+    // itself and the real axis: the path is then homotopic, in the domain
+    // of the system, to the real segment indented at its real singular
+    // points. Tested on the box [left,right] x (0,top].
+    const auto blocked=[&](const Rational& left,const Rational& right,const Rational& top) {
+      if(!guard)return false;
+      for(const auto& point:prepared.complex_singularities)
+        if(!(point.high<left) && !(right<point.low) && !(top<point.height))return true;
+      return false;
+    };
     if(graph_.specialised) {
       // The lifted leg stays on one side while the oriented points ask for
       // it; between two that ask for opposite sides it crosses the real
       // axis, vertically, in the middle of the widest gap between the
       // singular points that separate them.
-      const auto lift=graph_.dimension.constant(options_.contour_height);
+      Rational lifted=options_.contour_height;
+      for(unsigned attempt=0;blocked(low,high,lifted+lifted);++attempt) {
+        if(attempt==64)throw std::runtime_error("a complex singular point of level "+std::to_string(depth+1)+" lies too close to the real segment for a lifted path");
+        lifted=lifted/Rational(2);
+      }
+      const auto lift=graph_.dimension.constant(lifted);
       int side=0;for(const auto& point:inside)if(point.side){side=point.side;break;}
       if(!side)side=free_side;
       std::vector<Exact> vertices{graph_.dimension.constant(low),graph_.dimension.constant(low)+imaginary(side)*lift};
@@ -1664,23 +1721,40 @@ class Evaluator {
           (!side || !inside[last+1].side || inside[last+1].side==side)) {
         ++last;if(!side)side=inside[last].side;
       }
-      if(!side)side=free_side;
-      const Rational before=inside[first].low-(first?inside[first-1].high:low);
-      const Rational after=(last+1<inside.size()?inside[last+1].low:high)-inside[last].high;
-      Rational free=(before<after?before:after)/Rational(2);
-      if(height<free)free=height;
-      Rational size(1);while(free<size)size=size/Rational(2);
-      Rational grid=size/Rational(4);
-      Rational left=floor_to(inside[first].low-size,grid,false),right=floor_to(inside[last].high+size,grid,true);
-      // Next to a group of the opposite side the detours must not overlap.
-      const bool tight=squeezed || (last+1<inside.size() && inside[last+1].low-inside[last].high<reach);
-      if(tight) {
-        const Rational limit=last+1<inside.size()?(inside[last].high+inside[last+1].low)/Rational(2):high;
-        for(unsigned attempt=0;attempt<4096 && (!(passed<left) || !(right<limit));++attempt) {
+      Rational size(1),grid(1),left(0),right(0);
+      for(;;) {
+        if(first==last)side=inside[first].side;
+        if(!side)side=free_side;
+        const Rational before=inside[first].low-(first?inside[first-1].high:low);
+        const Rational after=(last+1<inside.size()?inside[last+1].low:high)-inside[last].high;
+        Rational free=(before<after?before:after)/Rational(2);
+        if(height<free)free=height;
+        size=Rational(1);while(free<size)size=size/Rational(2);
+        grid=size/Rational(4);
+        left=floor_to(inside[first].low-size,grid,false);right=floor_to(inside[last].high+size,grid,true);
+        const auto shrink=[&] {
           size=size/Rational(2);grid=size/Rational(4);
           left=floor_to(inside[first].low-size,grid,false);right=floor_to(inside[last].high+size,grid,true);
+        };
+        // Next to a separate detour within reach the two must not overlap.
+        const bool tight=squeezed || (last+1<inside.size() && inside[last+1].low-inside[last].high<reach);
+        if(tight) {
+          const Rational limit=last+1<inside.size()?(inside[last].high+inside[last+1].low)/Rational(2):high;
+          for(unsigned attempt=0;attempt<4096 && (!(passed<left) || !(right<limit));++attempt)shrink();
+          if(!(passed<left) || !(right<limit))throw std::runtime_error("no room for neighbouring detours of opposite causal sides");
         }
-        if(!(passed<left) || !(right<limit))throw std::runtime_error("no room for neighbouring detours of opposite causal sides");
+        if(guard && first!=last) {
+          // A group whose rectangle would hold a complex singular point is
+          // given up: its first point is passed alone.
+          Rational lift(1);while(height<lift)lift=lift/Rational(2);
+          if(blocked(left,right,lift)){last=first;side=0;continue;}
+        }
+        if(guard && first==last) {
+          unsigned attempt=0;
+          for(;attempt<200 && blocked(left,right,(right-left)/Rational(2));++attempt)shrink();
+          if(attempt==200)throw std::runtime_error("a complex singular point of level "+std::to_string(depth+1)+" lies too close to a real one for a detour");
+        }
+        break;
       }
       squeezed=last+1<inside.size() && inside[last+1].low-inside[last].high<reach;
       passed=right;

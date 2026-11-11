@@ -123,9 +123,10 @@ inline bool regular_anchor(const std::vector<std::vector<Exact>>& matrix,
   return true;
 }
 
-// Real singular points of the epsilon-leading denominators, as isolating balls.
+// Real singular points of the epsilon-leading denominators, as isolating
+// balls; the other roots are appended to `complex` if it is given.
 inline std::vector<kernel::ComplexBall> real_singular_points(const std::vector<std::vector<Exact>>& matrix,
-    std::size_t parameter,std::size_t epsilon) {
+    std::size_t parameter,std::size_t epsilon,std::vector<kernel::ComplexBall>* complex=nullptr) {
   std::map<std::string,Exact> polynomials;
   for(const auto& row:matrix)for(const auto& coefficient:row)if(!coefficient.is_zero()) {
     auto denominator=coefficient.denominator();
@@ -139,8 +140,10 @@ inline std::vector<kernel::ComplexBall> real_singular_points(const std::vector<s
   }
   std::vector<kernel::ComplexBall> out;
   for(const auto& [text,polynomial]:polynomials)
-    for(auto& root:polynomial_roots(polynomial,static_cast<unsigned>(parameter)))
+    for(auto& root:polynomial_roots(polynomial,static_cast<unsigned>(parameter))) {
       if(arb_contains_zero(acb_imagref(root.raw())))out.push_back(std::move(root));
+      else if(complex)complex->push_back(std::move(root));
+    }
   return out;
 }
 

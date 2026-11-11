@@ -98,6 +98,20 @@ string(JSON supplied_imaginary GET "${ft_output}" coefficients 0 1 imaginary)
 if(supplied_imaginary MATCHES "^\\[0\\.2657392476831952020141")
   message(FATAL_ERROR "explicit level_signs were not applied as written: ${ft_output}")
 endif()
+# Sides stated point by point complete the same explicit contour: the last
+# two cuts below the axis.
+string(JSON stated SET "${one_side}" causal
+  "{\"f_rim\":-1,\"level_signs\":[1,1],\"provenance\":\"test\",\"points\":[{\"level\":1,\"x\":\"2/3\",\"side\":-1},{\"level\":1,\"x\":\"0.872677996\",\"side\":-1}]}")
+file(WRITE "${work}/triangle_points.json" "${stated}")
+run_ft("${work}/triangle_points.json")
+expect("triangle, explicit sides point by point" 0 "^\\[0\\.1960034378504855817166" "^\\[0\\.2657392476831952020141")
+expect_mode("triangle, explicit sides point by point" supplied)
+string(JSON misplaced SET "${triangle}" causal "{\"points\":[{\"level\":1,\"x\":\"0.3\",\"side\":-1}]}")
+file(WRITE "${work}/triangle_misplaced.json" "${misplaced}")
+run_ft("${work}/triangle_misplaced.json")
+if(ft_status EQUAL 0 OR NOT ft_output MATCHES "level 1 has no real singular point at x = 3/10")
+  message(FATAL_ERROR "a stated side that names no singular point was accepted: ${ft_output} ${ft_errors}")
+endif()
 
 # Massless box at s=1, t=-1/3, d=4-2eps:
 # r_Gamma/(s t) {2/eps^2 [(-s)^-eps + (-t)^-eps] - log^2(s/t) - pi^2}, s -> s+i0.
@@ -139,7 +153,7 @@ string(JSON above SET "${sunrise}" external_gram "[[\"20\"]]")
 file(WRITE "${work}/sunrise_above.json" "${above}")
 run_ft("${work}/sunrise_above.json")
 if(ft_status EQUAL 0 OR NOT ft_output MATCHES "causal side of the real singular point x = 0\\.[0-9]+ of level 1 could not be derived"
-    OR NOT ft_output MATCHES "explicit `causal` object")
+    OR NOT ft_output MATCHES "explicit `causal` object that states its side" OR NOT ft_output MATCHES "points")
   message(FATAL_ERROR "undetermined two-loop contour was not refused with the documented message: ${ft_output} ${ft_errors}")
 endif()
 # Below threshold (but not Euclidean) the same level is free of cuts and real.

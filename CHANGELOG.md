@@ -16,8 +16,11 @@
   message naming the level and the point; a repeated zero of the leaf's `F`
   (a family exactly at threshold) stops it as a pinched contour. `causal`
   remains as an override: with `level_signs` it states one side per level,
-  without them it only sets `f_rim`. Families with positive `U` and `F` keep
-  their contour. The report has `causal.mode` and the oriented points.
+  with `points` the side of single points, and without either it only sets
+  `f_rim`. When points are treated one by one, no detour encloses a complex
+  singular point of its level. Families with positive `U` and `F` keep
+  their contour. The report has `causal.mode` and the oriented and free
+  points.
   Examples `bubble_timelike`, `bubble_above_threshold`, `triangle_physical`
   and `box_physical`; test `cli.causal`.
 - `diffexp ft --epsilon-strategy sample` (family key

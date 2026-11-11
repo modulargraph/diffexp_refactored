@@ -14,6 +14,9 @@ enum class Assurance { SuppliedPrescription, EuclideanPhysicalDomain, VerifiedHo
 // supplied prescription, of the free ones (where the physical branch is
 // analytic and both sides agree) for a derived one.
 struct LevelPlan { int x_detour_sign=0; };
+// The stated side of one real singular point: `level` counts from one, `x`
+// locates the point to within 1e-6.
+struct PointSide { std::size_t level=0; Rational x; int side=0; };
 struct Prescription {
   // -1 is the Feynman propagator: D -> D - i0, hence F -> F - i0.
   int f_rim=-1;
@@ -23,11 +26,19 @@ struct Prescription {
   // Orient each real singular point of each level on its own, from the
   // level's Symanzik F; `levels` then only places the free points.
   bool derive_orientations=false;
+  // Sides stated point by point; they take precedence over both the level
+  // sides and the derivation.
+  std::vector<PointSide> points;
+  // Each point is treated on its own, and no detour may enclose a complex
+  // singular point of its level.
+  bool per_point()const{return derive_orientations || !points.empty();}
   void validate(std::size_t depth)const {
     if((f_rim!=1 && f_rim!=-1) || levels.size()!=depth || provenance.empty() || convention.empty())
       throw std::invalid_argument("incomplete causal prescription: F rim, depth and provenance required");
     for(const auto& level:levels)if(level.x_detour_sign!=1 && level.x_detour_sign!=-1)
       throw std::invalid_argument("incomplete causal prescription: each x orientation must be +/-1");
+    for(const auto& point:points)if(!point.level || point.level>depth || (point.side!=1 && point.side!=-1))
+      throw std::invalid_argument("causal point sides need a level between 1 and the depth and a side of +/-1");
   }
 };
 inline constexpr const char* derivation_revision="landau-orientation-v1";

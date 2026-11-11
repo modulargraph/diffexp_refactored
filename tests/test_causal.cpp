@@ -26,6 +26,15 @@ int main(){try {
   require(automatic.f_rim==-1 && automatic.derive_orientations && automatic.assurance==causal::Assurance::DerivedFromSymanzik && automatic.levels.size()==3);
   require(causal::Prescription{}.f_rim==-1);
   {
+    // Sides stated point by point, on top of the derivation or of level sides.
+    auto stated=causal::derived(2);require(stated.per_point());
+    stated.points.push_back({1,Rational("1/2"),-1});stated.validate(2);
+    stated.points.push_back({3,Rational("1/2"),1});rejects([&]{stated.validate(2);});
+    stated.points.back()={2,Rational("1/2"),0};rejects([&]{stated.validate(2);});
+    causal::Prescription levels;levels.levels={{1},{-1}};levels.provenance="test";levels.validate(2);
+    require(!levels.per_point());levels.points.push_back({2,Rational("1/3"),1});require(levels.per_point());
+  }
+  {
     // Leaf: F=1-9x(1-x) (equal-mass bubble at p^2=9m^2) has two simple zeros
     // of opposite slope; F - i0 passes the first above and the second below.
     ExactField field({"x","eps","I"});Exact x(field,"x");

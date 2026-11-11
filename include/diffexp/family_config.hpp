@@ -131,7 +131,7 @@ inline Configuration parse(const json::value& value) {
     }
   }
   if(auto p=o.if_contains("causal")) {
-    const auto& a=p->as_object();known_keys(a,{"f_rim","level_signs","provenance"},"causal");
+    const auto& a=p->as_object();known_keys(a,{"f_rim","level_signs","points","provenance"},"causal");
     // Without level_signs the sides are derived, as without the object, for
     // the stated F rim. With them every real singular point of a level is
     // passed on that level's side.
@@ -145,6 +145,19 @@ inline Configuration parse(const json::value& value) {
       auto derived=causal::derived(f.physical_count-1,prescription.f_rim);
       if(auto text=a.if_contains("provenance"))derived.provenance=std::string(text->as_string());
       prescription=std::move(derived);
+    }
+    // Sides stated for single points, on top of either mode.
+    if(auto points=a.if_contains("points"))for(const auto& entry:points->as_array()) {
+      const auto& point=entry.as_object();known_keys(point,{"level","x","side"},"causal point");
+      // x is a rational or a decimal fraction.
+      std::string text=point.at("x").is_string()?std::string(point.at("x").as_string()):rational(point.at("x")).str();
+      if(const auto dot=text.find('.');dot!=std::string::npos && text.find('/')==std::string::npos) {
+        const auto digits=text.size()-dot-1;
+        if(digits>60)throw std::invalid_argument("causal point x has too many decimals");
+        text.erase(dot,1);text+="/1"+std::string(digits,'0');
+      }
+      prescription.points.push_back({static_cast<std::size_t>(integer(point.at("level"),1,255,"causal point level")),
+        Rational(text),static_cast<int>(integer(point.at("side"),-1,1,"causal point side"))});
     }
     prescription.validate(f.physical_count-1);
     c.numerical.causal_prescription=std::move(prescription);

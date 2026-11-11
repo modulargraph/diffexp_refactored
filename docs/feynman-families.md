@@ -77,7 +77,7 @@ Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 of zero-based positions in the current physical propagator list, after earlier
 merges. Without `merges` the built-in solver chooses the pair for large levels
 ([merge selection](performance.md#what-the-defaults-do)); explicit `merges`,
-`anchors` or `causal.level_signs` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
+`anchors`, `causal.level_signs` or `causal.points` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
 Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`
 and `endpoint_order` (the last two are chosen together when omitted), and
 `epsilon_strategy` (`"expand"` or `"sample"`), `samples` and `sample_step` for
@@ -137,13 +137,17 @@ How a point is decided, in ball arithmetic on its isolating interval:
    the null vector is read from the adjugate and is either of mixed sign (no
    pinch) or positive, with the sign of `alpha^T M' alpha`.
 
-A side is never guessed. If none of these statements decides a point that the
-path has to pass, the run stops:
+Statement 2 gives a side without asking whether the point has a pinch at all;
+a point reported as oriented may therefore be free, which is harmless. The
+converse is what matters: a point is called free only when a pinch is
+excluded. A side is never guessed. If none of these statements decides a
+point that the path has to pass, the run stops:
 
 ```
 the causal side of the real singular point x = 0.0912... of level 1 could not
 be derived from the level's Symanzik F (...); supply an explicit `causal`
-object (f_rim and one level_signs entry per level) to state the contour
+object that states its side, "causal": {"points": [{"level": 1, "x":
+"0.0912801957751", "side": 1}]}, with side 1 (above the real axis) or -1
 ```
 
 What is not decided:
@@ -159,11 +163,15 @@ What is not decided:
   threshold): the contour is pinched and the run stops with
   `F has a repeated zero at x = ... the contour is pinched there`.
 
-The homotopy of a finite detour to the infinitesimal one is not certified
-(complex singular points of a level are not tracked), as for every transport
-path. The JSON report has `causal.mode` (`euclidean`, `derived` or
-`supplied`) and, when derived, the oriented points of each level with their
-side.
+A detour of finite size is the infinitesimal one only if no singular point
+of the level lies between it and the real axis. When points are treated one
+by one, the complex roots of the level's denominators are therefore kept out
+of every detour: a triangle shrinks, a group whose rectangle would hold one
+is split, and the lifted path of an epsilon sample is lowered below them.
+(The contour of a Euclidean family, and one stated by `level_signs` alone,
+is laid out without this check.) The JSON report has `causal.mode`
+(`euclidean`, `derived` or `supplied`) and, when derived, the oriented and
+the free points of each level.
 
 Physical-region examples: `bubble_timelike.json`, `bubble_above_threshold.json`,
 `triangle_physical.json` (its first level passes its two cuts on opposite
@@ -188,8 +196,23 @@ leaf uses `f_rim` (and derives the side of a zero of its own `F` from it).
 parser does not establish that a supplied contour is the correct physical
 continuation, and one side per level is not enough for every family.
 Without `level_signs` the object only sets `f_rim` (`1` is the complex
-conjugate prescription `F + i0`) and the sides are derived as above. Unknown
-fields and inconsistent dimensions are rejected.
+conjugate prescription `F + i0`) and the sides are derived as above.
+
+`points` states the side of single real singular points and takes precedence
+over both the level sides and the derivation; it is how a point that could
+not be derived is supplied:
+
+```json
+"causal": {
+  "points": [{"level": 1, "x": "0.0912801957751", "side": 1}]
+}
+```
+
+`level` counts merge levels from one, `x` (a rational or a decimal) locates
+the point to within `1e-6`, and `side` is the sign of `Im x` on the detour.
+An entry that names no real singular point of its level is an error that
+lists the level's points. Unknown fields and inconsistent dimensions are
+rejected.
 
 A requested anchor that turns out to be singular in the master basis
 the reduction selected is moved to the simplest regular rational within 3/20

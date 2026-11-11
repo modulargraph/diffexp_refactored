@@ -332,6 +332,7 @@ class Evaluator {
     if(!options_.adjoint.truncation_bits)options_.adjoint.truncation_bits=static_cast<unsigned>(std::min<double>(
       std::min<double>(2.0*options_.ordinary_order,static_cast<double>(options_.working_bits)-32),
       std::ceil((options_.leaf_digits+10.0)*std::log2(10.0))));
+    if(graph_.specialised)options_.matching.numeric_leading_gauge=true;
     if(!options_.overlap_ratio) {
       options_.overlap_ratio=graph_.specialised?16:64;
       if(options_.endpoint_order)

@@ -225,6 +225,18 @@ rows was tried once more where it should pay best, a double pentagon sample
 that grows as the sample approaches epsilon = 0 and is not faster at any
 precision tried.
 
+**Numeric row gauge in a sample.** Preparing an endpoint operator starts
+with an exact elimination on the leading epsilon coefficient of the frame,
+which finds the shears that epsilon poles make necessary. A sampled
+recursion has no such poles, and there the elimination ran on a d x d matrix
+of rational numbers with long numerators: 14 of the 37 s a double pentagon
+sample spent outside its transports (found by sampling stacks during the
+step). When the leading coefficient has a certified ball inverse at the
+overlap point its rank is full and no shear exists, so the inverse is used
+directly; the operator step of the sample drops from 13.9 s to 1.6 s and
+its value agrees with the stored one to 37 digits. The expanded recursion
+keeps the exact gauge, whose by-product certifies principal parts.
+
 **What is left.** With the pair above the transport is again three quarters
 of an expanded run. A run with the overlap moved out to a quarter of the
 distance and a short exact series (inaccurate, for timing only) takes 28 s

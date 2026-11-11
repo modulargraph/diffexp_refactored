@@ -32,5 +32,30 @@ int main(){try {
   };
   for(unsigned j=0;j<2;++j)for(int k=std::min(a.matrix.low+1,b.matrix.low);k<=4;++k)
     check(acb_overlaps(coefficient(a.matrix,j,k-shifts[j]).raw(),coefficient(b.matrix,j,k).raw()),"P*(D*T*F)^-1*D must equal P*(T*F)^-1 coefficient by coefficient");
+  // A frame whose leading epsilon coefficient is invertible at the point needs
+  // no row gauge: the certified ball inverse replaces the exact elimination
+  // and both give the same inverse, order by order.
+  auto regular=AffineFrobeniusSeries::prepare({{q("eps/x"),q("1")},{q("0"),q("2*eps/x")}},0,1,6);
+  auto frame=regular.project(transform);
+  auto exact_settings=settings;exact_settings.numeric_operator_convolution=true;
+  auto numeric_settings=exact_settings;numeric_settings.numeric_leading_gauge=true;
+  auto by_elimination=affine_operator::prepare(regular,frame,point,3,exact_settings);
+  auto by_inverse=affine_operator::prepare(regular,frame,point,3,numeric_settings);
+  check(by_elimination.success(),by_elimination.reason);check(by_inverse.success(),by_inverse.reason);
+  check(!by_elimination.recurrence->numeric_gauge && by_inverse.recurrence->numeric_gauge,"numeric row gauge selection");
+  check(by_elimination.row_pole_loss==0 && by_inverse.row_pole_loss==0,"a regular leading frame needs no shear");
+  check(by_elimination.inverse.low==by_inverse.inverse.low && by_elimination.row_lower_bounds==by_inverse.row_lower_bounds,"numeric row gauge window");
+  for(unsigned i=0;i<2;++i)for(unsigned j=0;j<2;++j)for(int k=by_inverse.inverse.low;k<=3;++k) {
+    const auto& u=by_elimination.inverse.coefficients[i][j][k-by_elimination.inverse.low];
+    const auto& v=by_inverse.inverse.coefficients[i][j][k-by_inverse.inverse.low];
+    check(acb_overlaps(u.raw(),v.raw()) && v.is_finite(),"numeric row gauge inverse");
+    const bool tight=mag_cmp_2exp_si(arb_radref(acb_realref(v.raw())),-200)<0 &&
+      mag_cmp_2exp_si(arb_radref(acb_imagref(v.raw())),-200)<0;
+    check(tight,"numeric row gauge inverse is not accurate");
+  }
+  // The pole-bearing frame above is singular at leading order: the numeric
+  // path must decline and leave the exact gauge in charge.
+  auto declined=affine_operator::prepare(series,physical,point,10,numeric_settings);
+  check(declined.success() && !declined.recurrence->numeric_gauge && declined.row_pole_loss==original.row_pole_loss,"numeric row gauge must not replace a shear");
   std::cout<<"Exact endpoint epsilon-gauge cancellation preserves Laurent operator and reduces normalization loss\n";
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

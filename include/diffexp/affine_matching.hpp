@@ -32,6 +32,13 @@ struct Options {
               max_series_cells = 8000000;
   // Operator-only alternative; exact normalization and K0 remain mandatory.
   bool numeric_operator_convolution = false;
+  // Skip the exact row gauge when the leading epsilon coefficient of the
+  // frame has a certified ball inverse at the point: its rank is then full
+  // and no shear is needed. The exact principal-part certificate is not
+  // available on this path, so it is meant for frames without epsilon poles
+  // (a recursion specialised to a numeric dimension), where an exact
+  // elimination of a d x d matrix of rational numbers is pure overhead.
+  bool numeric_leading_gauge = false;
   // When the supplied positive real matchpoint is an exact rational, the
   // row normalization substitutes it and works in Q[log x] instead of
   // Q(x, log x). Epsilon cancellations stay exact, and since log of a

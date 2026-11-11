@@ -31,6 +31,10 @@
   `overlap_ratio`) and `--endpoint-order N` set the pair; the example
   configurations no longer fix the order. One core: kite 4.2 s, planar
   double box 16.3 s, four-loop banana 43.7 s.
+- An `--epsilon-shift` sample inverts the leading coefficient of each
+  endpoint frame by a certified ball inverse instead of an exact elimination
+  (`affine_matching::Options::numeric_leading_gauge`): 12 s less per double
+  pentagon sample.
 - Uncertainty propagation in the recursion's transports. A chart that would
   wrap its inherited uncertainty used to be evaluated through the chart map,
   one expansion per master. The recursion now transports midpoints from the

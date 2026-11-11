@@ -245,6 +245,8 @@ struct Recurrence {
   affine_matching::detail::ExactMatrix leading;  // exact K_0 left by the row gauge
   std::vector<long> shifts;
   unsigned loss = 0;
+  // R_0 is a certified ball inverse of H_0, not an evaluated exact gauge.
+  bool numeric_gauge = false;
   B point, logarithm;
   slong precision = 0;
   Exact zero;
@@ -381,6 +383,9 @@ struct Recurrence {
         if (exact_required) ++out.numeric_convolution_fallbacks;
       }
       if (exact_required) {
+        if (numeric_gauge)
+          throw affine_matching::detail::PrecisionNeeded(
+              "numeric row gauge: an epsilon order of the prepared inverse is too wide");
         exact_order(series, physical, n + loss, depth + loss, budget);
         auto sum = fuchsify::detail::zeros(d, d, zero);
         for (unsigned p = 0; p <= loss; ++p) {
@@ -442,7 +447,7 @@ inline void publish(Prepared &out, const AffineFrobeniusSeries &series,
         out.inverse.coefficients[i][j][e - low] = factor * state.w.at(n)[i][j];
     }
   }
-  if (options.certify_operator_principal_part) {
+  if (options.certify_operator_principal_part && !state.numeric_gauge) {
     // The certificate reads exact coefficients through depth+loss.
     state.exact_order(series, physical, depth + loss, depth + loss, budget);
     out.principal_part_data = std::make_shared<PrincipalPartData>(
@@ -491,11 +496,20 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     const long max_shift = *std::max_element(shifts.begin(), shifts.end());
     const unsigned foreseen = static_cast<unsigned>(std::min<long>(
         options.max_epsilon_depth, std::max(0L, static_cast<long>(inverse_high) + max_shift)));
-    auto gauge = am::row_gauge_coefficients(
-        d, state->zero, point, budget,
-        [&](unsigned n) -> const am::ExactMatrix & {
-          return state->exact_order(series, physical, n, foreseen, budget);
-        });
+    std::optional<detail::BallMatrix> numeric_inverse;
+    if (options.numeric_leading_gauge && options.numeric_operator_convolution) {
+      state->require_symbolic(physical, foreseen, budget);
+      numeric_inverse = am::verified_inverse(state->numeric_order(series, 0, budget));
+    }
+    auto gauge = numeric_inverse
+        ? am::RowGauge{{fuchsify::detail::identity(d, state->zero)}, 0, 0, {},
+                       fuchsify::detail::identity(d, state->zero)}
+        : am::row_gauge_coefficients(
+              d, state->zero, point, budget,
+              [&](unsigned n) -> const am::ExactMatrix & {
+                return state->exact_order(series, physical, n, foreseen, budget);
+              });
+    state->numeric_gauge = numeric_inverse.has_value();
     const unsigned loss = gauge.inverse_epsilon_powers.size() - 1;
     state->loss = loss;
     state->row_gauge = std::move(gauge.inverse_epsilon_powers);
@@ -520,6 +534,7 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
       for (unsigned i = 0; i < d; ++i)
         for (unsigned j = 0; j < d; ++j)
           state->r[p][i][j] = evaluate_at(state->row_gauge[p][i][j]);
+    if (numeric_inverse) state->r[0] = std::move(*numeric_inverse);
     out.recurrence = std::move(state);
     detail::publish(out, series, physical, inverse_high, budget);
     out.status = Status::Success;

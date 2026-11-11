@@ -83,6 +83,24 @@ int main(){try {
     const auto slope=eb::examine(matrix({{"0","0"},{"0","1/x"}}),0,1,false);
     check(!slope.qualifies && slope.reason.find("Taylor")!=std::string::npos,"a solution that vanishes at the endpoint is refused: "+slope.reason);
   }
+  {
+    // The kite at x=1: the merged line is 1-k1^2 and the level's numerator
+    // slot k1^2 depends on it. No master uses the slot, so it is replaced.
+    ExactField exact({"x","eps","I"});Exact x(exact,"x");
+    const auto kite=feynman::example_family("kite");
+    const diffexp::ibp::PropagatorBasis merged(diffexp::ibp::merge(diffexp::ibp::quadratic_family(kite.momenta,x,kite.physical_count),0,1,x));
+    const std::vector<diffexp::ibp::Integral> unused{{1,1,1,1,0},{2,0,1,1,0}},numerator{{1,1,1,1,-1}};
+    bool dependent=false;
+    try{(void)diffexp::ibp::PropagatorBasis(recursion::at_anchor(merged,0,Rational(1)));}catch(const std::invalid_argument&){dependent=true;}
+    check(dependent,"the kite's numerator slot depends on its propagators at x=1");
+    const auto replaced=recursion::endpoint_family(merged,0,Rational(1),unused);
+    check(replaced.has_value(),"an unused dependent numerator slot is replaced");
+    const diffexp::ibp::PropagatorBasis completed(*replaced);
+    check(completed.denominators.size()==merged.denominators.size() && completed.physical_count==merged.physical_count,"the replaced slot completes the basis in place");
+    check(!recursion::endpoint_family(merged,0,Rational(1),numerator),"a dependent numerator slot that a master uses refuses the endpoint");
+    const auto lower=recursion::endpoint_family(merged,0,Rational(0),numerator);
+    check(lower && pullback::equal(lower->auxiliary[0],recursion::at_anchor(merged,0,Rational(0)).auxiliary[0]),"an independent slot is kept as it is");
+  }
   // The one-loop massive family: every level merges two massive lines on the
   // loop momentum, so every level matches at x=0.
   const auto cache=std::filesystem::temp_directory_path()/("diffexp-endpoint-boundary-test-"+std::to_string(::getpid()));
@@ -118,9 +136,13 @@ int main(){try {
     // What the level asks of it: its masters at the endpoint, which are
     // integrals of that family in the level's own numerator slots.
     check(child.requested==node.closure.ordered_basis,"the child is asked for the level's masters at the endpoint");
-    for(std::size_t k=node.merged.physical_count;k<node.merged.denominators.size();++k)
-      check(pullback::equal(child.incoming.denominators[k],recursion::at_anchor(node.merged,0,Rational(0)).auxiliary[k-node.merged.physical_count]),
-        "the numerator slots of the level are those of the child");
+    // A numerator slot that a master uses is the same slot of the child.
+    const auto pinched=recursion::at_anchor(node.merged,0,Rational(0));
+    for(std::size_t k=node.merged.physical_count;k<node.merged.denominators.size();++k) {
+      const bool used=std::any_of(node.closure.ordered_basis.begin(),node.closure.ordered_basis.end(),[&](const auto& master){return master[k]!=0;});
+      if(used)check(pullback::equal(child.incoming.denominators[k],pinched.auxiliary[k-node.merged.physical_count]),
+        "a numerator slot of the masters is that of the child");
+    }
   }
   {
     // A stated ladder of anchors is kept, and an endpoint that was asked for

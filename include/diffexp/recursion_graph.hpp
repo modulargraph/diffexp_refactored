@@ -252,6 +252,53 @@ inline ibp::QuadraticFamily at_anchor(const ibp::PropagatorBasis& basis,
   return out;
 }
 
+// The family of an endpoint child: the merged family at x=0 or x=1. There the
+// merged line is one of the two original lines, and a numerator slot that was
+// independent of the propagators at generic x can depend on them (the slot
+// k^2 next to a line 1-k^2). Such a slot is replaced by a scalar product that
+// completes the basis, which changes nothing if no master carries a power in
+// it; a slot some master uses must stay independent, or there is no family.
+inline std::optional<ibp::QuadraticFamily> endpoint_family(const ibp::PropagatorBasis& merged,
+    std::size_t parameter,const Rational& endpoint,const std::vector<ibp::Integral>& masters) {
+  auto family=at_anchor(merged,parameter,endpoint);
+  const auto zero=merged.space.zero().constant;
+  const auto size=merged.space.size();
+  std::map<std::size_t,std::vector<Exact>> rank;
+  const auto reduced=[&](std::vector<Exact> row) {
+    for(const auto& [pivot,basis]:rank) {
+      const auto c=row[pivot];
+      if(!c.is_zero())for(std::size_t j=pivot;j<row.size();++j)row[j]=row[j]-c*basis[j];
+    }
+    return row;
+  };
+  const auto insert=[&](const std::vector<Exact>& candidate) {
+    auto row=reduced(candidate);
+    const auto p=std::find_if(row.begin(),row.end(),[](const Exact& value){return !value.is_zero();});
+    if(p==row.end())return false;
+    const auto coefficient=*p;for(auto& value:row)value=value/coefficient;
+    rank.emplace(p-row.begin(),std::move(row));return true;
+  };
+  for(const auto& line:family.physical)if(!insert(line.linear))return std::nullopt;
+  const auto physical=family.physical.size();
+  std::vector<bool> used(family.auxiliary.size(),false),kept(family.auxiliary.size(),false);
+  for(const auto& master:masters)for(std::size_t k=0;k<family.auxiliary.size();++k)if(master.at(physical+k))used[k]=true;
+  for(std::size_t k=0;k<family.auxiliary.size();++k)if(used[k]) {
+    if(!insert(family.auxiliary[k].linear))return std::nullopt;
+    kept[k]=true;
+  }
+  for(std::size_t k=0;k<family.auxiliary.size();++k)if(!used[k])kept[k]=insert(family.auxiliary[k].linear);
+  std::size_t next=0;
+  for(std::size_t k=0;k<family.auxiliary.size();++k) {
+    if(kept[k])continue;
+    for(;;++next) {
+      if(next==size)return std::nullopt;
+      auto slot=merged.space.zero();slot.linear[next]=zero.constant(1);
+      if(insert(slot.linear)){family.auxiliary[k]=std::move(slot);++next;break;}
+    }
+  }
+  return family;
+}
+
 // One shared closed master vector feeds every operation at a level. A child
 // computes precisely that ordered vector at the parent's anchor. Epsilon and
 // Taylor demands belong to numerical execution, never to this exact graph.
@@ -417,6 +464,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       // (the masters keep their meaning in the pinched family) and the
       // level's equation confirms that the endpoint values fix the solution.
       // A level made of exact identities alone has no equation to solve.
+      std::optional<ibp::QuadraticFamily> child;
       const bool transported=std::any_of(node.operations.begin(),node.operations.end(),
         [](const auto& operation){return operation.operation!=feynman::Operation::Direct;});
       if(options.boundary!=BoundaryPolicy::anchor && options.anchors.empty() && transported && !node.closure.ordered_basis.empty()) {
@@ -424,11 +472,11 @@ inline Graph prepare(const feynman::ExampleFamily& family,
         for(const bool upper:{false,true}) {
           if(!endpoint_boundary::kinematics(family,*euclidean,composition,left,right,upper?left:right).qualifies)continue;
           std::string refusal;
-          try {(void)ibp::PropagatorBasis(at_anchor(node.merged,0,Rational(upper?1:0)));}
-          catch(const std::exception&) {refusal="a numerator slot of the level depends on its propagators at the endpoint";}
-          if(refusal.empty()) {
+          auto pinched=endpoint_family(node.merged,0,Rational(upper?1:0),node.closure.ordered_basis);
+          if(!pinched)refusal="a numerator of the level's masters depends on the propagators at the endpoint";
+          else {
             const auto verdict=endpoint_boundary::examine(node.closure.matrix,0,1,upper,options.endpoint);
-            if(verdict.qualifies){node.boundary=upper?BoundarySite::upper:BoundarySite::lower;break;}
+            if(verdict.qualifies){node.boundary=upper?BoundarySite::upper:BoundarySite::lower;child=std::move(pinched);break;}
             refusal=verdict.reason;
           }
           if(options.endpoint_refused)options.endpoint_refused(depth+1,upper,refusal);
@@ -439,7 +487,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       node.anchor=anchor;
       requested=node.closure.ordered_basis;
       // This is the only numerical anchor substitution in exact preparation.
-      raw=at_anchor(node.merged,0,anchor);
+      raw=child?std::move(*child):at_anchor(node.merged,0,anchor);
       for(std::size_t i=0;i<composition[left].size();++i)
         composition[left][i]=anchor*composition[left][i]+(Rational(1)-anchor)*composition[right][i];
       composition.erase(composition.begin()+right);

@@ -61,6 +61,28 @@ if(NOT endpoint_masters LESS anchor_masters)
   message(FATAL_ERROR "kite: the pinched level has ${endpoint_masters} masters, the anchored one ${anchor_masters}")
 endif()
 
+# With the second propagator massless the pair on the second loop momentum is
+# merged first and matches at x = 0; the pair of propagators 0 and 1 then
+# keeps its massive line at x = 1, where the level's numerator slot is replaced.
+file(READ "${examples}/kite.json" kite)
+string(JSON mixed SET "${kite}" propagators 1 mass_squared "\"0\"")
+file(WRITE "${work}/kite_mixed.json" "${mixed}")
+function(run_mixed tag)
+  execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${work}/kite_mixed.json" --cache "${work}/cache-mixed-${tag}" --no-numerical-cache --json ${ARGN}
+    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+  set(ft_output "${output}" PARENT_SCOPE)
+  set(ft_errors "${errors}" PARENT_SCOPE)
+  set(ft_status "${status}" PARENT_SCOPE)
+endfunction()
+run_mixed(auto)
+finite_part(mixed_endpoint 28)
+boundaries(mixed_sites)
+run_mixed(anchor --boundary anchor)
+finite_part(mixed_anchor 28)
+if(NOT mixed_sites STREQUAL "lower;upper;anchor;" OR NOT mixed_endpoint STREQUAL mixed_anchor)
+  message(FATAL_ERROR "kite with a massless line: boundaries ${mixed_sites}; endpoint ${mixed_endpoint}, anchor ${mixed_anchor}")
+endif()
+
 # The massless box has no qualifying level: nothing changes, and an endpoint
 # that was demanded is an error.
 run_ft(box auto)

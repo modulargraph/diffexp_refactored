@@ -289,6 +289,7 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
   };
   ExactEpsilonMatrix transpose(d,std::vector<Exact>(d,vertices[0].constant(0)));
   for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j)transpose[i][j]=-matrix[j][i];
+  rc::PoleCache pole_cache; // the roots of the denominator factors, found once for all legs
   for(unsigned leg=first_leg;leg+1<vertices.size();++leg) {
     const auto& from=vertices[leg];const auto& to=vertices[leg+1];if(from==to)continue;
     double center=leg==first_leg?first_parameter:0;
@@ -298,6 +299,7 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
     // the forcing entries, which address the common source of the full state.
     std::vector<RationalLineEntry> block,sources;
     const auto width=to-from;const auto point=exact_point(from,xi,from+width*from.variable(xi));
+    const rc::AffinePullback pullback(pole_cache,from,width);
     for(unsigned j=0;j<d;++j)for(unsigned k=0;k<d;++k)if(!transpose[j][k].is_zero()) {
       if(*exact_epsilon_valuation(transpose[j][k],ei)<0)throw std::domain_error("ordinary connection requires an epsilon gauge before transport");
       block.push_back({j,k,0,width*transpose[j][k].substitute(point)});
@@ -341,7 +343,7 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
             selected.push_back({static_cast<unsigned>(e.row-begin),static_cast<unsigned>(count),0,e.coefficient});
           try {
             if(selected.size()>limits.max_terms)throw std::length_error("rational circuit sparse entry budget exhausted");
-            auto candidate=rc::compile(selected,count+1,xi,ei,initial.high-low,order,limits);
+            auto candidate=rc::compile(selected,count+1,xi,ei,initial.high-low,order,limits,&pullback);
             const auto& plan=candidate.data();
             (void)rc::operation_upper_bound(plan,order,static_cast<unsigned>(epsilon_count));
             // Upper bounds are small enough for uint64 by the admitted d,N,K and
@@ -462,7 +464,7 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         if(!map_circuit) {
           AdjointPhaseTimer timer{stats?&stats->compilation_seconds:nullptr};
           auto block_limits=limits;block_limits.max_dimension=static_cast<unsigned>(d);
-          map_circuit=rc::compile(block,static_cast<unsigned>(d),xi,ei,initial.high-low,order,block_limits);
+          map_circuit=rc::compile(block,static_cast<unsigned>(d),xi,ei,initial.high-low,order,block_limits,&pullback);
         }
         if(!map_prepared)map_prepared=prepare(*map_circuit);
         for(auto j:columns)if(!map_columns[j]) {

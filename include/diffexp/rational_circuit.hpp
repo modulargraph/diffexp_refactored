@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 // The ordinary-chart executor for epsilon-regular rational connections
@@ -241,10 +242,216 @@ struct AcbPolynomial {
 };
 } // namespace detail
 
+// The poles of the denominators of one connection, shared by every leg and
+// every row batch of its transports. A chart variable t of a leg is an affine
+// image x = from + width*t of the path variable, and every denominator of the
+// connection is, up to a constant, a product of a few irreducible real
+// polynomials in x. The denominator d(t) is therefore carried back to x
+// exactly, split exactly into those factors, and its poles are the roots of
+// the factors, isolated once each, carried to t in ball arithmetic. The
+// product formula d(t) = c * prod f_k(from + width*t)^e_k is established in
+// exact arithmetic for the given d, so the poles and their multiplicities are
+// those of d for whatever map is supplied; a denominator that is not a
+// constant multiple of a real polynomial in x is left to detail::poles.
+class PoleCache {
+ public:
+  // The poles of d(t), or nothing when d is not of the cached form.
+  // Throws std::runtime_error, as detail::poles does, if roots stay unisolated.
+  std::optional<std::vector<Pole>> poles(const Polynomial &d, const Scalar &from,
+                                         const Scalar &width) {
+    constexpr slong bits = 128;
+    std::size_t size = d.size();
+    while (size && detail::zero(d[size-1])) --size;
+    if (!size) return std::nullopt; // detail::poles reports the zero polynomial
+    if (size == 1) return std::vector<Pole>{};
+    const Rational norm = width.real*width.real + width.imaginary*width.imaginary;
+    if (norm.is_zero()) return std::nullopt;
+    std::string key = from.real.str()+","+from.imaginary.str()+","+
+                      width.real.str()+","+width.imaginary.str()+"|";
+    for (std::size_t i=0;i<size;++i)
+      key += d[i].real.str()+","+d[i].imaginary.str()+";";
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (auto found = charts_.find(key); found != charts_.end()) return found->second;
+    // t = alpha*x + beta.
+    const Scalar alpha{width.real/norm, -(width.imaginary/norm)};
+    const Scalar beta{-(from.real*alpha.real - from.imaginary*alpha.imaginary),
+                      -(from.real*alpha.imaginary + from.imaginary*alpha.real)};
+    // P(x) = d(alpha*x + beta) = real + I*imaginary, by Horner's rule.
+    Poly lr, li, real, imaginary, a, b, c, e;
+    fmpq_poly_set_coeff_fmpq(lr.q,1,alpha.real.raw());
+    fmpq_poly_set_coeff_fmpq(lr.q,0,beta.real.raw());
+    fmpq_poly_set_coeff_fmpq(li.q,1,alpha.imaginary.raw());
+    fmpq_poly_set_coeff_fmpq(li.q,0,beta.imaginary.raw());
+    const bool plain = fmpq_poly_is_zero(li.q);
+    for (std::size_t i=size;i-->0;) {
+      // (real,imaginary) <- (real,imaginary)*(lr,li) + d[i]
+      fmpq_poly_mul(a.q,real.q,lr.q);
+      fmpq_poly_mul(b.q,imaginary.q,lr.q);
+      if (!plain) {
+        fmpq_poly_mul(c.q,imaginary.q,li.q);
+        fmpq_poly_mul(e.q,real.q,li.q);
+        fmpq_poly_sub(a.q,a.q,c.q);
+        fmpq_poly_add(b.q,b.q,e.q);
+      }
+      fmpq_poly_zero(c.q); fmpq_poly_zero(e.q);
+      fmpq_poly_set_coeff_fmpq(c.q,0,d[i].real.raw());
+      fmpq_poly_set_coeff_fmpq(e.q,0,d[i].imaginary.raw());
+      fmpq_poly_add(real.q,a.q,c.q);
+      fmpq_poly_add(imaginary.q,b.q,e.q);
+    }
+    // P divided by its leading coefficient u+I*v is monic; it has to be real.
+    const slong degree = static_cast<slong>(size)-1;
+    if (std::max(fmpq_poly_degree(real.q),fmpq_poly_degree(imaginary.q)) != degree)
+      return std::nullopt;
+    Number u, v, n, t;
+    fmpq_poly_get_coeff_fmpq(u.q,real.q,degree);
+    fmpq_poly_get_coeff_fmpq(v.q,imaginary.q,degree);
+    fmpq_poly_scalar_mul_fmpq(a.q,imaginary.q,u.q);
+    fmpq_poly_scalar_mul_fmpq(b.q,real.q,v.q);
+    fmpq_poly_sub(a.q,a.q,b.q);
+    if (!fmpq_poly_is_zero(a.q)) return std::nullopt;
+    Poly monic;
+    fmpq_poly_scalar_mul_fmpq(a.q,real.q,u.q);
+    fmpq_poly_scalar_mul_fmpq(b.q,imaginary.q,v.q);
+    fmpq_poly_add(monic.q,a.q,b.q);
+    fmpq_mul(n.q,u.q,u.q); fmpq_mul(t.q,v.q,v.q); fmpq_add(n.q,n.q,t.q);
+    fmpq_poly_scalar_div_fmpq(monic.q,monic.q,n.q);
+    const auto &split = factorization(monic,bits);
+    B scale, shift;
+    arb_set_fmpq(acb_realref(scale.raw()),alpha.real.raw(),bits);
+    arb_set_fmpq(acb_imagref(scale.raw()),alpha.imaginary.raw(),bits);
+    arb_set_fmpq(acb_realref(shift.raw()),beta.real.raw(),bits);
+    arb_set_fmpq(acb_imagref(shift.raw()),beta.imaginary.raw(),bits);
+    std::vector<Pole> result;
+    for (const auto &[factor,exponent] : split)
+      for (const auto &root : factors_[factor].roots) {
+        B image;
+        acb_mul(image.raw(),root.raw(),scale.raw(),bits);
+        acb_add(image.raw(),image.raw(),shift.raw(),bits);
+        result.push_back({std::move(image),exponent});
+      }
+    charts_.emplace(std::move(key),result);
+    return result;
+  }
+ private:
+  struct Poly {
+    fmpq_poly_t q;
+    Poly() { fmpq_poly_init(q); }
+    ~Poly() { fmpq_poly_clear(q); }
+    Poly(const Poly &) = delete;
+    Poly &operator=(const Poly &) = delete;
+  };
+  struct Number {
+    fmpq_t q;
+    Number() { fmpq_init(q); }
+    ~Number() { fmpq_clear(q); }
+    Number(const Number &) = delete;
+    Number &operator=(const Number &) = delete;
+  };
+  // A monic irreducible real polynomial in x and its simple complex roots.
+  struct Factor { std::unique_ptr<Poly> polynomial; std::vector<B> roots; };
+  using Split = std::vector<std::pair<unsigned,unsigned>>; // factor, exponent
+  static std::string text(const fmpq_poly_t polynomial) {
+    char *raw = fmpq_poly_get_str(polynomial);
+    if (!raw) throw std::bad_alloc();
+    std::string result(raw); flint_free(raw); return result;
+  }
+  // Exact factorization of a monic real polynomial into cached factors.
+  const Split &factorization(const Poly &monic, slong bits) {
+    auto key = text(monic.q);
+    if (auto found = splits_.find(key); found != splits_.end()) return found->second;
+    Split split;
+    Poly rest, quotient;
+    fmpq_poly_set(rest.q,monic.q);
+    // Factors seen before are removed by exact division.
+    for (unsigned k=0;k<factors_.size() && fmpq_poly_degree(rest.q)>0;++k) {
+      const auto &factor = factors_[k].polynomial->q;
+      unsigned exponent = 0;
+      while (fmpq_poly_degree(factor)<=fmpq_poly_degree(rest.q) &&
+             fmpq_poly_divides(quotient.q,rest.q,factor)) {
+        fmpq_poly_swap(rest.q,quotient.q); ++exponent;
+      }
+      if (exponent) split.emplace_back(k,exponent);
+    }
+    if (fmpq_poly_degree(rest.q)>0) {
+      struct Integer {
+        fmpz_poly_t z; fmpz_poly_factor_t factors;
+        Integer() { fmpz_poly_init(z); fmpz_poly_factor_init(factors); }
+        ~Integer() { fmpz_poly_factor_clear(factors); fmpz_poly_clear(z); }
+      } integer;
+      fmpq_poly_get_numerator(integer.z,rest.q);
+      fmpz_poly_factor(integer.factors,integer.z);
+      for (slong i=0;i<integer.factors->num;++i) {
+        if (fmpz_poly_degree(integer.factors->p+i)<1) continue;
+        auto polynomial = std::make_unique<Poly>();
+        fmpq_poly_set_fmpz_poly(polynomial->q,integer.factors->p+i);
+        fmpq_poly_make_monic(polynomial->q,polynomial->q);
+        auto name = text(polynomial->q);
+        auto found = names_.find(name);
+        if (found == names_.end()) {
+          Factor factor{std::move(polynomial),{}};
+          for (auto &root : isolated_roots(factor.polynomial->q,bits)) {
+            if (root.multiplicity != 1)
+              throw std::logic_error("rational circuit irreducible factor has a repeated root");
+            factor.roots.push_back(std::move(root.value));
+          }
+          found = names_.emplace(std::move(name),unsigned(factors_.size())).first;
+          factors_.push_back(std::move(factor));
+        }
+        split.emplace_back(found->second,unsigned(integer.factors->exp[i]));
+      }
+    }
+    return splits_.emplace(std::move(key),std::move(split)).first->second;
+  }
+  std::mutex mutex_;
+  std::vector<Factor> factors_;
+  std::map<std::string,unsigned> names_;
+  std::map<std::string,Split> splits_;
+  std::map<std::string,std::vector<Pole>> charts_;
+};
+// The value of a constant of Q(I), if the expression is one.
+inline std::optional<Scalar> gaussian(const Exact &value) {
+  const auto part = [&](const std::vector<Exact::Term> &terms) -> std::optional<Scalar> {
+    Scalar sum;
+    for (const auto &term : terms) {
+      unsigned ipower = 0;
+      for (std::size_t i=0;i<term.powers.size();++i) if (term.powers[i]) {
+        if (value.variables()[i] != "I") return std::nullopt;
+        ipower = term.powers[i] % 4;
+      }
+      auto q = ipower >= 2 ? -term.coefficient : term.coefficient;
+      if (ipower % 2) sum.imaginary += q;
+      else sum.real += q;
+    }
+    return sum;
+  };
+  const auto n = part(value.numerator_terms()), q = part(value.denominator_terms());
+  if (!n || !q) return std::nullopt;
+  const Rational norm = q->real*q->real + q->imaginary*q->imaginary;
+  if (norm.is_zero()) return std::nullopt;
+  return Scalar{(n->real*q->real + n->imaginary*q->imaginary)/norm,
+                (n->imaginary*q->real - n->real*q->imaginary)/norm};
+}
+// The chart variable of the compiled entries is t, with x = from + width*t
+// for the variable x of the cache. Without a cache, or with a path that is
+// not a constant of Q(I), compile isolates the poles of every denominator
+// itself.
+struct AffinePullback {
+  PoleCache *cache = nullptr;
+  Scalar from, width;
+  AffinePullback() = default;
+  AffinePullback(PoleCache &shared, const Exact &start, const Exact &step) {
+    const auto a = gaussian(start), b = gaussian(step);
+    if (!a || !b || detail::zero(*b)) return;
+    cache = &shared; from = *a; width = *b;
+  }
+};
+
 inline Compiled compile(const std::vector<RationalLineEntry> &entries,
                         unsigned dimension, std::size_t xi,
                         std::optional<std::size_t> ei, unsigned epsilon_high,
-                        unsigned expected_order, const Options &options = {}) {
+                        unsigned expected_order, const Options &options = {},
+                        const AffinePullback *pullback = nullptr) {
   if (!dimension || dimension>options.max_dimension || !expected_order ||
       expected_order>1000 || epsilon_high>options.max_epsilon_degree ||
       epsilon_high==std::numeric_limits<unsigned>::max() ||
@@ -259,23 +466,34 @@ inline Compiled compile(const std::vector<RationalLineEntry> &entries,
   using Key=std::vector<std::pair<unsigned,unsigned>>;
   std::map<Key,unsigned> denominators;
   std::map<std::pair<unsigned,unsigned>,unsigned> streams;
-  for (const auto &entry:entries) {
+  // What one coefficient contributes, apart from its row and column. A batch
+  // of observable rows repeats the entries of one block row after row: a
+  // coefficient equal to the one met at the same place of the previous
+  // repetition reuses its interned numerator and denominator.
+  struct Seen {
+    const RationalLineEntry *entry;
+    std::size_t terms = 0;       // exact terms visited for this coefficient
+    bool used = false;           // false: the entry cannot reach the window
+    unsigned denominator = 0, lag = 0;
+    std::vector<Block> numerator;
+  };
+  std::vector<Seen> seen;
+  std::vector<unsigned> trace; // per entry so far, its index in `seen`
+  std::size_t cursor=0;        // the entry of `trace` the next one is compared with
+  const auto analyse=[&](const RationalLineEntry &entry) {
     const auto &a=entry.coefficient;
-    if (entry.row>=dimension || entry.column>=dimension || xi>=a.variable_count() ||
-        (ei && *ei>=a.variable_count()) || a.variables()[xi]=="I" ||
-        (ei && a.variables()[*ei]=="I"))
-      throw std::invalid_argument("rational circuit sparse or variable index");
+    Seen result{&entry,0,false,0,0,{}};
     auto numerator=compiler.support(a,a.numerator_terms(),xi,ei);
     auto denominator=compiler.support(a,a.denominator_terms(),xi,ei);
     if (denominator.empty())
       throw UnsupportedDomain("rational circuit denominator is zero after I specialization");
-    if (numerator.empty()) continue;
+    if (numerator.empty()) return result;
     const unsigned nv=numerator.begin()->first, dv=denominator.begin()->first;
     const std::uint64_t positive=std::uint64_t(entry.epsilon)+nv;
     if (positive<dv)
       throw UnsupportedDomain("rational circuit requires an epsilon-regular connection");
     const std::uint64_t valuation=positive-dv;
-    if (valuation>epsilon_high) continue; // Proven nonnegative valuation.
+    if (valuation>epsilon_high) return result; // Proven nonnegative valuation.
     // Exact keeps integer polynomials: they stay integers here, so that their
     // shifts to a dyadic chart centre are short exact numbers (see prepare).
     auto qs=compiler.blocks(denominator,dv,0);
@@ -293,16 +511,58 @@ inline Compiled compile(const std::vector<RationalLineEntry> &entries,
       // the root of prod(1+z/|root|)^multiplicity=2, a third or less of the
       // pole distance for a triple pole. With the roots known, the quotient
       // is instead enclosed by its midpoint recurrence plus a majorant.
-      try { denominator.poles=detail::poles(p); denominator.majorized=true; }
+      try {
+        std::optional<std::vector<Pole>> known;
+        if (pullback && pullback->cache)
+          known=pullback->cache->poles(p,pullback->from,pullback->width);
+        denominator.poles=known?std::move(*known):detail::poles(p);
+        denominator.majorized=true;
+      }
       catch (const std::runtime_error &) {}
       out.denominators.push_back(std::move(denominator));
     }
-    const unsigned did=denpos->second;
+    result.used=true; result.denominator=denpos->second;
+    result.lag=detail::lag(ps,out); result.numerator=std::move(ps);
+    return result;
+  };
+  for (const auto &entry:entries) {
+    const auto &a=entry.coefficient;
+    if (entry.row>=dimension || entry.column>=dimension || xi>=a.variable_count() ||
+        (ei && *ei>=a.variable_count()) || a.variables()[xi]=="I" ||
+        (ei && a.variables()[*ei]=="I"))
+      throw std::invalid_argument("rational circuit sparse or variable index");
+    unsigned id=0;
+    bool repeated=false;
+    if (!trace.empty()) {
+      id=trace[cursor];
+      const auto &earlier=*seen[id].entry;
+      repeated=earlier.epsilon==entry.epsilon &&
+               &earlier.coefficient.variables()==&a.variables() &&
+               earlier.coefficient==a;
+    }
+    if (repeated) {
+      // The same terms would be visited again: they count against the budget.
+      if (seen[id].terms>out.options.max_terms-out.visited_terms)
+        throw std::length_error("rational circuit exact term budget exhausted");
+      out.visited_terms+=seen[id].terms;
+      ++cursor;
+    } else {
+      const auto before=out.visited_terms;
+      auto fresh=analyse(entry);
+      fresh.terms=out.visited_terms-before;
+      id=unsigned(seen.size());
+      seen.push_back(std::move(fresh));
+      cursor=0;
+    }
+    trace.push_back(id);
+    const auto &item=seen[id];
+    if (!item.used) continue;
+    const unsigned did=item.denominator;
     auto [position,inserted]=streams.emplace(std::make_pair(entry.column,did),out.streams.size());
     if (inserted) out.streams.push_back({entry.column,did,out.denominators[did].lag});
-    out.streams[position->second].lag=std::max(out.streams[position->second].lag,detail::lag(ps,out));
+    out.streams[position->second].lag=std::max(out.streams[position->second].lag,item.lag);
     out.row_entries[entry.row].push_back(unsigned(out.entries.size()));
-    out.entries.push_back({entry.row,position->second,std::move(ps)});
+    out.entries.push_back({entry.row,position->second,item.numerator});
   }
   return Compiled(std::move(out));
 }

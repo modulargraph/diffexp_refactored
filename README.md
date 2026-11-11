@@ -178,8 +178,8 @@ cached: recomputing them is faster than verifying a stored copy.
 `--method adjoint|factored|auto` selects the linear method; the default is
 `adjoint`. `--basis-scan-seconds N` bounds the per-level search for an internal
 master basis with a smaller exact connection (0 disables it).
-`--moving-poles remove|exchange` (experimental, default `keep`) removes the
-denominator factors that mix the merge parameter with epsilon
+`--moving-poles keep|remove|exchange` (default `remove`; `keep` with `--epsilon-shift`)
+controls the removal of the denominator factors that mix the merge parameter with epsilon
 ([docs/moving-poles.md](docs/moving-poles.md)). The options
 `--method values`, `--ft-transport` and `--ft-transport-digits` were removed and
 are rejected with that message. Numerical defaults are ordinary order 80,

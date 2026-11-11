@@ -119,7 +119,9 @@ its residue field. All nine mixed factors met in either ordering are removed.
 
 ## What it buys
 
-Two options install the result (default `--moving-poles keep`):
+Two options install the result. `diffexp ft` uses `remove` by default and
+`keep` for an `--epsilon-shift` sample, where the removal costs exact work
+and buys nothing measurable:
 
 - `--moving-poles remove` (`ft`): an internal basis per level, the smallest
   connection among cached-integral exchanges and closure rows. The level's

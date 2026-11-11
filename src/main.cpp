@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
       bool numerical_cache=true;
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
-      std::string henn_basis,epsilon_shift,moving_poles="keep";
+      std::string henn_basis,epsilon_shift,moving_poles;
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
@@ -208,7 +208,9 @@ int main(int argc, char** argv) {
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
-      // Experimental: masters without moving poles (docs/moving-poles.md).
+      // Masters without moving poles (docs/moving-poles.md). An expanded run
+      // removes them by default; a sample gains nothing from it.
+      if(moving_poles.empty())moving_poles=command=="ft" && epsilon_shift.empty()?"remove":"keep";
       boost::json::array moving_pole_levels;double moving_pole_seconds=0;
       const auto describe_moving_poles=[&](std::size_t depth,const diffexp::moving_poles::Result& result) {
         moving_pole_seconds+=result.seconds;
@@ -503,9 +505,9 @@ Feynman-trick recursion
                                   then multiplies (epsilon-Q)^k, and order 0 is the integral in
                                   d0-2Q dimensions (docs/recursion-cost-experiments.md)
   --moving-poles keep|remove|exchange
-                                  experimental (default keep): per level, remove the denominator
-                                  factors of the connection that mix x with epsilon
-                                  (docs/moving-poles.md). remove (ft): in an internal basis, a
+                                  per level, the denominator factors of the connection that mix
+                                  x with epsilon (docs/moving-poles.md; default remove for ft,
+                                  keep with --epsilon-shift). remove (ft): in an internal basis, a
                                   master replaced by a cached integral or an exact combination;
                                   the basis scan of such a level starts from this basis.
                                   exchange (prepare/ft): the level's masters themselves, a master

@@ -145,7 +145,7 @@ the changes in this note (the last column is the transport alone).
 | | Before | Now | Transport |
 | --- | ---: | ---: | ---: |
 | Kite | 12.5 | 4.2 | 9.1 -> 2.2 |
-| Planar double box | 40.8 | 16.3 | 34.5 -> 13.3 |
+| Planar double box | 40.8 | 12.3 | 34.5 -> 9.9 |
 | Four-loop banana, expanded | 240.8 | 43.7 | 218.8 -> 33.2 |
 | Four-loop banana, one sample (epsilon = 1/400) | 76.9 | 7.8 | 23.7 -> 4.0 |
 | Double pentagon, one sample (four threads) | 1360 | 157 | 413 -> 123 |
@@ -236,6 +236,14 @@ overlap point its rank is full and no shear exists, so the inverse is used
 directly; the operator step of the sample drops from 13.9 s to 1.6 s and
 its value agrees with the stored one to 37 digits. The expanded recursion
 keeps the exact gauge, whose by-product certifies principal parts.
+
+**Moving poles.** A level's connection can have denominator factors that
+mix the merge parameter with epsilon. They are apparent and can be removed
+exactly by exchanging one master ([moving-poles.md](moving-poles.md)).
+Removing them narrows no epsilon window, but where one exists the
+connection shrinks: level 2 of the double box from 8002 to 3321 characters,
+and the run from 16.3 s to 12.3 s. `diffexp ft` now does this by default;
+the kite and the bananas have no such factor and are unchanged.
 
 **What is left.** With the pair above the transport is again three quarters
 of an expanded run. A run with the overlap moved out to a quarter of the

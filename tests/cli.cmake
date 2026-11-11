@@ -109,13 +109,21 @@ string(JSON scans GET "${native}" basis_selection scans)
 if(series_seconds LESS 0 OR operator_seconds LESS 0 OR selection_seconds LESS 0 OR scans LESS 1)
   message(FATAL_ERROR "FT phase timings missing: ${native}")
 endif()
-# Moving-pole removal is opt-in. Both modes report themselves, and on a family
-# without moving poles they leave the answer untouched.
+# An expanded run removes moving poles by default. Every mode but keep reports
+# itself, and on a family without moving poles all leave the answer untouched.
 string(JSON default_mode ERROR_VARIABLE no_report GET "${resumed}" moving_poles mode)
-if(no_report STREQUAL "NOTFOUND")
-  message(FATAL_ERROR "Default FT run reports a moving-pole mode: ${resumed}")
+if(NOT default_mode STREQUAL "remove")
+  message(FATAL_ERROR "Default FT run does not report moving-pole removal: ${resumed}")
 endif()
 string(JSON resumed_coefficients GET "${resumed}" coefficients)
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --cache "${ibp_cache}" --no-numerical-cache --moving-poles keep --json
+  OUTPUT_VARIABLE kept ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON kept_mode ERROR_VARIABLE no_report GET "${kept}" moving_poles mode)
+string(JSON kept_coefficients GET "${kept}" coefficients)
+if(NOT status EQUAL 0 OR no_report STREQUAL "NOTFOUND" OR NOT kept_coefficients STREQUAL resumed_coefficients)
+  message(FATAL_ERROR "--moving-poles keep failed, reported a mode or changed the answer: ${errors} ${kept}")
+endif()
 foreach(mode remove exchange)
   execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
     --cache "${ibp_cache}" --no-numerical-cache --moving-poles ${mode} --json

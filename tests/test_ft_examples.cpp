@@ -5,6 +5,7 @@
 // METHOD is adjoint (default), factored or auto.
 // '-' (or no FIRE path) prepares the levels with the built-in IBP solver.
 // Output: one Boost.JSON report on stdout, phase progress on stderr.
+#include "diffexp/moving_poles.hpp"
 #include "diffexp/recursion_pipeline.hpp"
 #include "diffexp/level_cache.hpp"
 #include "diffexp/ibp_solver_provider.hpp"
@@ -92,6 +93,9 @@ int main(int argc,char** argv) {
     report["exact_seconds"]=seconds(t);report["levels"]=graph.nodes.size();
     phase="FT numerical evaluation";t=Clock::now();
     numerical.progress=[&](std::size_t depth,const std::string& text,int high){std::cerr<<seconds(start)<<"s numerical level "<<depth<<": "<<text<<", epsilon through "<<high<<'\n';};
+    // As the CLI does by default: internal bases without moving poles.
+    for(auto& [depth,basis]:moving_poles::bases(graph,{},{}))numerical.physical_bases.insert_or_assign(depth,std::move(basis));
+    numerical.scan_physical_bases=true;
     recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(requested_top);
     report["numerical_seconds"]=seconds(t);
     const auto& stats=evaluator.statistics();report["numerical_statistics"]={{"exact_plans",stats.exact_plans},{"leaf_evaluations",stats.leaf_evaluations},{"numeric_evaluations",stats.numeric_evaluations},{"refinements",stats.refinements},{"cache_hits",stats.cache_hits},{"endpoint_series_built",stats.endpoint_series_built}};

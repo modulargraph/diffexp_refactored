@@ -19,6 +19,7 @@
 #include "diffexp/fire_modular.hpp"
 #include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/henn_boundary.hpp"
+#include "diffexp/epsilon_sampling.hpp"
 #include "diffexp/moving_poles.hpp"
 #endif
 #include <iostream>
@@ -46,7 +47,7 @@ int main(int argc, char** argv) {
   try {
     const std::string command = argc > 1 ? argv[1] : "--help";
     if (command == "--version") {
-      std::cout << "DiffExp 2.2.0 (standalone C++20 / FLINT)\n";
+      std::cout << "DiffExp 2.2.1 (standalone C++20 / FLINT)\n";
     } else if(command == "transport") {
       json_mode=true;if(argc!=3)throw std::invalid_argument("transport requires a JSON file or -");
       return diffexp::transport::run_file(argv[2]);
@@ -74,6 +75,12 @@ int main(int argc, char** argv) {
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
+      auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
+      unsigned ibp_max_degree=0;
+      unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
+      // What a sample process is started with: this command line without the
+      // options that select and shape the sampling itself.
+      std::vector<std::string> sample_arguments;
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       // As for the chart expansion, the built-in solver leaves the cores that
@@ -83,7 +90,12 @@ int main(int argc, char** argv) {
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
-        if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;continue;}
+        if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;sample_arguments.push_back(option);continue;}
+        if(option=="--leaf-digits")leaf_digits_given=true;
+        if(option!="--epsilon-strategy" && option!="--samples" && option!="--sample-step" && option!="--sample-jobs" &&
+            option!="--sample-poles" && option!="--epsilon-order" && option!="--epsilon-shift" && i+1<argc) {
+          sample_arguments.push_back(option);sample_arguments.push_back(argv[i+1]);
+        }
         if(option=="--ft-transport" || option=="--ft-transport-digits")
           throw std::invalid_argument(option+" was removed: Taylor transport is the only ordinary method");
         if(i+1>=argc)throw std::invalid_argument("missing "+command+" option value");
@@ -96,6 +108,10 @@ int main(int argc, char** argv) {
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
           (option=="--ibp-dots"?ibp_dots:ibp_numerators)=n;
         }
+        else if(option=="--ibp-max-degree"){
+          const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_max_degree);
+          if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||ibp_max_degree<4||ibp_max_degree>256)throw std::invalid_argument("IBP maximal degree must be 4..256");
+        }
         else if(option=="--ibp-threads"){
           const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_threads);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||!ibp_threads||ibp_threads>256)throw std::invalid_argument("IBP threads must be 1..256");
@@ -104,6 +120,22 @@ int main(int argc, char** argv) {
         else if(option=="--cache")cache=option_value;
         else if(option=="--henn-basis")henn_basis=option_value;
         else if(command=="ft" && option=="--epsilon-shift")epsilon_shift=option_value;
+        else if(command=="ft" && option=="--epsilon-strategy") {
+          epsilon_strategy=option_value;
+          if(epsilon_strategy!="expand" && epsilon_strategy!="sample")throw std::invalid_argument("--epsilon-strategy must be expand or sample");
+        }
+        else if(command=="ft" && option=="--sample-step") {
+          sample_step=option_value;
+          if(diffexp::Rational(sample_step).sign()<=0)throw std::invalid_argument("--sample-step must be a positive rational");
+        }
+        else if(command=="ft" && (option=="--samples" || option=="--sample-jobs" || option=="--sample-poles")) {
+          const std::string value=option_value;unsigned number=0;
+          const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
+          if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())throw std::invalid_argument(option+" must be a nonnegative integer");
+          if(option=="--samples"){if(number<4 || number>200 || number%2)throw std::invalid_argument("--samples must be even, 4..200");samples=number;}
+          else if(option=="--sample-jobs"){if(!number || number>1024)throw std::invalid_argument("--sample-jobs must be in 1..1024");sample_jobs=number;}
+          else {if(number>64)throw std::invalid_argument("--sample-poles must be in 0..64");sample_poles=static_cast<int>(number);}
+        }
         else if(option=="--moving-poles") {
           moving_poles=option_value;
           if(moving_poles!="keep" && moving_poles!="remove" && moving_poles!="exchange")throw std::invalid_argument("--moving-poles must be keep, remove or exchange");
@@ -203,6 +235,13 @@ int main(int argc, char** argv) {
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,
             options.reduction.provider.timeout_seconds,ibp_validation=="strict");
           native.dots=ibp_dots;native.numerators=ibp_numerators;native.threads=ibp_threads;
+          // A larger total degree comes with larger degrees per variable and
+          // the samples to see them.
+          if(ibp_max_degree) {
+            native.max_degree=ibp_max_degree;
+            native.max_variable_degree=std::max(native.max_variable_degree,4*ibp_max_degree);
+            native.max_samples_per_prime=std::max<std::size_t>(native.max_samples_per_prime,64u*ibp_max_degree);
+          }
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {
@@ -290,7 +329,74 @@ int main(int argc, char** argv) {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
       };
       report_moving_poles();
-      if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
+      if(command=="ft" && epsilon_strategy=="sample") {
+        namespace es=diffexp::epsilon_sampling;
+        if(!epsilon_shift.empty())throw std::invalid_argument("--epsilon-strategy sample chooses its own shifts; do not combine it with --epsilon-shift");
+        if(canonical_basis)throw std::invalid_argument("--epsilon-strategy sample cannot be combined with --henn-basis");
+        const unsigned loops=configuration.family.momenta.loops,pole_bound=2*loops;
+        if(!samples){samples=pole_bound+epsilon_order+5;samples+=samples%2;samples=std::max(samples,8u);}
+        // The leaf is re-expanded from its Laurent series at zero, and a deep
+        // recursion multiplies what that loses: ask it for fewer digits.
+        if(!leaf_digits_given) {
+          sample_arguments.push_back("--leaf-digits");
+          sample_arguments.push_back(std::to_string(std::min<unsigned>(numerical.leaf_digits,graph.nodes.size()>=6?12:16)));
+        }
+        unsigned cores=std::max(1u,std::thread::hardware_concurrency());
+        {double load=0;if(getloadavg(&load,1)==1)cores=static_cast<unsigned>(std::max(1,static_cast<int>(cores)-static_cast<int>(load+0.5)));}
+        if(!sample_jobs)sample_jobs=std::min(cores,samples);
+        std::error_code ignored;
+        auto self=std::filesystem::read_symlink("/proc/self/exe",ignored);
+        if(ignored || self.empty())self=argv[0];
+        std::vector<std::string> child{self.string(),"ft",argv[2]};
+        child.insert(child.end(),sample_arguments.begin(),sample_arguments.end());
+        if(std::find(sample_arguments.begin(),sample_arguments.end(),"--cache")==sample_arguments.end()){child.push_back("--cache");child.push_back(cache.string());}
+        child.insert(child.end(),{"--json","--epsilon-order","0"});
+        const auto points=es::nodes(diffexp::Rational(sample_step),samples);
+        progress<<"Epsilon sampling: "<<samples<<" samples at epsilon = +-k*"<<sample_step<<", "<<sample_jobs<<" at a time.\n"<<std::flush;
+        const auto numerical_start=std::chrono::steady_clock::now();
+        const auto done=es::run(child,points,cache/"epsilon-samples",sample_jobs,std::max(1u,cores/sample_jobs),
+          [&](const es::Sample& sample,std::size_t finished,std::size_t total) {
+            progress<<"  sample "<<finished<<"/"<<total<<" at epsilon = "<<sample.epsilon.str()<<": "<<sample.seconds<<" s; elapsed "
+              <<std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count()<<" s\n"<<std::flush;
+          });
+        // The cancellations of the fit are exact rational arithmetic on the
+        // nodes; carry the sample values well beyond their own accuracy.
+        diffexp::kernel::ComplexBall::set_precision(std::max<slong>(numerical.working_bits,1024)+64*samples);
+        std::vector<std::vector<diffexp::kernel::ComplexBall>> values(done.front().values.size());
+        double cpu=0;boost::json::array sample_report;
+        for(const auto& sample:done) {
+          cpu+=sample.seconds;sample_report.push_back(boost::json::object{{"epsilon",sample.epsilon.str()},{"numerical_seconds",sample.seconds}});
+          for(std::size_t c=0;c<values.size();++c)values[c].push_back(sample.values.at(c));
+        }
+        const unsigned poles=sample_poles>=0?static_cast<unsigned>(sample_poles):es::pole_order(points,values,pole_bound);
+        const auto fitted=es::fit(points,values,poles,epsilon_order);
+        report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
+        report["timings"].as_object()["sample_cpu_seconds"]=cpu;
+        report["epsilon_strategy"]="sample";
+        report["epsilon_sampling"]=boost::json::object{{"samples",samples},{"step",sample_step},{"jobs",sample_jobs},{"pole_order",poles},
+          {"pole_order_detected",sample_poles<0},{"points",std::move(sample_report)}};
+        boost::json::array rows,changes;
+        for(std::size_t c=0;c<fitted.coefficients.size();++c) {
+          boost::json::array powers,change;
+          for(std::size_t k=0;k<fitted.coefficients[c].size();++k) {
+            powers.push_back(diffexp::ball_json(fitted.coefficients[c][k],45));
+            change.push_back(std::isfinite(fitted.log2_change[c][k])?std::pow(2.0,fitted.log2_change[c][k]):0.0);
+            if(!json_mode){progress<<"Scalar "<<c+1<<" epsilon^"<<static_cast<long>(k)-static_cast<long>(poles)<<" = ";acb_printn(fitted.coefficients[c][k].raw(),32,0);progress<<'\n';}
+          }
+          rows.push_back(std::move(powers));changes.push_back(std::move(change));
+        }
+        report["epsilon_low"]=-static_cast<long>(poles);report["epsilon_high"]=epsilon_order;
+        report["coefficient_order"]="component,epsilon";
+        report["coefficients"]=std::move(rows);
+        report["fit_change_without_outermost_samples"]=std::move(changes);
+        report["component_basis"]="requested_scalar";
+        report["ball_encoding"]="Arb decimal interval strings for real and imaginary parts; radii include the fit change, an estimate";
+        report["omitted_tails_certified"]=false;
+        report["working_bits"]=numerical.working_bits;
+        progress<<"Laurent coefficients fitted from "<<samples<<" samples (pole order "<<poles<<(sample_poles<0?", detected":"")
+          <<"); radii are estimates from dropping the two outermost samples.\n";
+      }
+      else if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
         numerical.progress=[&progress,start=std::chrono::steady_clock::now()](std::size_t depth,const std::string& phase,int high) {
           const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
@@ -463,7 +569,7 @@ int main(int argc, char** argv) {
       return diffexp::run_henn_nonplanar(argv[2],order);
     } else if (command == "backend-info") {
       boost::json::object information{{"standalone_cpp",true},{"librarylink",false}};
-      information["package_version"]="2.2.0";information["native_transport"]=true;
+      information["package_version"]="2.2.1";information["native_transport"]=true;
       information["feynman_configuration_schema"]="DiffExp.FeynmanFamily/v1";
 #if defined(__unix__) || defined(__APPLE__)
       information["ibp_solver"]=true;information["ibp_default_provider"]="ibp-solver";information["ibp_prime_bits"]=61;
@@ -489,6 +595,18 @@ Feynman-trick recursion
   --cache DIRECTORY               exact level closures and numerical checkpoints
                                   (default: diffexp-exact-cache in the temporary directory)
   --epsilon-order N               0..100 (default: the configuration's epsilon_order)
+  --epsilon-strategy expand|sample
+                                  expand (default) carries the Laurent coefficients through the
+                                  recursion. sample evaluates the integral at shifted dimensions
+                                  in parallel processes and fits the coefficients: the route for
+                                  families whose expanded recursion is too deep
+                                  (docs/performance.md). Its radii are estimates.
+  --samples N                     even, 4..200 (default 2*loops + epsilon order + 5, at least 8)
+  --sample-step Q                 samples at epsilon = +-k*Q (default 1/400)
+  --sample-jobs N                 samples run at a time (default: one per idle hardware thread)
+  --sample-poles N                order of the pole at epsilon = 0 (default: detected, at most
+                                  2*loops). Samples ask the leaf for min(leaf digits, 16), or 12
+                                  from six levels on, unless --leaf-digits is given.
   --endpoint-order N              1..1000: order of the exact series at the endpoints
   --overlap-ratio R               4..65536: the series is summed at most 1/R of the way to the
                                   nearest other singular point, where the transport starts.
@@ -533,6 +651,9 @@ IBP preparation (prepare/ft)
                                   auto selects the built-in ibp-solver unless --fire names a FIRE
                                   executable
   --ibp-dots N --ibp-numerators N seed controls of the built-in solver
+  --ibp-max-degree N              4..256 (default 16): largest total degree, in the merge
+                                  parameter and the dimension together, of a reduction
+                                  coefficient the built-in solver reconstructs
   --ibp-threads N                 threads of the built-in solver (default: the hardware threads
                                   idle at start-up). Trace replays of announced sample points run
                                   in batches, and complete eliminations at points fixed in advance

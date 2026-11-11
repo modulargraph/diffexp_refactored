@@ -66,13 +66,28 @@ of the rows and is slower and less accurate on every family measured.
 
 ## Epsilon sampling
 
-`diffexp ft --epsilon-shift Q --epsilon-order 0` evaluates the integral in
-d0-2Q dimensions. At a generic Q no level has epsilon poles, every level
-needs only order zero of its child, and the levels above the leaf are
-specialised to the numeric dimension. The scalar leaf is re-expanded from
-its Laurent series at zero, so deep families need a lower `--leaf-digits`.
-`tools/experiments/epsilon_sampling.py` prepares once, runs symmetric
-samples in parallel and fits the Laurent coefficients.
+`diffexp ft --epsilon-strategy sample` prepares the recursion once,
+evaluates the integral at the shifted dimensions epsilon = +-k*step in
+parallel processes and fits the Laurent coefficients
+(`epsilon_sampling.hpp`). At a generic shift no level has epsilon poles,
+every level needs only order zero of its child, and the levels above the
+leaf are specialised to the numeric dimension.
+
+- `--samples N` (default 2*loops + epsilon order + 5, at least 8),
+  `--sample-step Q` (default 1/400) and `--sample-jobs N` (default one per
+  idle hardware thread) shape the run. The family file takes
+  `epsilon_strategy`, `samples` and `sample_step` under `numerical`.
+- The order of the pole is detected from the growth of the samples towards
+  zero (at most 2*loops); `--sample-poles N` fixes it.
+- The fit is the polynomial through epsilon^poles times the samples, in
+  ball arithmetic. Each coefficient's radius is widened by the change it
+  makes to drop the two outermost samples: an estimate of the interpolation
+  error, not a bound. JSON also reports it as
+  `fit_change_without_outermost_samples`.
+- The scalar leaf is re-expanded from its Laurent series at zero, which
+  costs digits in deep recursions: samples ask the leaf for at most 16
+  digits, 12 from six levels on, unless `--leaf-digits` is given.
+- One sample alone is `--epsilon-shift Q --epsilon-order 0`.
 
 Accuracy of the finite part of the four-loop equal-mass banana from samples
 at +-k/400 (reference 39.655526834297652...):

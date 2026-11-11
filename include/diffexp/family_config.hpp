@@ -15,6 +15,11 @@ struct Configuration {
   // template's value, which is a default and not a request.
   bool epsilon_order_given=false;
   std::string ibp_provider="auto";
+  // How the Laurent coefficients in epsilon are obtained: "expand" carries
+  // them through the recursion, "sample" evaluates at shifted dimensions and
+  // fits (epsilon_sampling.hpp). samples=0 chooses the number.
+  std::string epsilon_strategy="expand",sample_step="1/400";
+  unsigned samples=0;
 };
 inline bool same_geometry(const feynman::ExampleFamily& a,const feynman::ExampleFamily& b) {
   if(a.physical_count!=b.physical_count || a.dimension_at_epsilon_zero!=b.dimension_at_epsilon_zero ||
@@ -92,7 +97,7 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("max_sources_per_level"))c.preparation.max_sources_per_level=integer(*v,1,100000,"source budget");
   }
   if(auto p=o.if_contains("numerical")) {
-    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap","overlap_ratio","direct_endpoint_functionals"},"numerical");
+    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap","overlap_ratio","epsilon_strategy","samples","sample_step","direct_endpoint_functionals"},"numerical");
     if(auto v=a.if_contains("direct_endpoint_functionals"))c.numerical.direct_endpoint_functionals=v->as_bool();
     if(auto v=a.if_contains("endpoint_order"))c.numerical.endpoint_order=integer(*v,1,1000,"endpoint order");
     if(auto v=a.if_contains("ordinary_order"))c.numerical.ordinary_order=integer(*v,8,1000,"ordinary order");
@@ -100,6 +105,12 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("leaf_digits"))c.numerical.leaf_digits=integer(*v,1,100000,"leaf digits");
     if(auto v=a.if_contains("contour_height"))c.numerical.contour_height=rational(*v);
     if(auto v=a.if_contains("overlap"))c.numerical.overlap=rational(*v);
+    if(auto v=a.if_contains("epsilon_strategy")) {
+      c.epsilon_strategy=std::string(v->as_string());
+      if(c.epsilon_strategy!="expand" && c.epsilon_strategy!="sample")throw std::invalid_argument("numerical epsilon_strategy must be expand or sample");
+    }
+    if(auto v=a.if_contains("samples"))c.samples=integer(*v,4,200,"samples");
+    if(auto v=a.if_contains("sample_step")){c.sample_step=std::string(v->as_string());if(Rational(c.sample_step).sign()<=0)throw std::invalid_argument("numerical sample_step must be positive");}
     if(auto v=a.if_contains("overlap_ratio"))c.numerical.overlap_ratio=integer(*v,4,65536,"overlap ratio");
     // Taylor charts are the only ordinary transport. "auto" and "taylor" from
     // earlier templates still mean exactly that; the removed backends and

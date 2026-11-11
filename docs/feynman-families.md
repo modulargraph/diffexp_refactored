@@ -77,7 +77,9 @@ Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 of zero-based positions in the current physical propagator list, after earlier
 merges. Anchors are exact rationals. CLI resource options override JSON fields.
 Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`
-and `endpoint_order` (the last two are chosen together when omitted).
+and `endpoint_order` (the last two are chosen together when omitted), and
+`epsilon_strategy` (`"expand"` or `"sample"`), `samples` and `sample_step` for
+[epsilon sampling](performance.md#epsilon-sampling).
 
 For Euclidean families the native code verifies positivity of the actual
 Symanzik polynomials before selecting its contour prescription. Other physical

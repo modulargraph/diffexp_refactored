@@ -1,6 +1,6 @@
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --version
   OUTPUT_VARIABLE version RESULT_VARIABLE status)
-if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.2.0")
+if(NOT status EQUAL 0 OR NOT version MATCHES "DiffExp 2.2.1")
   message(FATAL_ERROR "Version command failed: ${version}")
 endif()
 set(request "${DIFFEXP_SOURCE_DIR}/examples/logarithm.json")
@@ -174,6 +174,22 @@ foreach(mode remove exchange)
     message(FATAL_ERROR "--moving-poles ${mode} failed or changed a family without moving poles: ${errors} ${moved}")
   endif()
 endforeach()
+# The sampling strategy reproduces the expanded finite part of the sunrise.
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --cache "${ibp_cache}" --no-numerical-cache --epsilon-strategy sample --samples 8 --sample-jobs 2 --json
+  OUTPUT_VARIABLE sampled ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON sampled_strategy ERROR_VARIABLE no_report GET "${sampled}" epsilon_strategy)
+string(JSON sampled_poles ERROR_VARIABLE no_report GET "${sampled}" epsilon_sampling pole_order)
+string(JSON sampled_value ERROR_VARIABLE no_report GET "${sampled}" coefficients 0 0 real)
+if(NOT status EQUAL 0 OR NOT sampled_strategy STREQUAL "sample" OR NOT sampled_poles EQUAL 0 OR NOT sampled_value MATCHES "2\\.2367927002")
+  message(FATAL_ERROR "--epsilon-strategy sample failed on the sunrise: ${errors} ${sampled}")
+endif()
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --cache "${ibp_cache}" --epsilon-strategy sample --epsilon-shift 1/100 --json
+  OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
+if(status EQUAL 0 OR NOT output MATCHES "chooses its own shifts")
+  message(FATAL_ERROR "--epsilon-strategy sample accepted --epsilon-shift: ${output}")
+endif()
 file(REMOVE_RECURSE "${ibp_cache}")
 
 # Numerical options are rejected before the exact preparation starts: no IBP

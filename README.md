@@ -95,11 +95,12 @@ Coefficients are ordered by component, then epsilon power, beginning at
 - **Defaults.** 384 working bits, 28 leaf digits, Taylor order 80.
   `build/diffexp --help` lists every option;
   [performance](docs/performance.md) explains the ones that matter for speed.
-- **Large families.** The two-loop double pentagon
-  (`henn_double_pentagon_x0`, experimental) is computed by
-  [epsilon sampling](docs/performance.md#epsilon-sampling): preparation in
-  under three minutes, then independent samples of about 150 s each. Its
-  result has the expected leading poles but no independent reference.
+- **Large families.** `--epsilon-strategy sample` evaluates the integral at
+  shifted dimensions in parallel and fits the Laurent coefficients
+  ([epsilon sampling](docs/performance.md#epsilon-sampling)). It is how the
+  two-loop double pentagon (`henn_double_pentagon_x0`, experimental) is
+  computed; that result has the expected leading poles but no independent
+  reference.
 
 ## Mathematica
 

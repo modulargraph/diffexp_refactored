@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.2.1
+
+- `diffexp ft --epsilon-strategy sample` (family key
+  `numerical.epsilon_strategy`): the Laurent coefficients from samples at
+  shifted dimensions. The recursion is prepared once, the samples run as
+  parallel processes (`--samples`, `--sample-step`, `--sample-jobs`), the
+  pole order is detected (`--sample-poles` fixes it), and the fit reports
+  each coefficient with an estimated error. `epsilon_sampling.hpp` holds the
+  fit; `tools/experiments/epsilon_sampling.py` is removed.
+- `--ibp-max-degree N` raises the degree of reduction coefficients the
+  built-in solver reconstructs (default 16), with its per-variable degree and
+  sample budgets.
+- Singularity polynomials are factored into irreducibles before their roots
+  are isolated; a level with a denominator of degree in the hundreds no
+  longer stalls there.
+- Documentation describes the current state only; timings are near the top
+  of the README.
+
 ## 2.2.0
 
 - `diffexp ft` removes the denominator factors of a level's connection that

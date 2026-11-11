@@ -23,16 +23,15 @@ of these runs automatically.
 
 `examples/feynman/henn_double_pentagon_x0.json` is experimental and has no
 acceptance reference. `diffexp prepare` completes its exact recursion in about
-five minutes. The epsilon-expanded `diffexp ft` then runs for hours; the
+three minutes. The epsilon-expanded `diffexp ft` then runs for hours; the
 practical route is sampling,
 
 ```sh
-tools/experiments/epsilon_sampling.py examples/feynman/henn_double_pentagon_x0.json \
-  --poles 4 --samples 12 --step 1/400 --jobs 4 --cache /path/to/cache -- --leaf-digits 12
+build/diffexp ft examples/feynman/henn_double_pentagon_x0.json --cache /path/to/cache \
+  --epsilon-strategy sample --samples 12 --json
 ```
 
-which takes about 50 minutes on four cores
-([details](performance.md)).
+([details and timing](performance.md)).
 
 ## Original DiffExp examples
 

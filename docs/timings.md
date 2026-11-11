@@ -35,6 +35,12 @@ preparation 158 s on four threads (298 s on one); one epsilon sample about
 150 s on four threads; twelve samples give its Laurent coefficients through
 epsilon^0. See [performance.md](performance.md).
 
+`--epsilon-strategy sample` (preparation excluded, four cores): `box` with 8
+samples 0.9 s, giving epsilon^-2..0 to 1e-12, 3e-12 and 5e-7; `banana4` with
+14 samples 49.5 s (133 s of CPU), finite part to 4e-16. The double pentagon
+needs twelve samples of about 150 s each on four threads, or of one thread
+each side by side on a larger machine.
+
 Preparation of the built-in IBP solver, four threads against one: planar
 double box 3.4 s / 5.2 s, four-loop banana 15.3 s / 33.7 s.
 

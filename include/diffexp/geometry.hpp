@@ -75,8 +75,17 @@ inline std::vector<IsolatedRoot> isolated_roots(const fmpq_poly_t polynomial,slo
     Roots(const Roots&)=delete;
   };
   if(fmpq_poly_is_zero(polynomial))throw std::domain_error("identically zero singularity polynomial");
-  fmpq_poly_get_numerator(p.z,polynomial);fmpz_poly_factor_squarefree(p.factors,p.z);
+  // Irreducible factors, not only squarefree ones: a singularity polynomial
+  // of a large level has degree in the hundreds and is a product of small
+  // factors, whose roots are found at once, while the simultaneous iteration
+  // on the whole product does not converge in any reasonable time.
+  fmpq_poly_get_numerator(p.z,polynomial);fmpz_poly_factor(p.factors,p.z);
+  // Roots of different factors are distinct numbers, but their enclosures
+  // can overlap at the requested precision: then all are found again at
+  // twice the precision.
   std::vector<IsolatedRoot> out;
+  for(unsigned separation=0;;++separation,bits*=2) {
+  out.clear();
   for(slong i=0;i<p.factors->num;++i) {
     auto degree=fmpz_poly_degree(p.factors->p+i);
     if(degree<1)continue;
@@ -95,6 +104,11 @@ inline std::vector<IsolatedRoot> isolated_roots(const fmpq_poly_t polynomial,slo
       IsolatedRoot root{{},static_cast<unsigned>(p.factors->exp[i])};acb_set(root.value.raw(),roots.values+j);
       out.push_back(std::move(root));
     }
+  }
+  bool separated=true;
+  for(std::size_t i=0;i<out.size() && separated;++i)for(std::size_t j=i+1;j<out.size();++j)
+    if(acb_overlaps(out[i].value.raw(),out[j].value.raw())){separated=false;break;}
+  if(separated || separation==4)break;
   }
   return out;
 }

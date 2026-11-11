@@ -74,6 +74,13 @@ int main(){try{
   recursion::Evaluator explicit_solver(graph,explicit_options);(void)explicit_solver.epsilon_demand_profile(0);
   require(explicit_solver.statistics().basis_scans==0 && explicit_solver.statistics().basis_cache_hits==0 &&
           explicit_solver.basis_selections().empty(),"explicit basis did not override cache");
+  // On request the scan continues from a supplied basis. Its decision is not
+  // persisted, and the level's own persisted choice is not read.
+  explicit_options.scan_physical_bases=true;explicit_options.basis_scan_seconds=5;
+  recursion::Evaluator continued(graph,explicit_options);(void)continued.epsilon_demand_profile(0);
+  require(continued.statistics().basis_scans==1 && continued.statistics().basis_cache_hits==0 &&
+          continued.statistics().basis_cache_writes==0 && continued.basis_selections().size()==1 &&
+          !continued.basis_selections().at(0).cache_hit,"scan from a supplied basis");
   auto disabled=options;disabled.automatic_basis_scan=false;
   recursion::Evaluator disabled_solver(graph,disabled);(void)disabled_solver.epsilon_demand_profile(0);
   require(disabled_solver.statistics().basis_cache_hits==0 && disabled_solver.basis_selections().empty(),"disabled scan loaded automatic basis");

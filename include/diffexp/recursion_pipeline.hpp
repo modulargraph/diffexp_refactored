@@ -31,6 +31,11 @@ struct NumericalOptions {
   // Exact, explicitly supplied internal bases, keyed by zero-based FT depth.
   // Every transform is checked against the graph before endpoint preparation.
   std::map<std::size_t,PhysicalBasisTransform> physical_bases;
+  // A supplied basis is final by default. With this flag the automatic scan
+  // starts from it instead of from the level's masters (a basis supplied to
+  // remove moving poles is not yet the smallest one); its choice is then
+  // not persisted, because the cache identity names the level alone.
+  bool scan_physical_bases=false;
   slong working_bits=384;
   // The exact endpoint series is summed at the overlap point, at most
   // 1/overlap_ratio of the way to the nearest other singular point, where the
@@ -782,8 +787,9 @@ class Evaluator {
   Plan& plan(std::size_t depth,unsigned desired_top) {
     if(plans_[depth])return *plans_[depth];const auto& node=graph_.nodes[depth];
     const auto explicit_basis=options_.physical_bases.find(depth);
-    auto selected=build_plan(depth,desired_top,explicit_basis==options_.physical_bases.end()?nullptr:&explicit_basis->second);
-    if(options_.automatic_basis_scan && explicit_basis==options_.physical_bases.end()) {
+    const bool supplied=explicit_basis!=options_.physical_bases.end();
+    auto selected=build_plan(depth,desired_top,supplied?&explicit_basis->second:nullptr);
+    if(options_.automatic_basis_scan && (!supplied || options_.scan_physical_bases)) {
       // Starts after the original plan's own preflight, which every execution
       // needs. Operator work done for candidates is selection time.
       std::optional<Seconds> timer;double operators_before=0;
@@ -793,7 +799,7 @@ class Evaluator {
       std::optional<artifacts::Identity> basis_identity;
       std::optional<basis_persistence::Choice> cached_basis;
       std::optional<PhysicalBasisTransform> accepted_basis;
-      if(basis_store_) {
+      if(basis_store_ && !supplied) {
         basis_identity=basis_persistence::identity(graph_,depth,xi_,ei_,prescription_);
         // Corruption or a failed exact identity is fatal, not a fresh scan that
         // silently changes coordinates underneath an existing continuation.
@@ -879,8 +885,25 @@ class Evaluator {
           // alone: that is what transport pays for, and it needs no endpoint
           // data. Whether a candidate keeps the child's epsilon window is
           // decided once, on the plan pulled back for the best of them.
-          const std::uint64_t original_size=physical_basis_scan::expression_characters(node.closure.matrix);
-          auto frontier=physical_basis_scan::scan_candidates(node.closure,node.merged.physical_count,xi_,scan_options,
+          // From a supplied basis the scan sees the level in those coordinates
+          // (requested integrals included, cached identities not), and each of
+          // its candidates is composed with the basis before installation.
+          level::Result in_basis;
+          if(supplied) {
+            const auto& basis=explicit_basis->second;
+            in_basis.ordered_basis=node.closure.ordered_basis;in_basis.requested_integrals=node.closure.requested_integrals;
+            in_basis.matrix=basis.connection;
+            if(!node.closure.target_rows.empty())in_basis.target_rows=fuchsify::detail::multiply(node.closure.target_rows,basis.from_basis);
+          }
+          const auto& scanned=supplied?in_basis:node.closure;
+          const auto composed=[&](const PhysicalBasisTransform& change) {
+            if(!supplied)return change;
+            const auto& basis=explicit_basis->second;
+            return PhysicalBasisTransform{basis.original_connection,fuchsify::detail::multiply(change.to_basis,basis.to_basis),
+              fuchsify::detail::multiply(basis.from_basis,change.from_basis),change.connection};
+          };
+          const std::uint64_t original_size=physical_basis_scan::expression_characters(scanned.matrix);
+          auto frontier=physical_basis_scan::scan_candidates(scanned,node.merged.physical_count,xi_,scan_options,
             [&](const physical_basis_scan::Candidate& candidate) -> std::optional<physical_basis_scan::DemandCost> {
               if(candidate.metadata.provenance!="original"){++selection.candidates_screened;++selection.candidates_checked;}
               return physical_basis_scan::DemandCost{candidate.metadata.connection_characters};
@@ -890,7 +913,7 @@ class Evaluator {
             ", frontier="+std::to_string(frontier.candidates.size())+", original "+describe_cost(original_cost),desired_top);
           for(const auto& candidate:frontier.candidates) {
             if(candidate.demand_cost->at(0)>=original_size || selection.full_candidates_checked==8)break;
-            if(install(candidate.transform))break;
+            if(install(composed(candidate.transform)))break;
           }
           durable=selection.accepted || !frontier.stats.time_expired;
           if(!durable)report(depth,"basis discovery cut by its time budget; the undecided original basis is not persisted",desired_top);
@@ -907,7 +930,7 @@ class Evaluator {
         durable=selection.accepted;
       }
       if(timer)statistics_.endpoint_operator_seconds=operators_before;
-      if(basis_store_ && !cached_basis && durable) {
+      if(basis_store_ && !supplied && !cached_basis && durable) {
         auto unit=fuchsify::detail::identity(node.closure.matrix.size(),graph_.dimension);
         basis_persistence::Choice choice{accepted_basis?*accepted_basis:
           PhysicalBasisTransform{node.closure.matrix,unit,unit,node.closure.matrix},selection.accepted};

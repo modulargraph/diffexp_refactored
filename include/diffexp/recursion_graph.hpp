@@ -16,6 +16,11 @@ struct Options {
   std::vector<std::pair<unsigned,unsigned>> merges;
   unsigned max_levels=16,total_timeout_seconds=600;
   std::size_t max_sources_per_level=5000;
+  // Optional exchange of masters of a freshly closed level (zero-based depth)
+  // for other integrals, before its masters become the child's requests. The
+  // returned closure must describe the same requested integrals in its own
+  // ordered basis; see moving_poles::exchange.
+  std::function<level::Result(level::Result,unsigned)> exchange_masters;
 };
 struct Event {
   unsigned depth,physical_propagators;
@@ -249,6 +254,12 @@ inline Graph prepare(const feynman::ExampleFamily& family,
         std::max(1u,static_cast<unsigned>(options.total_timeout_seconds-elapsed)));
       node.closure=provider(node.merged,dimension,field,0,node.source_indices,budget);
       if(!node.closure.success)throw std::runtime_error("recursive level "+std::to_string(depth+1)+": "+node.closure.reason);
+      if(options.exchange_masters) {
+        const auto masters=node.closure.ordered_basis.size();
+        node.closure=options.exchange_masters(std::move(node.closure),depth);
+        if(!node.closure.success || node.closure.ordered_basis.size()!=masters || node.closure.matrix.size()!=masters)
+          throw std::logic_error("recursive master exchange changed the size of a level");
+      }
       if(node.closure.target_rows.size()!=node.source_indices.size())throw std::logic_error("recursive closure omitted source coordinates");
       std::map<ibp::Integral,std::size_t,ibp::IntegralOrder> source_position;
       for(std::size_t i=0;i<node.source_indices.size();++i)source_position.emplace(node.source_indices[i],i);

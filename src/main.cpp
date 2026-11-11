@@ -765,9 +765,9 @@ IBP preparation (prepare/ft)
                                   positive monomials, the two propagators share their loop momentum,
                                   the one that remains is massive, and the level's equation shows
                                   that the masters' values at the endpoint fix its analytic solution
-                                  (docs/performance.md). endpoint: as auto, an error if no level
-                                  qualifies. Explicit anchors, stated causal sides and --henn-basis
-                                  keep the anchors
+                                  (docs/performance.md); such a level uses the adjoint method.
+                                  endpoint: as auto, an error if no level qualifies. Explicit
+                                  anchors, stated causal sides and --henn-basis keep the anchors
   --ibp-max-degree N              4..256 (default 16, doubled automatically when a reduction meets it): largest total degree, in the merge
                                   parameter and the dimension together, of a reduction
                                   coefficient the built-in solver reconstructs

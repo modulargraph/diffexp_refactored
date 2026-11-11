@@ -30,6 +30,23 @@
   pole order is detected (`--sample-poles` fixes it), and the fit reports
   each coefficient with an estimated error. `epsilon_sampling.hpp` holds the
   fit; `tools/experiments/epsilon_sampling.py` is removed.
+- Endpoint boundary (`--boundary anchor|endpoint|auto`, default `auto`;
+  `recursion::Options::boundary`, whose library default is `anchor`): a
+  level may take its boundary data at x = 0 or x = 1 of its merge parameter
+  instead of at an interior anchor. The level below is then the family with
+  one of the two merged propagators removed, at its original kinematics. An
+  endpoint qualifies if the family's U and F have positive monomials, the
+  two lines share one loop momentum, the line that remains is massive, no
+  master's numerator degenerates there, and the level's exact endpoint
+  series shows that the masters' values fix its analytic solution
+  (`endpoint_boundary.hpp`: `kinematics`, `examine`, `determine`,
+  `taylor_map`). Every other level, and every level under explicit
+  `anchors`, stated causal sides or `--henn-basis`, keeps its anchor;
+  families without a qualifying level are computed as before. The kite's
+  third level has 2 masters instead of 3; the Higgs+jet family F has levels
+  of 49, 12, 8, 7, 3 masters instead of 49, 19, 13, 8, 3. The report has a
+  `ladder` array with the masters and the boundary of each level. Tests
+  `endpoint_boundary` and `cli.endpoint_boundary`.
 - Merge selection (`--merge-selection auto|first`, default `auto`): every
   level merges the pair of propagators whose merged graph has the fewest
   master integrals. The count is the number of critical points of U + F,

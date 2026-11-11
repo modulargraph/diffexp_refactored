@@ -10,7 +10,7 @@ into an error certificate.
 | Exact algebra | `exact.hpp`, `univariate_rational.hpp` | Owned FLINT fields and exact rational functions |
 | Differential systems | `system.hpp`, `frobenius.hpp`, `affine_frobenius.hpp` | Ordinary and regular-singular series recurrences |
 | Family preparation | `families.hpp`, `ibp.hpp`, `fire.hpp`, `fire_modular.hpp` | Quadratic families, exact IBP witnesses and external C++ reduction |
-| Recursive integration | `merge_pullback.hpp`, `recursion_graph.hpp`, `recursion_pipeline.hpp` | Feynman merging, beta/endpoint functionals and recursive evaluation |
+| Recursive integration | `merge_pullback.hpp`, `recursion_graph.hpp`, `endpoint_boundary.hpp`, `recursion_pipeline.hpp` | Feynman merging, beta/endpoint functionals, the boundary of a level and recursive evaluation |
 | Numerical transport | `adjoint_transport.hpp`, `factored_transport.hpp`, `affine_matching.hpp` | Continuation and matching of retained series |
 | Durable work | `artifact_store.hpp`, `level_cache.hpp`, `adjoint_checkpoint.hpp` | Bounded, verified reuse of exact and numerical artifacts |
 | User interfaces | `src/main.cpp`, `Mathematica/DiffExp.wl` | CLI and one-process JSON calls |
@@ -20,6 +20,14 @@ terms when a merged propagator is absent. Numerator polynomials remain explicit
 through merge pullbacks and the Gaussian scalar leaf. The scheduler separates
 scientific identity from resource demand, so a local refinement can extend the
 deficient artifact without repeating its already adequate dependencies.
+
+Each level takes its boundary from the level below: the masters at an
+interior anchor of the merge parameter, where the level below is the merged
+family at that value, or at an endpoint, where it is the family with one of
+the two merged propagators removed. An endpoint is used only where the
+kinematics make the level's integrals analytic there and the level's exact
+endpoint series shows that their values fix the solution
+([performance](performance.md#what-the-defaults-do), `endpoint_boundary.hpp`).
 
 Endpoint series are saved incrementally by column and checked independently
 against the retained differential equation and normalization conditions when

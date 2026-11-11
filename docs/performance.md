@@ -69,6 +69,52 @@ Transport time is linear in the number of epsilon orders carried.
   preparation about a minute instead of eleven, one epsilon sample under two
   minutes instead of 27. The kite's second level has 7 masters instead of
   10.
+- **Endpoint boundary** (`--boundary auto`). A level needs its masters at
+  one value of its merge parameter x, which the level below computes. At an
+  interior anchor (1/3, moved if singular) that level is the merged family
+  with the kinematics of the anchor. At x = 0 or x = 1 the merged line is
+  one of the two merged propagators, so the level below is the family with
+  the other one removed, at its original kinematics: fewer masters and
+  fewer singular points. A level matches at an endpoint if all of the
+  following hold; otherwise it keeps its anchor.
+  - The family's U and F have positive monomials, the propagators that make
+    up the two lines share one loop momentum, and the line that remains is
+    massive. The level's integrals are then analytic at the endpoint: U
+    depends on the two parameters through their sum, and F(x) - F(0) is
+    bounded by a multiple of |x| F(0) on the whole simplex. With a massless
+    remaining line the endpoint has collinear regions (exponents -eps,
+    -2 eps) that the smaller family does not provide, and no endpoint is
+    taken.
+  - No master of the level has a numerator that depends on the propagators
+    at the endpoint (an unused numerator slot that does is replaced).
+  - The level's equation, expanded exactly at the endpoint, confirms that
+    the masters' values there fix the analytic solution: the combinations of
+    local solutions with integer exponents that have no negative power and
+    no logarithm are determined by their constant terms. Solutions with any
+    other exponent (x^(-2 eps), x^(-1/2)) have no part in an analytic
+    function. A level whose analytic solutions would need Taylor
+    coefficients beyond the values keeps its anchor.
+
+  The masters at the overlap point next to the endpoint are the exact series
+  of that solution applied to the masters at the endpoint
+  (`endpoint_boundary.hpp`); the functionals of the other endpoint are
+  transported to that point in one arm. Such a level uses the adjoint
+  method. Explicit `anchors`, stated causal sides and `--henn-basis` keep
+  the anchors; `--boundary anchor` keeps them everywhere, and
+  `--boundary endpoint` fails if no level qualifies. The JSON report lists
+  each level's masters and boundary under `ladder`.
+  The kite matches its first two levels at x = 0 (13 of 16 and 4 of 7 local
+  solutions are analytic) and its third level has 2 masters instead of 3;
+  `pentagon_massive` matches all three levels at x = 0. For the Higgs+jet
+  family F the first and third levels match at x = 0 (22 of the 49 local
+  solutions of the first are analytic) and the levels are 49, 12, 8, 7, 3
+  instead of 49, 19, 13, 8, 3: the transport below the first level takes
+  1.5 s instead of 12 s per epsilon sample, while the first level, which
+  dominates the sample, is unchanged. Results agree with the interior
+  anchors to the accuracy of the run (41 digits for the kite, 34 for a
+  sample of family F). Families without a massive pair on one loop momentum
+  (the bananas, the massless boxes and pentagon) are computed exactly as
+  with `--boundary anchor`.
 - **Solver limits.** A reduction of the built-in IBP solver that meets its
   degree or sample bound is repeated with the bounds doubled; the time and
   memory budgets (a day and 4 GiB by default) are what ends a preparation.

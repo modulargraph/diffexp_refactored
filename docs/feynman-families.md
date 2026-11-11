@@ -78,6 +78,9 @@ of zero-based positions in the current physical propagator list, after earlier
 merges. Without `merges` each level merges the pair with the fewest master integrals
 ([merge selection](performance.md#what-the-defaults-do)); explicit `merges`,
 `anchors`, `causal.level_signs` or `causal.points` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
+Without `anchors` a level whose endpoint qualifies takes its boundary at x = 0 or 1 instead of at an interior anchor
+([endpoint boundary](performance.md#what-the-defaults-do), `--boundary anchor|endpoint|auto`); the report's `ladder` lists the
+masters and the boundary of each level.
 Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`
 and `endpoint_order` (the last two are chosen together when omitted), and
 `epsilon_strategy` (`"expand"` or `"sample"`), `samples` and `sample_step` for

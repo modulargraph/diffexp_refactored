@@ -523,6 +523,23 @@ int main(int argc, char** argv) {
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
         report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
         if(canonical_basis)result=diffexp::henn::project_boundary(*canonical_basis,graph.nodes.front().requested,result,epsilon_order,numerical.working_bits);
+        // The Taylor tail admitted per chart is not in the transported radii.
+        // An uncertified result is widened by it: 2^6 charts' worth of the
+        // tail, relative to the largest coefficient of each integral. This is
+        // an estimate like the radii themselves; without it a sample asked
+        // for few leaf digits would report far more digits than it has.
+        if(!result.taylor_tail_certified) {
+          const unsigned tail=numerical.adjoint.truncation_bits?numerical.adjoint.truncation_bits:static_cast<unsigned>(std::min<double>(
+            std::min<double>(2.0*numerical.ordinary_order,static_cast<double>(numerical.working_bits)-32),
+            std::ceil((numerical.leaf_digits+10.0)*std::log2(10.0))));
+          for(auto& row:result.values) {
+            mag_t scale,size;mag_init(scale);mag_init(size);
+            for(const auto& value:row){acb_get_mag(size,value.raw());mag_max(scale,scale,size);}
+            mag_mul_2exp_si(scale,scale,6-static_cast<slong>(tail));
+            for(auto& value:row)if(!value.is_zero())acb_add_error_mag(value.raw(),scale);
+            mag_clear(scale);mag_clear(size);
+          }
+        }
         if(json_mode) {
           // Display enough decimal digits for the working binary precision;
           // Arb adds outward rounding to the printed interval radius.

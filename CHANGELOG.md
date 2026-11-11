@@ -66,6 +66,9 @@
   of 49, 12, 8, 7, 3 masters instead of 49, 19, 13, 8, 3. The report has a
   `ladder` array with the masters and the boundary of each level. Tests
   `endpoint_boundary` and `cli.endpoint_boundary`.
+- Reported radii of an uncertified result include the Taylor tail admitted
+  per chart (2^6 charts' worth, relative to the largest coefficient), so a
+  sample asked for few leaf digits no longer reports more digits than it has.
 - Merge selection (`--merge-selection auto|first`, default `auto`): every
   level merges the pair of propagators whose merged graph has the fewest
   master integrals. The count is the number of critical points of U + F,

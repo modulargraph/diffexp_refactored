@@ -2,6 +2,25 @@
 
 ## 2.2.1
 
+- Reported radii contain an estimate of the Taylor tails the transport
+  admits. What a chart cuts off is estimated from its last two retained
+  terms (a geometric tail, with its sign) and added to the probe rows, which
+  the flow carries to the end of the path. The probes are returned as rows
+  (`AdjointOptions::error`) and every further linear map is applied to them
+  as to the result (`LaurentBoundary::error`, eight times of which
+  `diffexp ft` adds to the printed radii): carried as a radius the estimate
+  would not cancel where the result does, and a recursion of several levels
+  would report it larger by the product of their condition numbers.
+  Weighted accumulation carries the error rows from level to level. An
+  evaluation by rows estimates its error by accumulating one weighted
+  combination of all requested integrals more
+  (`NumericalOptions::rows_error_estimate`, selected by `diffexp ft`).
+  The probes are a batch of their own, at half the Taylor order and a third
+  of the working precision; the progress line of a transport counts their
+  products apart. The factored method is unchanged and has no estimate.
+  The fixed widening of `diffexp ft` is one tail relative to the largest
+  coefficient of an integral (it was 2^6 tails).
+
 - Transport: the endpoint overlap is chosen per endpoint (a singular point
   next to one end no longer costs charts at the other); in probe mode a
   chart's radii are its own rounding (defect radii of the midpoint

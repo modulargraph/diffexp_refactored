@@ -44,6 +44,8 @@ struct AdjointConditioningStats {
   // Row batches split to satisfy the term/operation/cell budgets.
   std::size_t circuit_batch_reductions=0;
   std::size_t circuit_preparations=0,recurrences=0,circuit_terms=0;
+  // Products spent on the probe rows, at their lower order and precision.
+  std::size_t probe_terms=0;
   double compilation_seconds=0,preparation_seconds=0,recurrence_seconds=0;
 };
 // State after an accepted chart, expressed on the ORIGINAL path leg. Keeping
@@ -91,6 +93,26 @@ struct AdjointOptions {
   // chart itself commits, not a bound that the absolute values of the
   // connection inflate. They are what the probes receive next.
   enum class Uncertainty { map, probe } uncertainty=Uncertainty::map;
+  // The probes also carry the Taylor tail every chart admits. What a chart
+  // cuts off follows from its last retained terms (rational_circuit::
+  // tail_estimate), and that estimate, a vector with its signs, is added to
+  // the probes after each accepted chart: summed over the rows into the
+  // first probe, with alternating row signs into the second. The
+  // flow then carries that estimate of the truncation error to the end of the
+  // path like any other row, cancellations included, where a bound on its
+  // size per chart would lose them.
+  bool tail_probe=true;
+  // With probes, the estimated error of the initial rows and of the result.
+  // On entry: at most as many rows as there are probes (one for a single
+  // transported row, else two) in the window of the initial rows, which the
+  // probes start from instead of zero; no rows mean zero. On return: the
+  // probe rows at the end of the path, in the window of the result, whose
+  // radii are then NOT widened by the probes. A caller that applies further
+  // linear maps to the result applies them to these rows as well and takes
+  // their size at the very end: an error estimate passed on as a radius
+  // loses its direction, and the next cancellation multiplies it by the
+  // condition number instead of cancelling it too.
+  LaurentRows* error=nullptr;
   // A remaining large loss of arithmetic accuracy rejects the step and
   // halves it. Zero disables this last resort. With probes it is judged on
   // the defect radii of the midpoint chart: a step is not shortened because
@@ -187,22 +209,23 @@ inline NativeTailMagnitude enclosure_quality(const Jet::Ball& value) {
   B midpoint;acb_get_mid(midpoint.raw(),value.raw());
   return enclosure_uncertainty(value)/M::maximum(M::one(),M::lower_abs(midpoint));
 }
-inline NativeTailMagnitude enclosure_quality(const Boundary& values) {
+// Of the first `count` components (all by default).
+inline NativeTailMagnitude enclosure_quality(const Boundary& values,std::size_t count=static_cast<std::size_t>(-1)) {
   NativeTailMagnitude result;
-  for(const auto& row:values)for(const auto& value:row)
+  for(std::size_t i=0;i<values.size() && i<count;++i)for(const auto& value:values[i])
     result=NativeTailMagnitude::maximum(result,enclosure_quality(value));
   return result;
 }
 // True when some coefficient has lost the fixed half-working-precision
 // reserve. The reserve is independent of chart count and of step length:
 // repeated smaller losses cannot silently consume all working precision.
-inline bool beyond_reserve(const Boundary& values) {
+inline bool beyond_reserve(const Boundary& values,std::size_t count=static_cast<std::size_t>(-1)) {
   using B=Jet::Ball;
   B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
-  const auto quality=enclosure_quality(values);
+  const auto quality=enclosure_quality(values,count);
   return !quality.is_finite() || quality>NativeTailMagnitude::upper_abs(reserve);
 }
-inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary& output) {
+inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary& output,std::size_t count=static_cast<std::size_t>(-1)) {
   using B=Jet::Ball;using M=NativeTailMagnitude;
   B reserve(1);acb_mul_2exp_si(reserve.raw(),reserve.raw(),-B::precision()/2);
   const auto reserve_bound=M::upper_abs(reserve);
@@ -213,9 +236,9 @@ inline bool needs_conditioning_subdivision(const Boundary& input,const Boundary&
   // Keep all output radii and the 256-fold growth guard, but include the
   // incoming absolute radius in the scale of the receiving component.
   M incoming;
-  for(const auto& row:input)for(const auto& value:row)
+  for(std::size_t i=0;i<input.size() && i<count;++i)for(const auto& value:input[i])
     incoming=M::maximum(incoming,enclosure_uncertainty(value));
-  for(unsigned i=0;i<input.size();++i) {
+  for(std::size_t i=0;i<input.size() && i<count;++i) {
     if(input[i].size()!=output[i].size())throw std::logic_error("conditioning subdivision window mismatch");
     for(unsigned k=0;k<input[i].size();++k) {
       if(!output[i][k].is_finite())return true;
@@ -259,8 +282,29 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
   // independent observable rows may be separated.
   const auto available_dimension=options.max_taylor_cells/epsilon_count/(order+1);
   if(available_dimension<=d)throw std::invalid_argument("adjoint Taylor workspace budget cannot fit one observable row");
-  auto batch_rows=std::min(r,(available_dimension-1)/d);
+  // The probes are a batch of their own, after the batches of the rows.
+  const std::size_t transported=r-probes;
+  if(!transported)throw std::invalid_argument("adjoint transport dimensions/path/budget");
+  auto batch_rows=std::min(transported,(available_dimension-1)/d);
   if(options.max_rows_per_batch)batch_rows=std::min(batch_rows,options.max_rows_per_batch);
+  // A probe is an estimate of an error: it is transported at half the Taylor
+  // order (the same chart then leaves it a tail of half the bits) and at a
+  // third of the working precision, which costs a fraction of a row.
+  struct Batch {std::size_t first,rows;unsigned order;slong bits;bool probe;};
+  const slong working_bits=B::precision();
+  const unsigned probe_order=std::max(8u,(order+1)/2);
+  const slong probe_bits=std::min<slong>(working_bits,std::max<slong>(64,(working_bits+2)/3));
+  std::vector<Batch> batches;
+  const auto arrange=[&] {
+    batches.clear();
+    for(std::size_t first=0;first<transported;first+=batch_rows)
+      batches.push_back({first,std::min(batch_rows,transported-first),order,working_bits,false});
+    if(probes)batches.push_back({transported,probes,probe_order,probe_bits,true});
+  };
+  arrange();
+  // The probes are estimates in a lower precision: the accuracy of their
+  // enclosures decides nothing. Without probes every component is judged.
+  const std::size_t judged=probes?transported*d:static_cast<std::size_t>(-1);
   Boundary state(r*d+1,std::vector<B>(initial.high-low+1,B(0)));state.back()[0]=B(1);
   for(unsigned i=0;i<r;++i)for(unsigned j=0;j<d;++j)for(int k=initial.low;k<=initial.high;++k)state[i*d+j][k-low]=initial.coefficients[i][j][k-initial.low];
   unsigned first_leg=0,first_charts=0;double first_parameter=0;
@@ -342,8 +386,9 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
       std::string overflow;
       for(;;) {
         circuits.clear();bool fits=true;
-        for(std::size_t first=0;first<r && fits;first+=batch_rows) {
-          const auto rows=std::min(batch_rows,r-first),begin=first*d,count=rows*d;
+        for(std::size_t index=0;index<batches.size() && fits;++index) {
+          const auto first=batches[index].first,rows=batches[index].rows,begin=first*d,count=rows*d;
+          const auto order=batches[index].order;
           std::vector<RationalLineEntry> selected;
           for(std::size_t row=0;row<rows;++row)for(const auto& e:block)
             selected.push_back({static_cast<unsigned>(row*d+e.row),static_cast<unsigned>(row*d+e.column),0,e.coefficient});
@@ -370,7 +415,7 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         }
         if(fits)break;
         if(batch_rows==1)throw std::length_error(overflow);
-        batch_rows=(batch_rows+1)/2;
+        batch_rows=(batch_rows+1)/2;arrange();
         if(stats)++stats->circuit_batch_reductions;
       }
     }
@@ -416,7 +461,10 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
     };
     while(center<1) {
       if(++charts>options.max_charts_per_leg)throw std::runtime_error("adjoint transport chart budget exhausted");
-      if(probes && (folding || beyond_reserve(state))){fold();folding=true;}
+      // A probe is a midpoint: the enclosure an interval recurrence would
+      // make of it says nothing about the error it estimates.
+      for(std::size_t i=transported*d;i<r*d;++i)for(auto& value:state[i])acb_get_mid(value.raw(),value.raw());
+      if(probes && (folding || beyond_reserve(state,judged))){fold();folding=true;}
       const double limit=shorten(center,clearance_endpoint(center,roots,fraction));
       if(!(limit>center) || limit>1)throw std::runtime_error("adjoint transport geometric chart made no progress");
       B c;acb_set_d(c.raw(),center);
@@ -427,18 +475,18 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
       // rows, not on the endpoint: shortening the step reuses it.
       std::vector<std::optional<rc::Series>> expanded(circuits.size());
       std::optional<rc::Prepared> map_prepared;std::vector<std::optional<rc::Series>> map_columns(d);
-      const auto prepare=[&](const rc::Compiled& circuit) {
+      const auto prepare=[&](const rc::Compiled& circuit,unsigned taylor_order=0) {
         AdjointPhaseTimer timer{stats?&stats->preparation_seconds:nullptr};
         if(stats)++stats->circuit_preparations;
-        return rc::prepare(circuit,c,order,epsilon_count);
+        return rc::prepare(circuit,c,taylor_order?taylor_order:order,epsilon_count);
       };
-      const auto expand=[&](const rc::Prepared& plan,const Boundary& input) {
+      const auto expand=[&](const rc::Prepared& plan,const Boundary& input,bool probe=false) {
         AdjointPhaseTimer timer{stats?&stats->recurrence_seconds:nullptr};
         // Midpoint transport: the chart's own rounding only (defect radii).
         // The acceptance below then concerns the transported midpoints, and
         // radii no longer grow with the absolute values of the connection.
         rc::Statistics work;auto series=rc::expand(plan,input,&work,probes && folding);
-        if(stats){++stats->recurrences;stats->circuit_terms+=work.addmul_operations;}
+        if(stats){++stats->recurrences;(probe?stats->probe_terms:stats->circuit_terms)+=work.addmul_operations;}
         return series;
       };
       // Value of a series at the farthest endpoint not beyond `next` whose
@@ -505,6 +553,14 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         return values;
       };
       const auto advance=[&](std::size_t index,const Boundary& input,double& next) {
+        if(batches[index].probe) {
+          // In their own precision and order; a probe never shortens a chart.
+          kernel::PrecisionScope scope(batches[index].bits);
+          if(!prepared[index])prepared[index]=prepare(circuits[index],batches[index].order);
+          if(!expanded[index])expanded[index]=expand(*prepared[index],input,true);
+          B end;acb_set_d(end.raw(),next);
+          return rc::evaluate(*expanded[index],end-c);
+        }
         if(!prepared[index])prepared[index]=prepare(circuits[index]);
         // Inherited uncertainty beyond the reserve would be wrapped by the
         // recurrence; a direct enclosure that lost the reserve was.
@@ -521,9 +577,9 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         // evaluated before a later one shortened it is advanced again.
         std::vector<double> evaluated(circuits.size(),-1);
         for(bool complete=false;!complete;) {
-          for(std::size_t index=0,first=0;first<r;++index,first+=batch_rows) {
+          for(std::size_t index=0;index<batches.size();++index) {
             if(evaluated[index]==next)continue;
-            const auto begin=first*d,count=std::min(batch_rows,r-first)*d;
+            const auto begin=batches[index].first*d,count=batches[index].rows*d;
             Boundary input(state.begin()+begin,state.begin()+begin+count);input.push_back(state.back());
             auto values=advance(index,input,next);
             for(std::size_t j=0;j<count;++j)output[begin+j]=std::move(values[j]);
@@ -531,11 +587,11 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
           }
           complete=true;for(auto endpoint:evaluated)complete=complete && endpoint==next;
         }
-        if(probes && !folding && beyond_reserve(output)) {
+        if(probes && !folding && beyond_reserve(output,judged)) {
           fold();folding=true;for(auto& series:expanded)series.reset(); // the inputs changed
           continue;
         }
-        if(options.max_conditioning_halvings && adjoint_detail::needs_conditioning_subdivision(state,output)) {
+        if(options.max_conditioning_halvings && adjoint_detail::needs_conditioning_subdivision(state,output,judged)) {
           if(halvings>=options.max_conditioning_halvings)
             throw ArithmeticConditioningFailure("adjoint arithmetic-conditioning step budget exhausted");
           const double smaller=center+(next-center)/2;
@@ -547,6 +603,29 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         for(const auto& row:output)for(const auto& value:row)if(!value.is_finite())throw std::domain_error("adjoint transport produced a nonfinite coefficient");
         if(stats){++stats->charts;if(!halvings && next<limit)++stats->tail_limited_charts;}
         state=std::move(output);
+        if(probes && options.tail_probe) {
+          // The series a chart was evaluated from are those of its accepted
+          // input; their last terms at the accepted endpoint go to the probes.
+          B step;acb_set_d(step.raw(),next);acb_sub(step.raw(),step.raw(),c.raw(),bits);
+          const auto rows=r-probes;B midpoint;
+          for(std::size_t index=0;index<batches.size();++index) {
+            if(batches[index].probe || !expanded[index])continue;
+            const auto first=batches[index].first,count=batches[index].rows*d;
+            const auto terms=rc::tail_estimate(*expanded[index],step);
+            for(std::size_t j=0;j<count;++j) {
+              const auto row=first+j/d,column=j%d;
+              for(std::size_t k=0;k<epsilon_count;++k) {
+                if(terms[j][k].is_zero() || !terms[j][k].is_finite())continue;
+                acb_get_mid(midpoint.raw(),terms[j][k].raw());
+                for(unsigned p=0;p<probes;++p) {
+                  auto* probe=state[(rows+p)*d+column][k].raw();
+                  if(p==1 && (row&1))acb_sub(probe,probe,midpoint.raw(),bits);
+                  else acb_add(probe,probe,midpoint.raw(),bits);
+                }
+              }
+            }
+          }
+        }
         break;
       }
       if(options.chart_observer || options.continuation_observer) {
@@ -581,8 +660,21 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
   if(vertices.empty())throw std::invalid_argument("adjoint transport dimensions/path/budget");
   initial.coefficients.insert(initial.coefficients.end(),probes,
     std::vector(d,std::vector<B>(initial.high-initial.low+1,B(0))));
+  if(options.error && !options.error->coefficients.empty()) {
+    const auto& given=*options.error;
+    if(given.low!=initial.low || given.high!=initial.high || given.coefficients.size()>probes || given.columns()!=d)
+      throw std::invalid_argument("adjoint transport error rows do not match the initial rows");
+    for(std::size_t p=0;p<given.coefficients.size();++p)initial.coefficients[r+p]=given.coefficients[p];
+  }
   auto wide=forcing;wide.insert(wide.end(),probes,std::vector<Exact>(d,vertices[0].constant(0)));
   auto out=adjoint_detail::transport_rows(matrix,std::move(initial),wide,vertices,options,probes);
+  if(options.error) {
+    // The caller carries the probes on; nothing of them enters the radii.
+    *options.error=LaurentRows{out.low,out.high,{out.coefficients.begin()+r,out.coefficients.end()}};
+    for(auto& row:options.error->coefficients)for(auto& column:row)for(auto& value:column)acb_get_mid(value.raw(),value.raw());
+    out.coefficients.resize(r);
+    return out;
+  }
   // The probes hold the transported size of everything that was discarded.
   const slong bits=B::precision();
   arf_t size,largest;arf_init(size);arf_init(largest);

@@ -84,9 +84,15 @@ struct AdjointOptions {
   // cancellation; the final radii are eight times the largest probe
   // coefficient of each epsilon order. That is an estimate along two
   // directions, not an enclosure, at the cost of two rows.
+  // Once a leg transports midpoints, the radii of a chart are the defect
+  // radii of its recurrence (rational_circuit::expand): the rounding the
+  // chart itself commits, not a bound that the absolute values of the
+  // connection inflate. They are what the probes receive next.
   enum class Uncertainty { map, probe } uncertainty=Uncertainty::map;
   // A remaining large loss of arithmetic accuracy rejects the step and
-  // halves it. Zero disables this last resort.
+  // halves it. Zero disables this last resort. With probes it is judged on
+  // the defect radii of the midpoint chart: a step is not shortened because
+  // an interval bound grew, only if the chart's own rounding lost the reserve.
   unsigned max_conditioning_halvings=12;
   AdjointConditioningStats* conditioning_stats=nullptr;
   // Called only after a complete accepted chart. Parameters are the leg index
@@ -420,7 +426,10 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
       };
       const auto expand=[&](const rc::Prepared& plan,const Boundary& input) {
         AdjointPhaseTimer timer{stats?&stats->recurrence_seconds:nullptr};
-        rc::Statistics work;auto series=rc::expand(plan,input,&work);
+        // Midpoint transport: the chart's own rounding only (defect radii).
+        // The acceptance below then concerns the transported midpoints, and
+        // radii no longer grow with the absolute values of the connection.
+        rc::Statistics work;auto series=rc::expand(plan,input,&work,probes && folding);
         if(stats){++stats->recurrences;stats->circuit_terms+=work.addmul_operations;}
         return series;
       };

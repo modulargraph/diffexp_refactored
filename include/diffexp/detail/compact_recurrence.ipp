@@ -322,8 +322,10 @@ struct Scratch {
 };
 inline constexpr std::size_t npos=std::numeric_limits<std::size_t>::max();
 // target = initial +- sum over the lines, where `initial` is a value index or
-// npos for zero. Returns the number of products.
-inline std::size_t dot(Pool& pool,Scratch& scratch,std::size_t target,std::size_t initial,bool subtract) {
+// npos for zero. Returns the number of products. `exact_initial` leaves the
+// radius of `initial` out, as Line::midpoint does for a line.
+inline std::size_t dot(Pool& pool,Scratch& scratch,std::size_t target,std::size_t initial,bool subtract,
+    bool exact_initial=false) {
   static const Short one=[]{Short s;s.first=1;s.count=1;return s;}();
   const slong limbs=pool.limbs();
   slong base=zero_exponent;
@@ -339,7 +341,7 @@ inline std::size_t dot(Pool& pool,Scratch& scratch,std::size_t target,std::size_
     if(unit==zero_exponent)unit=e;
     radius+=m*power64(e-unit);
   };
-  if(initial!=npos)widen(pool.radius(initial).m,pool.radius(initial).e);
+  if(initial!=npos && !exact_initial)widen(pool.radius(initial).m,pool.radius(initial).e);
   std::size_t terms=0;
   auto& sum=scratch.sum;
   if(base!=zero_exponent) {
@@ -467,8 +469,9 @@ struct Stored {
 
 // The recurrence of expand_balls on compact numbers. Returns nothing when a
 // coefficient or value does not fit the format; the caller then uses
-// expand_balls.
-inline std::optional<Series> expand_compact(const Prepared& prepared,const Boundary& boundary,Statistics* statistics) {
+// expand_balls. `defect_radii` as there.
+inline std::optional<Series> expand_compact(const Prepared& prepared,const Boundary& boundary,Statistics* statistics,
+    bool defect_radii=false) {
   using namespace compact;
   const auto& p=prepared.data();const auto& plan=p.compiled.data();
   const unsigned width=unsigned(boundary[0].size()),d=plan.dimension,order=p.order;
@@ -567,7 +570,7 @@ inline std::optional<Series> expand_compact(const Prepared& prepared,const Bound
             scratch.lines.push_back({q.data()+first,last-first+1,line_top(id,n,k-b.epsilon)-first,
               denominator.majorized && !b.epsilon});
           }
-          addmul_operations+=dot(pool,scratch,target,yat(n,stream.column,k),true);++dot_products;
+          addmul_operations+=dot(pool,scratch,target,yat(n,stream.column,k),true,defect_radii);++dot_products;
           multiply(pool,scratch,target,pivots[stream.denominator]);++scalar_operations;
           if(denominator.majorized) {
             // See expand_balls: the radius of the value bounds the defect of
@@ -593,7 +596,7 @@ inline std::optional<Series> expand_compact(const Prepared& prepared,const Bound
           for(auto b:entry.numerator)if(b.epsilon<=k) {
             const auto& numerator=polynomials[b.polynomial];
             scratch.lines.push_back({numerator.data(),std::min<unsigned>(unsigned(numerator.size()),n+1),
-              line_top(entry.stream,n,k-b.epsilon),false});
+              line_top(entry.stream,n,k-b.epsilon),defect_radii && !p.ring_lengths[entry.stream]});
           }
         }
         const std::size_t target=yat(n+1,row,k);

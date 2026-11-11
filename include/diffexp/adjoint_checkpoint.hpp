@@ -31,7 +31,9 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
   for(const auto* m:{&matrix,&forcing})for(const auto& row:*m)for(const auto& entry:row)check_field(entry);
   for(const auto& row:initial.coefficients)for(const auto& series:row)for(const auto& b:series)
     if(!b.is_finite())throw std::invalid_argument("checkpoint initial ball is nonfinite");
-  json::object payload{{"algorithm","DiffExp.AdjointOriginalPath/v11-tail-selected-steps"},
+  // Probe propagation changed its retained radii and its step acceptance.
+  json::object payload{{"algorithm",options.uncertainty==AdjointOptions::Uncertainty::probe?
+      "DiffExp.AdjointOriginalPath/v12-probe-defect-radii":"DiffExp.AdjointOriginalPath/v11-tail-selected-steps"},
     {"flint_version",FLINT_VERSION},{"precision_bits",Jet::Ball::precision()},
     {"field_symbols",symbols},{"connection",numerical_rows_io::exact_matrix(matrix)},
     {"forcing",numerical_rows_io::exact_matrix(forcing)},{"initial",numerical_rows_io::exact_rows(initial)},

@@ -794,7 +794,22 @@ inline void validate_boundary(const PreparedData& p,const Boundary& boundary) {
 } // namespace detail
 // The recurrence in FLINT ball arithmetic: the reference implementation, and
 // the one that serves coefficients the compact core does not take.
-inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
+//
+// Radii. By default every coefficient is a ball enclosure: the radius of
+// Taylor order n enters order n+1 through the absolute values of the
+// connection. That bound grows like the solution of y'=|A|y, however much
+// the signed recurrence cancels (a connection with higher-order poles in its
+// basis has |A| exponents in the thousands where the true ones are a few).
+// With defect_radii the radius of Taylor order n+1 of a row is instead the
+// error committed in forming it from the MIDPOINTS of order <= n: its own
+// rounding and that of its quotient streams, which are divided out of the
+// midpoints of the rows. The computed polynomial then solves y'=yA+D exactly,
+// and sum_n radius_n |t|^n, which evaluate() returns as the radius of the
+// value, bounds the integral of |D| along the step: the rounding error of the
+// chart before the homogeneous flow of the same chart acts on it. It is not
+// an enclosure of the solution of the retained polynomial for the input ball.
+inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr,
+    bool defect_radii=false) {
   const auto &p=prepared.data();
   const auto &plan=p.compiled.data();
   detail::validate_boundary(p,boundary);
@@ -906,6 +921,7 @@ inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Sta
         for (unsigned k=0;k<width;++k) {
           auto &value=wat(id,n,0,k);
           value=yat(n,stream.column,k); // overwrite the expired ring row
+          if(defect_radii){mag_zero(arb_radref(acb_realref(value.raw())));mag_zero(arb_radref(acb_imagref(value.raw())));}
           for (auto b:denominator.blocks) if (b.epsilon<=k) {
             const auto &q=p.polynomials[b.polynomial];
             for (unsigned a=0;a<q.size() && a<=n;++a) {
@@ -947,7 +963,8 @@ inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Sta
             for(unsigned a=0;a<numerator.size() && a<=n;++a) {
               if(numerator[a].is_zero())continue;
               const auto& source=wat(entry.stream,n,a,k-b.epsilon);
-              if(!source.is_zero())collect(numerator[a],source);
+              // A stream without a quotient is the row itself.
+              if(!source.is_zero())collect(numerator[a],source,defect_radii && !p.ring_lengths[entry.stream]);
             }
           }
         }
@@ -968,12 +985,13 @@ inline Series expand_balls(const Prepared &prepared,const Boundary &boundary,Sta
 inline std::atomic<bool> compact_recurrence{std::getenv("DIFFEXP_BALL_RECURRENCE")==nullptr};
 // Charts expanded by each core since the start of the process.
 inline std::atomic<std::size_t> compact_expansions{0},ball_expansions{0};
-inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr) {
+inline Series expand(const Prepared &prepared,const Boundary &boundary,Statistics *statistics=nullptr,
+    bool defect_radii=false) {
   detail::validate_boundary(prepared.data(),boundary);
   if(compact_recurrence.load(std::memory_order_relaxed))
-    if(auto series=expand_compact(prepared,boundary,statistics)){++compact_expansions;return std::move(*series);}
+    if(auto series=expand_compact(prepared,boundary,statistics,defect_radii)){++compact_expansions;return std::move(*series);}
   ++ball_expansions;
-  return expand_balls(prepared,boundary,statistics);
+  return expand_balls(prepared,boundary,statistics,defect_radii);
 }
 // Horner value of the retained polynomial at step; truncation_log2 receives
 // its TaylorTailEstimate (see rational_transport.hpp) when requested.

@@ -41,10 +41,14 @@ int main(){try{
   auto md=series.dr_domain(mixed,false);require(md.zero_constraints.size()==1 && md.zero_constraints[0].coefficients==std::vector<Exact>{one,-one},"domain split lost cancellation between fundamental columns");
   require(series.dr_endpoint_constant(series.contract(mixed,{one,one}))[0][0]==one,"exact physical contraction lost finite limit");
   for(auto operation:{feynman::Operation::LowerLimit,feynman::Operation::UpperLimit,feynman::Operation::BetaIntegral})
-    for(auto method:{recursion::LinearMethod::adjoint,recursion::LinearMethod::factored}) {
+    for(auto method:{recursion::LinearMethod::adjoint,recursion::LinearMethod::factored})
+    for(auto accumulation:{recursion::Accumulation::rows,recursion::Accumulation::weighted}) {
+      const bool weighted=accumulation==recursion::Accumulation::weighted;
+      if(weighted && method!=recursion::LinearMethod::adjoint)continue;
       auto graph=model(operation);recursion::NumericalOptions options;options.endpoint_order=12;options.ordinary_order=32;
-      options.linear_method=method;
+      options.linear_method=method;options.accumulation=accumulation;
       recursion::Evaluator evaluator(graph,options);auto actual=evaluator.evaluate(0);auto leaf=evaluator.evaluate(1,0);
+      require((evaluator.statistics().weighted_levels>0)==weighted && !evaluator.statistics().weighted_fallbacks,"accumulation mode was not the requested one");
       require(actual.values.size()==1 && !actual.taylor_tail_certified,"domain auxiliaries leaked into physical outputs or certification");
       for(int k=std::max(actual.low,leaf.low);k<=0;++k)require(upper(actual.values[0][k-actual.low]-leaf.values[0][k-leaf.low])<1e-20,"constrained endpoint/integral differs from exact constant physical solution");
       require(evaluator.statistics().endpoint_constraint_rows>0 && evaluator.statistics().endpoint_constraint_coefficients>0,"physical endpoint domain was not checked");
@@ -52,8 +56,9 @@ int main(){try{
       auto invalid_graph=model(operation,false,true);recursion::Evaluator invalid(invalid_graph,options);
       rejects_physical([&]{invalid.evaluate(0);});
     }
-  for(bool wrong:{false,true}) {
+  for(auto accumulation:{recursion::Accumulation::rows,recursion::Accumulation::weighted})for(bool wrong:{false,true}) {
     auto graph=model(feynman::Operation::LowerLimit,true,wrong);recursion::NumericalOptions options;options.endpoint_order=12;options.ordinary_order=32;
+    options.accumulation=accumulation;
     recursion::Evaluator evaluator(graph,options);
     if(wrong)rejects_physical([&]{evaluator.evaluate(0);});
     else {auto actual=evaluator.evaluate(0);auto leaf=evaluator.evaluate(1,0);require(upper(actual.values[0][-actual.low]-leaf.values[0][-leaf.low])<1e-20,"zero physical logarithm did not cancel");}
@@ -62,8 +67,10 @@ int main(){try{
   // ordinary DR integral. Their constraints must never cancel each other.
   auto opposite=model(feynman::Operation::BetaIntegral);auto z=opposite.dimension.constant(0),o=z.constant(1),t=z.variable(0);
   opposite.nodes[0].closure.matrix={{-o/t,z},{z,o/(o-t)}};opposite.nodes[0].observable_rows={{o,-o}};
-  for(auto method:{recursion::LinearMethod::adjoint,recursion::LinearMethod::factored}){
-    recursion::NumericalOptions settings;settings.linear_method=method;settings.endpoint_order=12;settings.ordinary_order=32;
+  for(auto method:{recursion::LinearMethod::adjoint,recursion::LinearMethod::factored})
+  for(auto accumulation:{recursion::Accumulation::rows,recursion::Accumulation::weighted}){
+    if(accumulation==recursion::Accumulation::weighted && method!=recursion::LinearMethod::adjoint)continue;
+    recursion::NumericalOptions settings;settings.linear_method=method;settings.accumulation=accumulation;settings.endpoint_order=12;settings.ordinary_order=32;
     recursion::Evaluator invalid(opposite,settings);rejects_physical([&]{invalid.evaluate(0);});
   }
   auto graph=model(feynman::Operation::LowerLimit);recursion::NumericalOptions options;options.endpoint_order=12;

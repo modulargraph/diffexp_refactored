@@ -608,6 +608,7 @@ int main(int argc, char** argv) {
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
           {"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
+          {"operator_exact_zeros",stats.operator_exact_zeros},
           {"structural_zero_conflicts",stats.structural_zero_conflicts}};
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"

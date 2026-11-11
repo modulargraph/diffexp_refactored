@@ -2,6 +2,19 @@
 
 ## 2.2.1
 
+- Endpoint operators of a recursion at a numeric dimension: the leading
+  coefficients of a functional composed with the ball inverse that vanish
+  exactly are exact zeros again. They are proved like the zeros of the
+  inverse, by evaluating the product modulo two primes at the exact point
+  (`affine_operator::impose_exact_zeros`, `Options::operator_exact_zeros`);
+  no size is compared with anything. Rows built on such an operator no
+  longer carry columns that are not theirs: the double pentagon sample by
+  rows has 1201 such entries and 40% fewer products, Higgs+jet family F 62.
+  The report has `basis_selection.operator_exact_zeros`.
+- Adjoint transport finds the singular points of a connection once and maps
+  them to every leg of the path, instead of once per leg from the pulled-back
+  coefficients.
+
 - Reported radii contain an estimate of the Taylor tails the transport
   admits. What a chart cuts off is estimated from its last two retained
   terms (a geometric tail, with its sign) and added to the probe rows, which

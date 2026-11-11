@@ -38,6 +38,9 @@ struct Operator {
   int required_inverse_high = 0;
   bool principal_part_attempted = false, principal_part_certified = false;
   unsigned principal_part_zero_coefficients = 0;
+  // Leading coefficients a modular evaluation proved to vanish exactly
+  // (impose_exact_zeros).
+  unsigned exact_zero_coefficients = 0;
   std::size_t principal_part_exact_operations = 0;
   std::string principal_part_reason;
   bool omitted_tail_certified = false;
@@ -291,23 +294,48 @@ struct Recurrence {
     }
     return exact[n];
   }
-  // Whether each entry of the inverse of the order-zero matrix vanishes
-  // modulo a prime, at the exact point x and with the logarithm, which is
-  // transcendental there, replaced by a fixed residue. An exact zero of the
-  // inverse vanishes for every such choice; an entry that vanishes for two
-  // primes is an exact zero except with a probability of the order of its
-  // degree over the prime (2^-50 and less). Empty if the prime is unusable.
-  std::optional<std::vector<std::vector<char>>> inverse_zeros_modulo(
-      const AffineFrobeniusSeries &series, const Rational &x, mp_limb_t prime, mp_limb_t log_residue) const {
+  // The inverse of the order-zero matrix modulo a prime, at the exact point
+  // x and with the logarithm, which is transcendental there, replaced by a
+  // fixed residue. An exact zero of the inverse, or of a product of exact
+  // data with it, vanishes for every such choice; an entry that vanishes for
+  // two primes is an exact zero except with a probability of the order of
+  // its degree over the prime (2^-50 and less).
+  struct Modular {
+    mp_limb_t prime = 0, base = 0, log_residue = 0;
+    std::vector<mp_limb_t> inverse;  // d*d, by rows
+  };
+  // Of the two primes, once both were usable; see prepare().
+  std::vector<Modular> modular;
+  // Residue of a sum of q x^r log^k in column j, whose base exponent is
+  // factored out; nothing if a term is not of that form modulo the prime.
+  std::optional<mp_limb_t> residue_modulo(const affine_matching::detail::Polynomial &terms, unsigned j,
+      const AffineFrobeniusSeries &series, const Modular &at) const {
+    nmod_t field;
+    nmod_init(&field, at.prime);
+    mp_limb_t sum = 0;
+    for (const auto &[key, q] : terms) {
+      const auto exponent = key.first - series.exponents()[j].power;
+      const mp_limb_t denominator = fmpz_fdiv_ui(fmpq_denref(q.raw()), at.prime);
+      if (!affine_frobenius_detail::is_integer(exponent) || !denominator) return std::nullopt;
+      const mp_limb_t coefficient = nmod_div(fmpz_fdiv_ui(fmpq_numref(q.raw()), at.prime), denominator, field);
+      const long power = affine_frobenius_detail::integer_value(exponent);
+      mp_limb_t term = nmod_pow_ui(at.base, static_cast<ulong>(power < 0 ? -power : power), field);
+      if (power < 0) term = nmod_inv(term, field);
+      term = nmod_mul(term, nmod_pow_ui(at.log_residue, key.second, field), field);
+      sum = nmod_add(sum, nmod_mul(term, coefficient, field), field);
+    }
+    return sum;
+  }
+  // Empty if the prime is unusable: it divides a denominator, or the matrix
+  // is singular modulo it.
+  std::optional<Modular> inverse_modulo(const AffineFrobeniusSeries &series, const Rational &x,
+      mp_limb_t prime, mp_limb_t log_residue) const {
     nmod_t field;
     nmod_init(&field, prime);
-    const auto residue = [&](const Rational &q) -> std::optional<mp_limb_t> {
-      const mp_limb_t denominator = fmpz_fdiv_ui(fmpq_denref(q.raw()), prime);
-      if (!denominator) return std::nullopt;
-      return nmod_div(fmpz_fdiv_ui(fmpq_numref(q.raw()), prime), denominator, field);
-    };
-    const auto base = residue(x);
-    if (!base || !*base) return std::nullopt;
+    const mp_limb_t denominator = fmpz_fdiv_ui(fmpq_denref(x.raw()), prime);
+    if (!denominator) return std::nullopt;
+    Modular out{prime, nmod_div(fmpz_fdiv_ui(fmpq_numref(x.raw()), prime), denominator, field), log_residue % prime, {}};
+    if (!out.base) return std::nullopt;
     const unsigned d = symbolic.size();
     nmod_mat_t matrix, inverse;
     nmod_mat_init(matrix, d, d, prime);
@@ -315,29 +343,21 @@ struct Recurrence {
     bool usable = true;
     for (unsigned i = 0; i < d && usable; ++i)
       for (unsigned j = 0; j < d && usable; ++j) {
-        mp_limb_t sum = 0;
-        for (const auto &[key, q] : symbolic[i][j][0]) {
-          const auto exponent = key.first - series.exponents()[j].power;
-          const auto coefficient = residue(q);
-          if (!affine_frobenius_detail::is_integer(exponent) || !coefficient) { usable = false; break; }
-          const long power = affine_frobenius_detail::integer_value(exponent);
-          mp_limb_t term = nmod_pow_ui(*base, static_cast<ulong>(power < 0 ? -power : power), field);
-          if (power < 0) term = nmod_inv(term, field);
-          term = nmod_mul(term, nmod_pow_ui(log_residue % prime, key.second, field), field);
-          sum = nmod_add(sum, nmod_mul(term, *coefficient, field), field);
-        }
-        nmod_mat_set_entry(matrix, i, j, sum);
+        const auto value = residue_modulo(symbolic[i][j][0], j, series, out);
+        if (!value) usable = false;
+        else nmod_mat_set_entry(matrix, i, j, *value);
       }
-    std::optional<std::vector<std::vector<char>>> zeros;
-    if (usable && nmod_mat_inv(inverse, matrix)) {
-      zeros.emplace(d, std::vector<char>(d, 0));
+    usable = usable && nmod_mat_inv(inverse, matrix);
+    if (usable) {
+      out.inverse.resize(std::size_t(d) * d);
       for (unsigned i = 0; i < d; ++i)
         for (unsigned j = 0; j < d; ++j)
-          (*zeros)[i][j] = nmod_mat_entry(inverse, i, j) == 0;
+          out.inverse[std::size_t(i) * d + j] = nmod_mat_entry(inverse, i, j);
     }
     nmod_mat_clear(matrix);
     nmod_mat_clear(inverse);
-    return zeros;
+    if (!usable) return std::nullopt;
+    return out;
   }
   BallMatrix numeric_order(const AffineFrobeniusSeries &series, unsigned n,
                            affine_matching::detail::Budget &budget) {
@@ -506,6 +526,80 @@ inline void publish(Prepared &out, const AffineFrobeniusSeries &series,
                           state.point, budget.exact_x});
   }
 }
+// A functional composed with an inverse that a ball inversion produced has
+// balls of rounding size where the composition vanishes exactly, and rows
+// built on it carry every such column through the transport. The lowest
+// epsilon order of row i of the operator is
+//   sum_k P_ik x^(-a_k) (H_0^-1)_kj
+// with the coefficient P_ik of the functional at that order relative to the
+// shift of column k: a product of exact data, evaluated modulo two primes
+// like the zeros of the inverse itself, with the inverse modulo each prime
+// that the preparation kept (Recurrence::modular). An entry
+// whose ball contains zero and which vanishes for both is the exact zero. No
+// size is compared with anything.
+inline void impose_exact_zeros(Operator &out, const Prepared &prepared,
+    const AffineFrobeniusSeries &series,
+    const AffineFrobeniusSeries::Expansion &functional, const Options &options) {
+  namespace am = affine_matching::detail;
+  if (!prepared.recurrence || !prepared.recurrence->numeric_gauge || prepared.recurrence->loss ||
+      prepared.recurrence->modular.size() != 2)
+    return;
+  const auto &state = *prepared.recurrence;
+  try {
+    am::Budget budget{options};
+    const unsigned d = state.symbolic.size(), rows = functional.rows;
+    if (functional.columns != d || out.row_lower_bounds.size() != rows) return;
+    // One row at a time: its leading order differs from row to row.
+    std::vector<AffineFrobeniusSeries::Expansion> split;
+    if (rows > 1) {
+      split.resize(rows);
+      for (auto &row : split) { row.rows = 1; row.columns = d; }
+      for (const auto &t : functional.terms)
+        if (!t.coefficient.is_zero()) {
+          split[t.row].terms.push_back(t);
+          split[t.row].terms.back().row = 0;
+        }
+    }
+    for (unsigned i = 0; i < rows; ++i) {
+      const auto &row = rows > 1 ? split[i] : functional;
+      const long bound = out.row_lower_bounds[i];
+      if (row.terms.empty() || bound < out.matrix.low || bound > out.matrix.high) continue;
+      std::vector<long> shifts(d);
+      for (unsigned k = 0; k < d; ++k) shifts[k] = bound + state.shifts[k];
+      const auto leading = am::coefficients(row, shifts, 0, budget);
+      // The row times the inverse, modulo both primes.
+      std::vector<char> vanishes(d, 1);
+      bool usable = true;
+      for (const auto &at : state.modular) {
+        nmod_t field;
+        nmod_init(&field, at.prime);
+        std::vector<mp_limb_t> left(d);
+        for (unsigned k = 0; k < d && usable; ++k) {
+          const auto value = state.residue_modulo(leading[0][k].at(0), k, series, at);
+          if (!value) usable = false;
+          else left[k] = *value;
+        }
+        if (!usable) break;
+        for (unsigned j = 0; j < d; ++j) {
+          mp_limb_t sum = 0;
+          for (unsigned k = 0; k < d; ++k)
+            if (left[k]) sum = nmod_add(sum, nmod_mul(left[k], at.inverse[std::size_t(k) * d + j], field), field);
+          if (sum) vanishes[j] = 0;
+        }
+      }
+      if (!usable) continue;
+      for (unsigned j = 0; j < d; ++j) {
+        auto &value = out.matrix.coefficients[i][j][bound - out.matrix.low];
+        if (vanishes[j] && !value.is_zero() && value.contains_zero()) {
+          value = B(0);
+          ++out.exact_zero_coefficients;
+        }
+      }
+    }
+  } catch (const std::exception &) {
+    // An exhausted budget or an unusable term leaves the balls as they are.
+  }
+}
 } // namespace detail
 // F = H diag(x^a eps^shift), K = R H. The same exact row normalization
 // and K recurrence solve every inverse column together; uncertain boundary
@@ -557,13 +651,18 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
         // are theirs. A ball inverse returns small balls instead. An entry
         // is an exact zero again if its ball contains zero and it vanishes
         // in the inverse modulo two primes.
-        const auto first = state->inverse_zeros_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 61, 1), UWORD(0x9E3779B97F4A7C15));
-        const auto second = state->inverse_zeros_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 62, 1), UWORD(0xC2B2AE3D27D4EB4F));
-        if (first && second)
+        auto first = state->inverse_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 61, 1), UWORD(0x9E3779B97F4A7C15));
+        auto second = state->inverse_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 62, 1), UWORD(0xC2B2AE3D27D4EB4F));
+        if (first && second) {
           for (unsigned i = 0; i < d; ++i)
             for (unsigned j = 0; j < d; ++j)
-              if ((*first)[i][j] && (*second)[i][j] && (*numeric_inverse)[i][j].contains_zero())
+              if (!first->inverse[std::size_t(i) * d + j] && !second->inverse[std::size_t(i) * d + j] &&
+                  (*numeric_inverse)[i][j].contains_zero())
                 (*numeric_inverse)[i][j] = B(0);
+          // Kept for the operators composed with this inverse.
+          state->modular.push_back(std::move(*first));
+          state->modular.push_back(std::move(*second));
+        }
       }
     }
     auto gauge = numeric_inverse
@@ -726,6 +825,8 @@ inline Operator compose(const Prepared &prepared,
                             prepared.inverse
                                 .coefficients[k][j][b - prepared.inverse.low];
     }
+    if (minimum != infinity && options.operator_exact_zeros)
+      detail::impose_exact_zeros(out, prepared, series, functional, options);
     detail::certify_principal_part(out, prepared, series, functional, point,
                                    valuations, options);
     out.status = Status::Success;

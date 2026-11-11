@@ -145,6 +145,9 @@ struct NumericalStatistics {
   // rounding noise replaced by the exact zero, and (never expected) values
   // excluding zero, which are kept together with their wider child demand.
   std::size_t structural_zero_coefficients=0,structural_zero_conflicts=0;
+  // Leading coefficients of endpoint operators proved to vanish exactly
+  // modulo two primes (affine_operator::impose_exact_zeros).
+  std::size_t operator_exact_zeros=0;
 };
 // A boundary-independent local problem. Endpoint rows act on the
 // epsilon-gauged master vector. Each arm satisfies g'=forcing-g*connection
@@ -625,6 +628,8 @@ class Evaluator {
   // The requested integrals were evaluated by rows and their error is yet to
   // be estimated (estimate_rows_error).
   bool rows_error_pending_=false;
+  // The requested integrals are being accumulated as weighted rows.
+  bool weighted_rows_=false;
   const Graph& graph_;NumericalOptions options_;std::size_t xi_,ei_;int d0_;
   causal::Prescription prescription_;
   mutable std::vector<std::optional<causal::Landau>> landau_;
@@ -1458,9 +1463,14 @@ class Evaluator {
     const auto& inverse=*endpoint.inverse;
     if(!inverse.success())throw std::domain_error("recursive endpoint operator inverse unsupported: "+inverse.reason);
     std::vector<std::optional<affine_operator::Operator>> operators(rows);int low=0;
+    // Weighted accumulation transports one combination of these rows: their
+    // exact zeros would not survive it, and proving them is not free.
+    auto matching=options_.matching;
+    if(weighted_rows_)matching.operator_exact_zeros=false;
     for(unsigned i=0;i<rows;++i)if(endpoint.functionals[i]) {
-      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,options_.matching);
+      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,matching);
       if(!operators[i]->success())throw std::domain_error("recursive endpoint operator composition unsupported: "+operators[i]->reason);
+      statistics_.operator_exact_zeros+=operators[i]->exact_zero_coefficients;
       low=std::min(low,operators[i]->matrix.low);
     }
     LaurentRows result{low,high,std::vector(rows,std::vector(d,std::vector<B>(high-low+1,B(0))))};
@@ -2150,6 +2160,7 @@ class Evaluator {
     if(!targets || (!mixture && targets>options_.weighted_max_targets))
       return decline(std::to_string(targets)+" top-level targets, at most "+std::to_string(options_.weighted_max_targets)+" are weighted");
     if(mixture && mixture->size()!=targets)throw std::logic_error("weighted accumulation: one mixture weight per requested integral");
+    if(!mixture)weighted_rows_=true;
     const auto outputs=mixture?std::size_t(1):targets;
     std::size_t terminal=0;
     for(;;++terminal) {

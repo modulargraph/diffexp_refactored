@@ -41,6 +41,11 @@ struct Options {
   // Entries of the inverse that contain zero and vanish modulo two primes
   // are set to exact zeros, as the exact gauge would return them.
   bool numeric_leading_gauge = false;
+  // With that gauge: the leading coefficients of an operator composed with
+  // the inverse (affine_operator::compose) that vanish modulo the same two
+  // primes and contain zero are set to exact zeros as well. A consumer that
+  // only ever combines the rows of its operators gains nothing from them.
+  bool operator_exact_zeros = true;
   // When the supplied positive real matchpoint is an exact rational, the
   // row normalization substitutes it and works in Q[log x] instead of
   // Q(x, log x). Epsilon cancellations stay exact, and since log of a

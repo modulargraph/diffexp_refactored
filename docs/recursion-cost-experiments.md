@@ -144,9 +144,9 @@ the changes in this note (the last column is the transport alone).
 
 | | Before | Now | Transport |
 | --- | ---: | ---: | ---: |
-| Kite | 12.5 | 5.1 | 9.1 -> 1.9 |
-| Planar double box | 40.8 | 18.7 | 34.5 -> 12.3 |
-| Four-loop banana, expanded | 240.8 | 49.4 | 218.8 -> 27.6 |
+| Kite | 12.5 | 4.2 | 9.1 -> 2.2 |
+| Planar double box | 40.8 | 16.3 | 34.5 -> 13.3 |
+| Four-loop banana, expanded | 240.8 | 43.7 | 218.8 -> 33.2 |
 | Four-loop banana, one sample (epsilon = 1/400) | 76.9 | 7.8 | 23.7 -> 4.0 |
 | Double pentagon, one sample (four threads) | 1360 | 157 | 413 -> 123 |
 
@@ -186,10 +186,50 @@ thinly over the product loop; in a sampled recursion the coefficients are
 several limbs long and the products are at their arithmetic cost. Outside
 the transport, the exact stages of the expanded recursion (endpoint
 projection, endpoint series, matching coefficients, all rational-function
-arithmetic in epsilon) are untouched and are now 35 to 60 % of a run: 3.2 of
-5.1 s for the kite, 21.8 of 49.4 s for the four-loop banana. A fraction-free
-rewrite of the projection was tried and was slower, because the stored
-coefficients have a different epsilon-denominator at every order.
+arithmetic in epsilon) were 35 to 60 % of a run with endpoint order 32: 2.9
+of 5.3 s for the kite, 22.2 of 50.2 s for the four-loop banana. A
+fraction-free rewrite of the projection was tried and was slower, because
+the stored coefficients have a different epsilon-denominator at every order;
+what helped is needing fewer orders, as follows.
+
+
+**Endpoint order against overlap.** The exact endpoint series is summed at
+an overlap point at most 1/R of the way to the nearest other singular point,
+with a tail of R^-order; from there the transport takes over. R was fixed at
+16 with order 32. The exact stages grow like the order to the power 2.4,
+while a wider R costs the transport about 1.25 charts per halving of the
+overlap at each end, so the two are now chosen together (one thread,
+numerical seconds, exact stages in brackets):
+
+| R, order | Kite | Planar double box | Four-loop banana |
+| --- | ---: | ---: | ---: |
+| 16, 32 (before) | 5.3 (2.9) | 18.1 (5.6) | 50.2 (22.2) |
+| 32, 26 | 4.2 (1.8) | 17.1 (3.8) | 43.5 (13.5) |
+| 64, 22 (default now) | 4.2 (1.3) | 16.3 (2.5) | 43.7 (9.5) |
+| 256, 16 | 4.5 (0.8) | | 59.8 (4.9) |
+
+Results agree with the old pair to 1e-37 or better. A sampled recursion
+keeps 16 and 32: its exact work is rational arithmetic without epsilon, and
+a banana4 sample takes 7.6 s with (16, 32) against 8.4 s with (64, 22).
+`--overlap-ratio` and `--endpoint-order` set the pair by hand.
+
+**Product loop.** The remaining bookkeeping of the compact recurrence was
+worth 4.5 % of its instructions (a path for one-limb coefficients, simpler
+rounding copies), not the 1.4 times hoped for. An inline multiply-add in
+place of `mpn_addmul_1` was no faster.
+
+**Forward transport, again.** Transporting the solution map instead of the
+rows was tried once more where it should pay best, a double pentagon sample
+(64 rows on 33 masters): 163 s at 640 bits against 157 s for the adjoint at
+384, with a returned radius of 7e11 at epsilon = 1/400. It needs a precision
+that grows as the sample approaches epsilon = 0 and is not faster at any
+precision tried.
+
+**What is left.** With the pair above the transport is again three quarters
+of an expanded run. A run with the overlap moved out to a quarter of the
+distance and a short exact series (inaccurate, for timing only) takes 28 s
+for the four-loop banana: that is what continuing the endpoint series
+numerically beyond its exact orders could reach, about 1.5 times.
 
 ## The double pentagon, end to end
 

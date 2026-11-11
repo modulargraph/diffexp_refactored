@@ -135,6 +135,7 @@ int main(int argc, char** argv) {
           }
           // Same ranges as the "numerical" block of a configuration file.
           else if(option=="--endpoint-order"){if(number<1 || number>1000)throw std::invalid_argument("endpoint order must be in 1..1000");numerical.endpoint_order=number;}
+          else if(option=="--overlap-ratio"){if(number<4 || number>65536)throw std::invalid_argument("overlap ratio must be in 4..65536");numerical.overlap_ratio=number;}
           else if(option=="--ordinary-order"){if(number<8 || number>1000)throw std::invalid_argument("ordinary order must be in 8..1000");numerical.ordinary_order=number;}
           else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;}
           else if(option=="--leaf-digits"){if(number<1 || number>100000)throw std::invalid_argument("leaf digits must be in 1..100000");numerical.leaf_digits=number;}
@@ -428,7 +429,11 @@ Feynman-trick recursion
   --cache DIRECTORY               exact level closures and numerical checkpoints
                                   (default: diffexp-exact-cache in the temporary directory)
   --epsilon-order N               0..100 (default: the configuration's epsilon_order)
-  --endpoint-order N              1..1000 (default 32)
+  --endpoint-order N              1..1000: order of the exact series at the endpoints
+  --overlap-ratio R               4..65536: the series is summed at most 1/R of the way to the
+                                  nearest other singular point, where the transport starts.
+                                  Defaults: R=64, N=22 (R=16, N=32 with --epsilon-shift), a
+                                  2^-128 tail; with only N given, R follows from it.
   --ordinary-order N              8..1000 (default 80)
   --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis)
   --leaf-digits N                 1..100000 (default 28)

@@ -24,7 +24,6 @@ squared -3 and dimension 2-2 epsilon:
   "integrals": [[1, 1]],
   "epsilon_order": 0,
   "numerical": {
-    "endpoint_order": 32,
     "ordinary_order": 80,
     "working_bits": 384,
     "leaf_digits": 28,
@@ -77,7 +76,8 @@ Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 `fire`, and `fire-modular`. Seed controls are integers from 0 through 8. A merge is a pair
 of zero-based positions in the current physical propagator list, after earlier
 merges. Anchors are exact rationals. CLI resource options override JSON fields.
-Optional numerical fields also include `contour_height` and `overlap`.
+Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`
+and `endpoint_order` (the last two are chosen together when omitted).
 
 For Euclidean families the native code verifies positivity of the actual
 Symanzik polynomials before selecting its contour prescription. Other physical

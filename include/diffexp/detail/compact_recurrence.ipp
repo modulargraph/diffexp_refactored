@@ -227,6 +227,19 @@ struct Line {
   std::size_t top;
   bool midpoint;
 };
+// out = the `limbs` limbs of sum from limb `low` up (zeros below limb zero);
+// returns whether any is nonzero and collects the limbs dropped below.
+inline bool leading(mp_ptr out,mp_srcptr sum,slong low,slong limbs,mp_limb_t& dropped) {
+  mp_limb_t any=0;
+  if(low>=0) {
+    for(slong k=0;k<limbs;++k){out[k]=sum[low+k];any|=out[k];}
+    for(slong at=0;at<low;++at)dropped|=sum[at];
+  } else {
+    for(slong k=0;k<-low;++k)out[k]=0;
+    for(slong k=-low;k<limbs;++k){out[k]=sum[low+k];any|=out[k];}
+  }
+  return any!=0;
+}
 // Fixed-point sums of products below 2^(64*base): the integer X of `size`
 // limbs, two's complement, stands for X*2^(64*(base+1-size)). The top limb
 // takes carries and the sign; a product pass whose low limbs fall below limb
@@ -241,28 +254,28 @@ class Accumulator {
   slong base()const{return base_;}
   slong size()const{return size_;}
   slong truncated()const{return truncated_;}
+  // sum[at..) += or -= source*limb, carried into the limbs above.
+  inline __attribute__((always_inline)) void add(mp_ptr sum,mp_limb_t limb,slong at,mp_srcptr source,slong length,bool negative) {
+    if(__builtin_expect(at<0,0)) {
+      ++truncated_;
+      if(-at>=length)return;
+      source-=at;length+=at;at=0;
+    }
+    mp_ptr high=sum+at+length;
+    if(!negative) {
+      const mp_limb_t carry=mpn_addmul_1(sum+at,source,length,limb);
+      if(__builtin_expect((*high+=carry)<carry,0))for(mp_ptr q=high+1;q<sum+size_ && !++*q;++q){}
+    } else {
+      const mp_limb_t borrow=mpn_submul_1(sum+at,source,length,limb);
+      const mp_limb_t before=*high;*high=before-borrow;
+      if(__builtin_expect(before<borrow,0))for(mp_ptr q=high+1;q<sum+size_ && !(*q)--;++q){}
+    }
+  }
   inline __attribute__((always_inline)) void add(bool imaginary,const Short& c,mp_srcptr value,slong limbs,slong exponent,bool negative) {
     mp_ptr sum=imaginary?imaginary_:real_;
     const slong offset=slong(c.exponent)+exponent-limbs-base_-1+size_;
-    for(int j=0;j<c.count;++j) {
-      const mp_limb_t limb=c.limb[j];
-      if(!limb)continue;
-      slong at=offset+j,length=limbs;mp_srcptr source=value;
-      if(__builtin_expect(at<0,0)) {
-        ++truncated_;
-        if(-at>=limbs)continue;
-        source=value-at;length=limbs+at;at=0;
-      }
-      if(!negative) {
-        const mp_limb_t carry=mpn_addmul_1(sum+at,source,length,limb);
-        mp_ptr high=sum+at+length;
-        if(__builtin_expect((*high+=carry)<carry,0))for(mp_ptr q=high+1;q<sum+size_ && !++*q;++q){}
-      } else {
-        const mp_limb_t borrow=mpn_submul_1(sum+at,source,length,limb);
-        mp_ptr high=sum+at+length;const mp_limb_t before=*high;*high=before-borrow;
-        if(__builtin_expect(before<borrow,0))for(mp_ptr q=high+1;q<sum+size_ && !(*q)--;++q){}
-      }
-    }
+    if(__builtin_expect(c.count==1,1)){add(sum,c.first,offset,value,limbs,negative);return;}
+    for(int j=0;j<c.count;++j)if(const mp_limb_t limb=c.limb[j])add(sum,limb,offset+j,value,limbs,negative);
   }
   // Writes the sum as value `target`; `radius` is the propagated radius in
   // units of 2^(64*base).
@@ -283,10 +296,7 @@ class Accumulator {
     mp_limb_t dropped=0;
     for(int which=0;which<2;++which) {
       mp_srcptr sum=which?imaginary_:real_;mp_ptr out=which?pool.imaginary(target):pool.real(target);
-      mp_limb_t any=0;
-      for(slong k=0;k<limbs;++k){const slong at=low+k;out[k]=at>=0?sum[at]:0;any|=out[k];}
-      for(slong at=0;at<low;++at)dropped|=sum[at];
-      if(!any)flags|=which?Pool::imaginary_zero:Pool::real_zero;
+      if(!leading(out,sum,low,limbs,dropped))flags|=which?Pool::imaginary_zero:Pool::real_zero;
     }
     pool.exponent(target)=exponent;pool.flags(target)=flags;
     // Exact sums stay exact: only limbs that held something cost a unit.
@@ -406,10 +416,7 @@ inline void multiply(Pool& pool,Scratch& scratch,std::size_t index,const Wide& f
   const slong low=top-limbs+1,exponent=pool.exponent(index)+factor.exponent-2*limbs+top+1;
   mp_limb_t dropped=0;
   for(int which=0;which<2;++which) {
-    mp_srcptr sum=parts[which];mp_ptr to=which?pool.imaginary(index):pool.real(index);mp_limb_t any=0;
-    for(slong k=0;k<limbs;++k){const slong at=low+k;to[k]=at>=0?sum[at]:0;any|=to[k];}
-    for(slong at=0;at<low;++at)dropped|=sum[at];
-    if(!any)out|=which?Pool::imaginary_zero:Pool::real_zero;
+    if(!leading(which?pool.imaginary(index):pool.real(index),parts[which],low,limbs,dropped))out|=which?Pool::imaginary_zero:Pool::real_zero;
   }
   pool.exponent(index)=exponent;pool.flags(index)=out;
   if(dropped)bound=add(bound,{1.0,exponent-limbs});

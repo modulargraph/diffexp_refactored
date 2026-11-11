@@ -32,7 +32,16 @@ struct NumericalOptions {
   // Every transform is checked against the graph before endpoint preparation.
   std::map<std::size_t,PhysicalBasisTransform> physical_bases;
   slong working_bits=384;
-  unsigned endpoint_order=32,ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
+  // The exact endpoint series is summed at the overlap point, at most
+  // 1/overlap_ratio of the way to the nearest other singular point, where the
+  // transport takes over: its tail is overlap_ratio^-endpoint_order. A wider
+  // ratio buys a shorter series (whose exact cost grows faster than its
+  // order) for a few more charts next to the endpoint. Zero selects the pair
+  // for a 2^-128 tail: 64 and 22, or 16 and 32 for a recursion specialised
+  // to a numeric dimension, whose exact work is cheap. With only the order
+  // given the ratio follows from it, between 16 and 64.
+  unsigned endpoint_order=0,overlap_ratio=0;
+  unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
   unsigned shifted_leaf_orders=60;
@@ -135,7 +144,7 @@ inline void validate_numerical_options(const NumericalOptions& options) {
     throw std::invalid_argument("a continuation belongs to one adjoint arm; use ordinary_cache_directory for recursive continuation");
   const auto fail=[](const std::string& what){throw std::invalid_argument("recursive numerical options or finite budgets: "+what);};
   if(options.working_bits<64 || options.working_bits>1000000)fail("working precision must be 64..1000000 bits");
-  if(options.endpoint_order<1)fail("endpoint order must be positive");
+  if(options.overlap_ratio && (options.overlap_ratio<4 || options.overlap_ratio>65536))fail("overlap ratio must lie in 4..65536");
   if(options.ordinary_order<8 || options.ordinary_order>1000)fail("ordinary order must be 8..1000");
   if(!options.max_epsilon || options.max_epsilon>100)fail("epsilon budget must be 1..100");
   if(!options.max_refinements || !options.max_overlap_halvings)fail("refinement and overlap-halving budgets must be positive");
@@ -323,6 +332,12 @@ class Evaluator {
     if(!options_.adjoint.truncation_bits)options_.adjoint.truncation_bits=static_cast<unsigned>(std::min<double>(
       std::min<double>(2.0*options_.ordinary_order,static_cast<double>(options_.working_bits)-32),
       std::ceil((options_.leaf_digits+10.0)*std::log2(10.0))));
+    if(!options_.overlap_ratio) {
+      options_.overlap_ratio=graph_.specialised?16:64;
+      if(options_.endpoint_order)
+        options_.overlap_ratio=options_.endpoint_order>=32?16:options_.endpoint_order>=26?32:64;
+    }
+    if(!options_.endpoint_order)options_.endpoint_order=static_cast<unsigned>(std::ceil(128.0/std::log2(static_cast<double>(options_.overlap_ratio))));
     auto [xi,ei]=path_epsilon_variables(graph_.dimension);xi_=xi;ei_=ei;
     for(const auto& [depth,basis]:options_.physical_bases)
       if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf)
@@ -1014,9 +1029,11 @@ class Evaluator {
     }
     // This proves a geometric convergence margin for the formal epsilon
     // coefficients. It does not certify the omitted affine Taylor tail.
+    const unsigned long ratio=options_.overlap_ratio;
     for(unsigned halvings=0;halvings<options_.max_overlap_halvings;++halvings) {
       const auto upper=M::upper_abs(B::from_strings(result.overlap.str()));
-      if(result.overlap<=options_.overlap && (result.nonzero_poles.empty() || upper*M::from_ui(16)<=result.nearest_pole_lower))return result;
+      if(result.overlap<=options_.overlap && result.overlap<=Rational(1)/Rational(static_cast<long>(ratio)) &&
+          (result.nonzero_poles.empty() || upper*M::from_ui(ratio)<=result.nearest_pole_lower))return result;
       result.overlap=result.overlap/Rational(2);
     }
     throw std::runtime_error("recursive geometric endpoint-overlap budget exhausted");

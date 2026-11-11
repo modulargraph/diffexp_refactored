@@ -23,6 +23,14 @@
   admitted per chart follows the requested leaf digits. On one core the
   kite takes 5.1 s of numerical time instead of 12.5, the planar double box
   18.7 instead of 40.8, the four-loop banana 49.4 instead of 240.8.
+- The order of the exact endpoint series and the overlap point where the
+  transport takes over are chosen together: overlap at most 1/64 of the way
+  to the nearest other singular point with order 22 (1/16 and 32 before, and
+  still for `--epsilon-shift` samples), the same 2^-128 tail for less than
+  half the exact endpoint work. `--overlap-ratio R` (configuration key
+  `overlap_ratio`) and `--endpoint-order N` set the pair; the example
+  configurations no longer fix the order. One core: kite 4.2 s, planar
+  double box 16.3 s, four-loop banana 43.7 s.
 - Uncertainty propagation in the recursion's transports. A chart that would
   wrap its inherited uncertainty used to be evaluated through the chart map,
   one expansion per master. The recursion now transports midpoints from the

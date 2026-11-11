@@ -92,7 +92,7 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("max_sources_per_level"))c.preparation.max_sources_per_level=integer(*v,1,100000,"source budget");
   }
   if(auto p=o.if_contains("numerical")) {
-    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap","direct_endpoint_functionals"},"numerical");
+    const auto& a=p->as_object();known_keys(a,{"endpoint_order","ordinary_order","working_bits","leaf_digits","method","transport","transport_digits","contour_height","overlap","overlap_ratio","direct_endpoint_functionals"},"numerical");
     if(auto v=a.if_contains("direct_endpoint_functionals"))c.numerical.direct_endpoint_functionals=v->as_bool();
     if(auto v=a.if_contains("endpoint_order"))c.numerical.endpoint_order=integer(*v,1,1000,"endpoint order");
     if(auto v=a.if_contains("ordinary_order"))c.numerical.ordinary_order=integer(*v,8,1000,"ordinary order");
@@ -100,6 +100,7 @@ inline Configuration parse(const json::value& value) {
     if(auto v=a.if_contains("leaf_digits"))c.numerical.leaf_digits=integer(*v,1,100000,"leaf digits");
     if(auto v=a.if_contains("contour_height"))c.numerical.contour_height=rational(*v);
     if(auto v=a.if_contains("overlap"))c.numerical.overlap=rational(*v);
+    if(auto v=a.if_contains("overlap_ratio"))c.numerical.overlap_ratio=integer(*v,4,65536,"overlap ratio");
     // Taylor charts are the only ordinary transport. "auto" and "taylor" from
     // earlier templates still mean exactly that; the removed backends and
     // their accuracy knob are named in the error instead of being ignored.
@@ -137,7 +138,7 @@ inline json::value describe(const feynman::ExampleFamily& f) {
   json::object out{{"schema","DiffExp.FeynmanFamily/v1"},{"name",f.name},{"loops",f.momenta.loops},
     {"external_gram",std::move(gram)},{"propagators",std::move(lines)},{"physical_count",f.physical_count},
     {"dimension_at_epsilon_zero",f.dimension_at_epsilon_zero},{"epsilon_order",f.name=="bubble"?4:f.name=="pentagon_massive"?2:0},
-    {"numerical",json::object{{"endpoint_order",32},{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"}}}};
+    {"numerical",json::object{{"ordinary_order",80},{"working_bits",384},{"leaf_digits",28},{"method","adjoint"}}}};
   if(f.name=="henn_double_pentagon_x0") {
     json::array anchors,signs;for(const auto& q:causal::henn_anchors())anchors.emplace_back(q.str());
     for(unsigned i=0;i<7;++i)signs.push_back(i==0?1:-1);

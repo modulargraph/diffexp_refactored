@@ -179,8 +179,10 @@ cached: recomputing them is faster than verifying a stored copy.
 `adjoint`. `--basis-scan-seconds N` bounds the per-level search for an internal
 master basis with a smaller exact connection (0 disables it). The options
 `--method values`, `--ft-transport` and `--ft-transport-digits` were removed and
-are rejected with that message. Numerical defaults are endpoint order 32, ordinary order 80,
-384 working bits and 28 leaf digits. Preparation has finite budgets, adjustable
+are rejected with that message. Numerical defaults are ordinary order 80,
+384 working bits, 28 leaf digits, and an exact endpoint series of order 22 summed
+within 1/64 of the distance to the nearest other singular point (`--endpoint-order`,
+`--overlap-ratio`). Preparation has finite budgets, adjustable
 with `--fire-seconds`, `--level-seconds` and `--total-seconds`. These bound exact
 preparation, not the duration of the full numerical calculation.
 Run `build/diffexp --help` for the remaining options.

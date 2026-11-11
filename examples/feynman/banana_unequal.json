@@ -57,7 +57,6 @@
   "dimension_at_epsilon_zero": 2,
   "epsilon_order": 0,
   "numerical": {
-    "endpoint_order": 32,
     "ordinary_order": 80,
     "working_bits": 384,
     "leaf_digits": 28,

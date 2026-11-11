@@ -109,11 +109,28 @@ string(JSON scans GET "${native}" basis_selection scans)
 if(series_seconds LESS 0 OR operator_seconds LESS 0 OR selection_seconds LESS 0 OR scans LESS 1)
   message(FATAL_ERROR "FT phase timings missing: ${native}")
 endif()
+# Moving-pole removal is opt-in. Both modes report themselves, and on a family
+# without moving poles they leave the answer untouched.
+string(JSON default_mode ERROR_VARIABLE no_report GET "${resumed}" moving_poles mode)
+if(no_report STREQUAL "NOTFOUND")
+  message(FATAL_ERROR "Default FT run reports a moving-pole mode: ${resumed}")
+endif()
+string(JSON resumed_coefficients GET "${resumed}" coefficients)
+foreach(mode remove exchange)
+  execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+    --cache "${ibp_cache}" --no-numerical-cache --moving-poles ${mode} --json
+    OUTPUT_VARIABLE moved ERROR_VARIABLE errors RESULT_VARIABLE status)
+  string(JSON reported GET "${moved}" moving_poles mode)
+  string(JSON moved_coefficients GET "${moved}" coefficients)
+  if(NOT status EQUAL 0 OR NOT reported STREQUAL "${mode}" OR NOT moved_coefficients STREQUAL resumed_coefficients)
+    message(FATAL_ERROR "--moving-poles ${mode} failed or changed a family without moving poles: ${errors} ${moved}")
+  endif()
+endforeach()
 file(REMOVE_RECURSE "${ibp_cache}")
 
 # Numerical options are rejected before the exact preparation starts: no IBP
 # output, and not even the cache directory, may precede the error.
-foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--ordinary-order;4")
+foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--ordinary-order;4" "--moving-poles;sometimes")
   execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
     ${invalid} --cache "${ibp_cache}-invalid" --no-numerical-cache --json
     OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)
@@ -144,6 +161,6 @@ endif()
 file(REMOVE_RECURSE "${transient_cache}")
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" --help OUTPUT_VARIABLE output RESULT_VARIABLE status)
 if(NOT status EQUAL 0 OR NOT output MATCHES "--basis-scan-seconds" OR NOT output MATCHES "--no-numerical-cache keeps only the exact IBP level closures" OR
-    NOT output MATCHES "Taylor charts")
+    NOT output MATCHES "Taylor charts" OR NOT output MATCHES "--moving-poles keep")
   message(FATAL_ERROR "FT help omits documented options: ${output}")
 endif()

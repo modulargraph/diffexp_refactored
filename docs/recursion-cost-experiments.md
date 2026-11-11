@@ -294,7 +294,10 @@ The double pentagon has 64 rows x 33 masters with epsilon through 12 at level
 would reduce that, none of it measured:
 
 - fewer epsilon orders at the inner levels, through master bases whose
-  connection has fewer epsilon poles (each level currently adds several);
+  connection has fewer epsilon poles (each level currently adds several).
+  The moving poles of the bases are not the reason: there are three in this
+  family, and removing one changes no window
+  ([moving-poles.md](moving-poles.md), measured);
 - fewer rows, by transporting the d x d solution map once per chart when a
   level has more rows than masters (at most a factor rows/masters, below 2
   here);

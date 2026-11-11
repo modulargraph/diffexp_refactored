@@ -19,6 +19,7 @@
 #include "diffexp/fire_modular.hpp"
 #include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/henn_boundary.hpp"
+#include "diffexp/moving_poles.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -71,7 +72,7 @@ int main(int argc, char** argv) {
       bool numerical_cache=true;
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
-      std::string henn_basis,epsilon_shift;
+      std::string henn_basis,epsilon_shift,moving_poles="keep";
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
       for(int i=3;i<argc;++i) {
@@ -94,6 +95,10 @@ int main(int argc, char** argv) {
         else if(option=="--cache")cache=option_value;
         else if(option=="--henn-basis")henn_basis=option_value;
         else if(command=="ft" && option=="--epsilon-shift")epsilon_shift=option_value;
+        else if(option=="--moving-poles") {
+          moving_poles=option_value;
+          if(moving_poles!="keep" && moving_poles!="remove" && moving_poles!="exchange")throw std::invalid_argument("--moving-poles must be keep, remove or exchange");
+        }
         else if(option=="--fire-seconds" || option=="--level-seconds" || option=="--total-seconds" ||
             option=="--fire-threads" || option=="--fire-simplifier-threads" || option=="--fire-memory-mib") {
           const std::string value=option_value;unsigned number=0;
@@ -203,6 +208,33 @@ int main(int argc, char** argv) {
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
+      // Experimental: masters without moving poles (docs/moving-poles.md).
+      boost::json::array moving_pole_levels;double moving_pole_seconds=0;
+      const auto describe_moving_poles=[&](std::size_t depth,const diffexp::moving_poles::Result& result) {
+        moving_pole_seconds+=result.seconds;
+        if(!result.before.factors)return;
+        progress<<"Level "<<depth+1<<": moving poles: "<<result.before.factors<<" mixed factors of total order "<<result.before.total_order
+          <<" -> "<<result.after.total_order<<"; connection characters "<<result.original_characters<<" -> "<<result.characters<<"; "<<result.seconds<<" s\n";
+        boost::json::array steps;
+        for(const auto& step:result.steps) {
+          progress<<"  ("<<step.factor<<"): master "<<step.replaced<<" replaced by "<<step.source<<"\n";
+          steps.push_back(boost::json::object{{"factor",step.factor},{"replaced_master",step.replaced},{"by",step.source}});
+        }
+        boost::json::array remaining;
+        for(const auto& factor:result.remaining){progress<<"  left in place: ("<<factor<<")\n";remaining.emplace_back(factor);}
+        if(result.budget_reached)progress<<"  stopped by its step or time budget\n";
+        moving_pole_levels.push_back(boost::json::object{{"level",depth+1},{"mixed_factors",result.before.factors},{"mixed_order_before",result.before.total_order},
+          {"mixed_order_after",result.after.total_order},{"characters_before",result.original_characters},{"characters_after",result.characters},
+          {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
+        progress<<std::flush;
+      };
+      // exchange: a level swaps masters for cached integrals of the same sector
+      // before its masters become the child's requests.
+      if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
+        diffexp::moving_poles::Result result;
+        level=diffexp::moving_poles::exchange(std::move(level),0,1,{},&result);
+        describe_moving_poles(depth,result);return level;
+      };
       // A spent time budget names the three knobs that bound the preparation.
       auto graph=[&] {
         try {
@@ -241,6 +273,10 @@ int main(int argc, char** argv) {
       report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds},
         {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
+      const auto report_moving_poles=[&] {
+        if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
+      };
+      report_moving_poles();
       if(command=="prepare")progress<<"This prepares equations and recursive operations; it does not report a numerical integral.\n";
       else {
         numerical.progress=[&progress,start=std::chrono::steady_clock::now()](std::size_t depth,const std::string& phase,int high) {
@@ -256,6 +292,16 @@ int main(int argc, char** argv) {
           progress<<"  adjoint transport at "<<static_cast<int>(100*fraction)<<"% of its path; elapsed "
             <<std::chrono::duration<double>(now-start).count()<<" s\n"<<std::flush;
         };
+        // remove: internal master bases without moving poles. They are found
+        // on the exact graph, before any epsilon shift: at a numeric dimension
+        // a moving pole is one more ordinary pole.
+        if(moving_poles=="remove") {
+          for(auto& [depth,basis]:diffexp::moving_poles::bases(graph,{},describe_moving_poles))
+            numerical.physical_bases.insert_or_assign(depth,epsilon_shift.empty()?std::move(basis):
+              diffexp::moving_poles::shift_epsilon(std::move(basis),diffexp::Rational(epsilon_shift),epsilon_order==0));
+          // The scan for a smaller connection continues from these bases.
+          numerical.scan_physical_bases=true;
+        }
         // Experimental: expand around epsilon=shift; coefficient k of the
         // result then multiplies (epsilon-shift)^k.
         if(!epsilon_shift.empty()) {
@@ -267,6 +313,7 @@ int main(int argc, char** argv) {
             std::min<unsigned>(128,2*numerical.ordinary_order);
           report["epsilon_shift"]=epsilon_shift;
         }
+        report_moving_poles();
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
@@ -455,6 +502,15 @@ Feynman-trick recursion
   --epsilon-shift Q               experimental: expand around epsilon=Q (a rational); coefficient k
                                   then multiplies (epsilon-Q)^k, and order 0 is the integral in
                                   d0-2Q dimensions (docs/recursion-cost-experiments.md)
+  --moving-poles keep|remove|exchange
+                                  experimental (default keep): per level, remove the denominator
+                                  factors of the connection that mix x with epsilon
+                                  (docs/moving-poles.md). remove (ft): in an internal basis, a
+                                  master replaced by a cached integral or an exact combination;
+                                  the basis scan of such a level starts from this basis.
+                                  exchange (prepare/ft): the level's masters themselves, a master
+                                  replaced by a cached integral of its sector; the levels below
+                                  are prepared for the new masters
   These ranges are checked before the IBP preparation starts. Ordinary transport is by Taylor charts;
   --ft-transport, --ft-transport-digits and --method values were removed. Endpoint series are never
   cached: recomputing them is faster than verifying a stored copy.

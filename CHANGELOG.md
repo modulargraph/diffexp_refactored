@@ -2,6 +2,14 @@
 
 ## 2.2.0
 
+- `diffexp ft --moving-poles remove|exchange` (experimental, default `keep`)
+  removes the denominator factors of a level's connection that mix the merge
+  parameter with epsilon, by exchanging a master for another integral of the
+  cached reduction or for an exact combination (`moving_poles.hpp`).
+  `diffexp_master_basis_report` lists the denominator factors of every level.
+  On one core the planar double box takes 13.7 s of numerical time instead
+  of 19.6; a double-pentagon sample and all epsilon windows are unchanged
+  ([docs/moving-poles.md](docs/moving-poles.md)).
 - Mathematica `WorkingPrecision` defaults to `Automatic` (twice the
   `AccuracyGoal` plus 30 digits, 100 digits without a goal) instead of 500.
 - `--fire-seconds` also bounds one elimination of the built-in IBP solver

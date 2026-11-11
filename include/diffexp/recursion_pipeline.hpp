@@ -203,6 +203,14 @@ inline artifacts::Identity identity(const Graph& graph,std::size_t depth,
   id.geometry["anchor"]=node.anchor.str();
   id.branch={{"convention",prescription.convention},{"f_rim",prescription.f_rim},
              {"x_detour_sign",prescription.levels.at(depth).x_detour_sign}};
+  // Derived orientations are a function of the level's propagators; what was
+  // derived at its pinch candidates is part of the identity all the same.
+  if(prescription.derive_orientations) {
+    std::string derived;
+    try {derived=causal::Landau(node.merged,graph.field.variables()[xi]).signature(prescription.f_rim);}
+    catch(const std::exception& error) {derived=std::string(causal::derivation_revision)+";unavailable: "+error.what();}
+    id.branch["derived_orientations"]=derived;
+  }
   id.boundary={{"status","basis selection independent of numerical boundary and requested epsilon high"}};
   id.json_value();return id;
 }
@@ -291,6 +299,12 @@ class Evaluator {
     std::optional<affine_operator::Prepared> inverse;
     std::optional<Rational> inverse_point;
   };
+  struct SingularPoint {
+    Rational low,high;
+    int side=0;
+    // Why no side could be derived; such a point may not lie on a leg.
+    std::string undetermined;
+  };
   struct Plan {
     EpsilonGaugeResult gauge;
     Matrix diagonal,inverse_diagonal;
@@ -303,8 +317,9 @@ class Evaluator {
     std::optional<int> adjoint_child_loss,factored_child_loss;
     bool factored_conditioning_failed=false;
     // Rational enclosures of the real singular points of the transported
-    // connection and its forcing, ascending; see path().
-    std::optional<std::vector<std::pair<Rational,Rational>>> real_singularities;
+    // connection and its forcing, ascending, each with the side on which the
+    // contour passes it (zero: free); see path().
+    std::optional<std::vector<SingularPoint>> real_singularities;
     std::vector<std::string> constraint_labels;
     bool has_physical_basis=false;
     epsilon_demand::Highs component_child_loss;
@@ -366,7 +381,9 @@ class Evaluator {
         (graph_.dimension.variable(ei_)+graph_.dimension.constant(graph_.epsilon_shift))))
       throw std::invalid_argument("recursive numerical dimension must be d0-2eps");
     prescription_=options_.causal_prescription?*options_.causal_prescription:example_prescription();
+    if(prescription_.derive_orientations)prescription_.levels.assign(graph_.nodes.size(),causal::LevelPlan{1});
     prescription_.validate(graph_.nodes.size());
+    landau_.resize(graph_.nodes.size());
     if(options_.automatic_basis_scan && !options_.basis_cache_directory.empty())
       basis_store_=std::make_unique<artifacts::Store>(options_.basis_cache_directory,options_.basis_cache_max_bytes);
   }
@@ -381,6 +398,21 @@ class Evaluator {
     return *expressions_[depth];
   }
   const causal::Prescription& causal_prescription()const{return prescription_;}
+  // The real singular points strictly inside (0,1) of the levels evaluated so
+  // far, with the side each was given (zero: free).
+  struct CausalPoint {std::size_t depth;std::string x;int side;};
+  std::vector<CausalPoint> causal_points()const {
+    std::vector<CausalPoint> out;
+    for(std::size_t depth=0;depth<plans_.size();++depth) {
+      if(!plans_[depth] || !plans_[depth]->real_singularities)continue;
+      for(const auto& point:*plans_[depth]->real_singularities) {
+        if(!(Rational(0)<point.low) || !(point.high<Rational(1)))continue;
+        B middle;arb_set_fmpq(acb_realref(middle.raw()),((point.low+point.high)/Rational(2)).raw(),128);
+        out.push_back({depth,middle.real_midpoint(20),point.side});
+      }
+    }
+    return out;
+  }
   const EndpointGeometry& endpoint_geometry(std::size_t depth)const {
     if(depth>=plans_.size() || !plans_[depth])throw std::out_of_range("recursive endpoint geometry is not prepared");
     return plans_[depth]->geometry;
@@ -524,6 +556,7 @@ class Evaluator {
   }
   const Graph& graph_;NumericalOptions options_;std::size_t xi_,ei_;int d0_;
   causal::Prescription prescription_;
+  mutable std::vector<std::optional<causal::Landau>> landau_;
   NumericalStatistics statistics_;
   std::unique_ptr<artifacts::Store> basis_store_;
   std::vector<std::unique_ptr<Plan>> plans_;
@@ -604,24 +637,70 @@ class Evaluator {
     }
     return result;
   }
+  // Without a supplied prescription the contour is derived. A family whose
+  // physical U and F have positive monomials has no cut on the open simplex:
+  // every real singular point is free and takes the default side. Any other
+  // kinematics orient each real singular point from the level's own F.
   causal::Prescription example_prescription()const {
     // A familiar name cannot authorize a prescription for altered kinematics.
-    // Compare the actual incoming coordinates with the native fixture before
-    // using its positivity proof or its supplied Henn contour data.
-    auto example=graph_.definition?*graph_.definition:feynman::example_family(graph_.family_name);
-    const ibp::PropagatorBasis expected(ibp::quadratic_family(example.momenta,graph_.dimension,example.physical_count));
-    const auto& actual=graph_.nodes.front().incoming;
-    bool same=actual.physical_count==expected.physical_count && actual.space.loops==expected.space.loops &&
-      actual.space.external_gram==expected.space.external_gram && actual.denominators.size()==expected.denominators.size() &&
-      d0_==example.dimension_at_epsilon_zero;
-    if(same)for(std::size_t i=0;i<actual.denominators.size();++i)
-      same=same&&pullback::equal(actual.denominators[i],expected.denominators[i]);
-    if(!same)throw std::invalid_argument("altered example kinematics require an explicit causal prescription");
-    std::vector<Rational> anchors;bool standard=true;
-    for(const auto& node:graph_.nodes) {anchors.push_back(node.anchor);standard=standard&&node.left==0&&node.right==1;}
-    if(!graph_.definition && graph_.family_name=="henn_double_pentagon_x0")
-      return causal::current_example(graph_.family_name,graph_.nodes.size(),anchors,standard);
-    return causal::euclidean_family(example,graph_.nodes.size());
+    // Compare the actual incoming coordinates with the definition before
+    // using its positivity proof or the supplied Henn contour data.
+    std::optional<feynman::ExampleFamily> example;
+    if(graph_.definition)example=*graph_.definition;
+    else try{example=feynman::example_family(graph_.family_name);}catch(const std::exception&){}
+    if(example) {
+      const ibp::PropagatorBasis expected(ibp::quadratic_family(example->momenta,graph_.dimension,example->physical_count));
+      const auto& actual=graph_.nodes.front().incoming;
+      bool same=actual.physical_count==expected.physical_count && actual.space.loops==expected.space.loops &&
+        actual.space.external_gram==expected.space.external_gram && actual.denominators.size()==expected.denominators.size() &&
+        d0_==example->dimension_at_epsilon_zero;
+      if(same)for(std::size_t i=0;i<actual.denominators.size();++i)
+        same=same&&pullback::equal(actual.denominators[i],expected.denominators[i]);
+      if(same && !graph_.definition && graph_.family_name=="henn_double_pentagon_x0") {
+        std::vector<Rational> anchors;bool standard=true;
+        for(const auto& node:graph_.nodes) {anchors.push_back(node.anchor);standard=standard&&node.left==0&&node.right==1;}
+        return causal::current_example(graph_.family_name,graph_.nodes.size(),anchors,standard);
+      }
+      if(same && causal::euclidean(*example))return causal::euclidean_family(*example,graph_.nodes.size());
+    }
+    return causal::derived(graph_.nodes.size());
+  }
+  // The real singular points of a level's transported system, with the side
+  // of each.
+  const std::vector<SingularPoint>& singular_points(std::size_t depth,Plan& prepared)const {
+    if(prepared.real_singularities)return *prepared.real_singularities;
+    auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_);
+    for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_))roots.push_back(std::move(root));
+    std::vector<std::pair<Rational,Rational>> intervals;
+    for(const auto& root:roots)intervals.emplace_back(rational_bound(acb_realref(root.raw()),false),rational_bound(acb_realref(root.raw()),true));
+    std::sort(intervals.begin(),intervals.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    // Enclosures of one root found through two denominators overlap.
+    std::vector<SingularPoint> merged;
+    for(auto& interval:intervals) {
+      if(!merged.empty() && !(merged.back().high<interval.first)) {
+        if(merged.back().high<interval.second)merged.back().high=interval.second;
+      } else merged.push_back({std::move(interval.first),std::move(interval.second),0,{}});
+    }
+    if(prescription_.derive_orientations) {
+      auto& landau=landau_.at(depth);std::string unavailable;
+      if(!landau)try {landau.emplace(graph_.nodes[depth].merged,graph_.field.variables()[xi_]);}
+        catch(const std::exception& error) {unavailable=std::string("its Symanzik polynomials could not be formed: ")+error.what();}
+      for(auto& point:merged) {
+        if(!(Rational(0)<point.low) || !(point.high<Rational(1)))continue;
+        if(!landau){point.undetermined=unavailable;continue;}
+        const auto verdict=landau->orient(point.low,point.high,prescription_.f_rim);
+        if(verdict.kind==causal::Orientation::Kind::Oriented)point.side=verdict.side;
+        else if(verdict.kind==causal::Orientation::Kind::Undetermined)point.undetermined=verdict.reason.empty()?"undecided":verdict.reason;
+      }
+    }
+    prepared.real_singularities=std::move(merged);
+    return *prepared.real_singularities;
+  }
+  [[noreturn]] void undetermined(std::size_t depth,const SingularPoint& point)const {
+    B middle;arb_set_fmpq(acb_realref(middle.raw()),((point.low+point.high)/Rational(2)).raw(),128);
+    throw std::domain_error("the causal side of the real singular point x = "+middle.real_midpoint(20)+" of level "+
+      std::to_string(depth+1)+" could not be derived from the level's Symanzik F ("+point.undetermined+
+      "); supply an explicit `causal` object (f_rim and one level_signs entry per level) to state the contour");
   }
   void report(std::size_t depth,const std::string& phase,int high)const {if(options_.progress)options_.progress(depth,phase,high);}
   static int checked(long value) {
@@ -1508,46 +1587,60 @@ class Evaluator {
     if(from==to)return {from};
     const auto& names=graph_.dimension.variables();auto ii=std::find(names.begin(),names.end(),"I");
     if(ii==names.end())throw std::invalid_argument("recursive contour requires exact I variable");
-    const auto imaginary=graph_.dimension.variable(ii-names.begin())*
-      graph_.dimension.constant(Rational(prescription_.levels.at(depth).x_detour_sign));
+    const int free_side=prescription_.levels.at(depth).x_detour_sign;
+    const auto unit=graph_.dimension.variable(ii-names.begin());
+    const auto imaginary=[&](int side){return unit*graph_.dimension.constant(Rational(side));};
     // At a numeric dimension the moving poles of the master basis are real
     // points in nearly coincident pairs all along the segment, and the
     // coefficients are long whatever the centre: there the whole leg runs at
     // the contour height, away from them.
-    if(graph_.specialised) {
-      const auto lift=imaginary*graph_.dimension.constant(options_.contour_height);
+    if(graph_.specialised && !prescription_.derive_orientations) {
+      const auto lift=imaginary(free_side)*graph_.dimension.constant(options_.contour_height);
       return {from,from+lift,to+lift,to};
-    }
-    if(!prepared.real_singularities) {
-      auto roots=real_singular_points(prepared.gauge.matrix,xi_,ei_);
-      for(auto& root:real_singular_points(prepared.beta_rows,xi_,ei_))roots.push_back(std::move(root));
-      const auto bound=[](const arb_t value,bool upper) {
-        arf_t side;arf_init(side);
-        if(upper)arb_get_ubound_arf(side,value,ARF_PREC_EXACT);else arb_get_lbound_arf(side,value,ARF_PREC_EXACT);
-        fmpq_t exact;fmpq_init(exact);arf_get_fmpq(exact,side);
-        char* text=fmpq_get_str(nullptr,10,exact);Rational result{std::string(text)};
-        flint_free(text);fmpq_clear(exact);arf_clear(side);return result;
-      };
-      std::vector<std::pair<Rational,Rational>> intervals;
-      for(const auto& root:roots)intervals.emplace_back(bound(acb_realref(root.raw()),false),bound(acb_realref(root.raw()),true));
-      std::sort(intervals.begin(),intervals.end(),[](const auto& a,const auto& b){return a.first<b.first;});
-      // Enclosures of one root found through two denominators overlap.
-      std::vector<std::pair<Rational,Rational>> merged;
-      for(auto& interval:intervals) {
-        if(!merged.empty() && !(merged.back().second<interval.first)) {
-          if(merged.back().second<interval.second)merged.back().second=interval.second;
-        } else merged.push_back(std::move(interval));
-      }
-      prepared.real_singularities=std::move(merged);
     }
     const Rational start=from.rational(),finish=to.rational();
     const bool ascending=start<finish;const Rational& low=ascending?start:finish;const Rational& high=ascending?finish:start;
-    std::vector<std::pair<Rational,Rational>> inside;
-    for(const auto& interval:*prepared.real_singularities) {
-      if(!(low<interval.second) || !(interval.first<high))continue;
-      if(!(low<interval.first) || !(interval.second<high))
+    std::vector<SingularPoint> inside;
+    for(const auto& point:singular_points(depth,prepared)) {
+      if(!(low<point.high) || !(point.low<high))continue;
+      if(!(low<point.low) || !(point.high<high))
         throw std::domain_error("a transport leg ends on a real singular point of its level");
-      inside.push_back(interval);
+      if(!point.undetermined.empty())undetermined(depth,point);
+      inside.push_back(point);
+    }
+    if(graph_.specialised) {
+      // The lifted leg stays on one side while the oriented points ask for
+      // it; between two that ask for opposite sides it crosses the real
+      // axis, vertically, in the middle of the widest gap between the
+      // singular points that separate them.
+      const auto lift=graph_.dimension.constant(options_.contour_height);
+      int side=0;for(const auto& point:inside)if(point.side){side=point.side;break;}
+      if(!side)side=free_side;
+      std::vector<Exact> vertices{graph_.dimension.constant(low),graph_.dimension.constant(low)+imaginary(side)*lift};
+      for(std::size_t first=0;first<inside.size();++first) {
+        if(!inside[first].side || inside[first].side==side)continue;
+        std::size_t previous=first;while(previous-->0)if(inside[previous].side)break;
+        Rational left=inside[previous].high,right=inside[previous+1].low;
+        for(std::size_t k=previous+1;k<first;++k)
+          if(right-left<inside[k+1].low-inside[k].high){left=inside[k].high;right=inside[k+1].low;}
+        // A short binary fraction in the middle half of the gap.
+        const Rational quarter=(right-left)/Rational(4);
+        Rational grid(1),crossing(0);
+        for(unsigned attempt=0;attempt<4096;++attempt,grid=grid/Rational(2)) {
+          const auto ratio=(left+quarter)/grid;fmpz_t whole;fmpz_init(whole);
+          fmpz_cdiv_q(whole,fmpq_numref(ratio.raw()),fmpq_denref(ratio.raw()));
+          crossing=Rational::from_integer(whole)*grid;fmpz_clear(whole);
+          if(!(right-quarter<crossing))break;
+        }
+        if(!(left<crossing) || !(crossing<right))throw std::runtime_error("no regular point between singular points of opposite causal sides");
+        vertices.push_back(graph_.dimension.constant(crossing)+imaginary(side)*lift);
+        side=inside[first].side;
+        vertices.push_back(graph_.dimension.constant(crossing)+imaginary(side)*lift);
+      }
+      vertices.push_back(graph_.dimension.constant(high)+imaginary(side)*lift);
+      vertices.push_back(graph_.dimension.constant(high));
+      if(!ascending)std::reverse(vertices.begin(),vertices.end());
+      return vertices;
     }
     std::vector<Exact> vertices{graph_.dimension.constant(low)};
     const auto floor_to=[](const Rational& value,const Rational& grid,bool up) {
@@ -1560,25 +1653,45 @@ class Evaluator {
     // Singular points closer together than twice the contour height share
     // one detour: passing a pole costs about a dozen charts however small
     // the detour, so a row of poles is cheaper to pass at a distance.
+    // Only points that agree on the side share a detour (a free point
+    // agrees with either); between two groups of opposite sides the path
+    // is back on the real axis, at regular points.
     const Rational height=options_.contour_height,reach=height*Rational(2);
+    Rational passed=low;bool squeezed=false;
     for(std::size_t first=0;first<inside.size();) {
-      std::size_t last=first;
-      while(last+1<inside.size() && inside[last+1].first-inside[last].second<reach)++last;
-      const Rational before=inside[first].first-(first?inside[first-1].second:low);
-      const Rational after=(last+1<inside.size()?inside[last+1].first:high)-inside[last].second;
+      std::size_t last=first;int side=inside[first].side;
+      while(last+1<inside.size() && inside[last+1].low-inside[last].high<reach &&
+          (!side || !inside[last+1].side || inside[last+1].side==side)) {
+        ++last;if(!side)side=inside[last].side;
+      }
+      if(!side)side=free_side;
+      const Rational before=inside[first].low-(first?inside[first-1].high:low);
+      const Rational after=(last+1<inside.size()?inside[last+1].low:high)-inside[last].high;
       Rational free=(before<after?before:after)/Rational(2);
       if(height<free)free=height;
       Rational size(1);while(free<size)size=size/Rational(2);
-      const Rational grid=size/Rational(4);
-      const Rational left=floor_to(inside[first].first-size,grid,false),right=floor_to(inside[last].second+size,grid,true);
+      Rational grid=size/Rational(4);
+      Rational left=floor_to(inside[first].low-size,grid,false),right=floor_to(inside[last].high+size,grid,true);
+      // Next to a group of the opposite side the detours must not overlap.
+      const bool tight=squeezed || (last+1<inside.size() && inside[last+1].low-inside[last].high<reach);
+      if(tight) {
+        const Rational limit=last+1<inside.size()?(inside[last].high+inside[last+1].low)/Rational(2):high;
+        for(unsigned attempt=0;attempt<4096 && (!(passed<left) || !(right<limit));++attempt) {
+          size=size/Rational(2);grid=size/Rational(4);
+          left=floor_to(inside[first].low-size,grid,false);right=floor_to(inside[last].high+size,grid,true);
+        }
+        if(!(passed<left) || !(right<limit))throw std::runtime_error("no room for neighbouring detours of opposite causal sides");
+      }
+      squeezed=last+1<inside.size() && inside[last+1].low-inside[last].high<reach;
+      passed=right;
       vertices.push_back(graph_.dimension.constant(left));
       if(first==last) {
-        vertices.push_back(graph_.dimension.constant((left+right)/Rational(2))+imaginary*graph_.dimension.constant((right-left)/Rational(2)));
+        vertices.push_back(graph_.dimension.constant((left+right)/Rational(2))+imaginary(side)*graph_.dimension.constant((right-left)/Rational(2)));
       } else {
         // A rectangle over the group, as high as the contour height allows.
         Rational lift(1);while(height<lift)lift=lift/Rational(2);
-        vertices.push_back(graph_.dimension.constant(left)+imaginary*graph_.dimension.constant(lift));
-        vertices.push_back(graph_.dimension.constant(right)+imaginary*graph_.dimension.constant(lift));
+        vertices.push_back(graph_.dimension.constant(left)+imaginary(side)*graph_.dimension.constant(lift));
+        vertices.push_back(graph_.dimension.constant(right)+imaginary(side)*graph_.dimension.constant(lift));
       }
       vertices.push_back(graph_.dimension.constant(right));
       first=last+1;

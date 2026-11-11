@@ -56,6 +56,9 @@ int main(){try{
   require(bp::identity(changed,0,0,1,prescription).key()!=id.key(),"observable identity missing");
   auto changed_prescription=prescription;changed_prescription.levels[0].x_detour_sign=-1;
   require(bp::identity(graph,0,0,1,changed_prescription).key()!=id.key(),"domain identity missing");
+  const auto derived_id=bp::identity(graph,0,0,1,causal::derived(1));
+  require(derived_id.key()!=id.key() && derived_id.branch.contains("derived_orientations"),"derived causal orientations missing from identity");
+  require(bp::identity(graph,0,0,1,causal::derived(1,1)).key()!=derived_id.key(),"F rim of the derived orientations missing from identity");
   auto revision=id;revision.algorithm_version="different-scan-revision";
   require(!bp::load(store,revision,node.closure.matrix,0),"scan revision ignored");
   recursion::Evaluator resumed(graph,options);

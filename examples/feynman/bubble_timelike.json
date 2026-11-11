@@ -1,0 +1,16 @@
+{
+  "schema": "DiffExp.FeynmanFamily/v1",
+  "name": "bubble_timelike",
+  "description": "Massless bubble at timelike p^2 = 1 in d = 2 - 2 eps: F = -x(1-x) is negative on the whole segment; the Feynman i0 gives the imaginary part.",
+  "loops": 1,
+  "external_gram": [
+    ["1"]
+  ],
+  "propagators": [
+    {"loop_coefficients": ["1"], "external_coefficients": ["0"], "mass_squared": "0"},
+    {"loop_coefficients": ["-1"], "external_coefficients": ["1"], "mass_squared": "0"}
+  ],
+  "physical_count": 2,
+  "dimension_at_epsilon_zero": 2,
+  "epsilon_order": 1
+}

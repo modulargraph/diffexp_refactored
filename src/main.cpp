@@ -286,7 +286,8 @@ int main(int argc, char** argv) {
       // Each level merges the pair of propagators with the fewest masters.
       // Explicit anchors and a causal prescription are stated level by level
       // for the ladder as written, so they keep it.
-      if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() && !numerical.causal_prescription)
+      if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() &&
+          (!numerical.causal_prescription || numerical.causal_prescription->derive_orientations))
         options.count_masters=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget)
             ->std::optional<std::size_t> {
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,options.reduction.provider.timeout_seconds,false);
@@ -478,6 +479,29 @@ int main(int argc, char** argv) {
           if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii exclude omitted endpoint and transport tails):\n";
           for(unsigned row=0;row<result.values.size();++row)for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
             progress<<(canonical_basis?"Canonical component ":"Scalar ")<<row+1<<" epsilon^"<<k<<" = ";acb_printn(result.values[row][k-result.low].raw(),32,0);progress<<'\n';
+          }
+        }
+        {
+          // How the Feynman i0 was applied: which contour sides were stated,
+          // which followed from positivity, and which were derived.
+          const auto& prescription=evaluator.causal_prescription();
+          const char* mode=prescription.assurance==diffexp::causal::Assurance::DerivedFromSymanzik?"derived":
+            prescription.assurance==diffexp::causal::Assurance::EuclideanPhysicalDomain?"euclidean":"supplied";
+          boost::json::array oriented;std::size_t free_points=0;
+          if(prescription.derive_orientations)for(const auto& point:evaluator.causal_points()) {
+            if(!point.side){++free_points;continue;}
+            oriented.push_back(boost::json::object{{"level",static_cast<std::int64_t>(point.depth+1)},{"x",point.x},{"side",point.side}});
+          }
+          if(prescription.derive_orientations) {
+            progress<<"Causal contour derived from the Symanzik F of each level (F - i0): "<<oriented.size()<<" oriented real singular point"
+              <<(oriented.size()==1?"":"s")<<", "<<free_points<<" free.\n";
+            for(const auto& entry:oriented)progress<<"  level "<<entry.at("level").as_int64()<<": x = "<<entry.at("x").as_string().c_str()
+              <<" passed "<<(entry.at("side").as_int64()>0?"above":"below")<<" the real axis\n";
+          }
+          report["causal"]=boost::json::object{{"mode",mode},{"f_rim",prescription.f_rim}};
+          if(prescription.derive_orientations) {
+            report["causal"].as_object()["oriented_points"]=std::move(oriented);
+            report["causal"].as_object()["free_points"]=free_points;
           }
         }
         const auto& stats=evaluator.statistics();

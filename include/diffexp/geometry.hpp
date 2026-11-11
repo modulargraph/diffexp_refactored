@@ -112,9 +112,8 @@ inline std::vector<IsolatedRoot> isolated_roots(const fmpq_poly_t polynomial,slo
   }
   return out;
 }
-// Isolate all complex roots of a real rational polynomial, stripping repeated
-// factors first.
-inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial,unsigned variable,slong bits=256) {
+// Isolated roots, with multiplicities, of an exact polynomial in one variable.
+inline std::vector<IsolatedRoot> isolated_roots(const Exact& polynomial,unsigned variable,slong bits=256) {
   struct Poly {fmpq_poly_t q;Poly(){fmpq_poly_init(q);}~Poly(){fmpq_poly_clear(q);}} p;
   if(polynomial.is_zero())throw std::domain_error("identically zero singularity polynomial");
   auto denominator=polynomial.denominator().rational();
@@ -125,8 +124,67 @@ inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial
     const auto coefficient=term.coefficient/denominator;
     fmpq_poly_set_coeff_fmpq(p.q,term.powers[variable],coefficient.raw());
   }
+  return isolated_roots(p.q,bits);
+}
+// Isolate all complex roots of a real rational polynomial, stripping repeated
+// factors first.
+inline std::vector<kernel::ComplexBall> polynomial_roots(const Exact& polynomial,unsigned variable,slong bits=256) {
   std::vector<kernel::ComplexBall> out;
-  for(auto& root:isolated_roots(p.q,bits))out.push_back(std::move(root.value));
+  for(auto& root:isolated_roots(polynomial,variable,bits))out.push_back(std::move(root.value));
+  return out;
+}
+// Exact rational bound of a real ball.
+inline Rational rational_bound(const arb_t value,bool upper) {
+  arf_t side;arf_init(side);
+  if(upper)arb_get_ubound_arf(side,value,ARF_PREC_EXACT);else arb_get_lbound_arf(side,value,ARF_PREC_EXACT);
+  fmpq_t exact;fmpq_init(exact);arf_get_fmpq(exact,side);
+  auto result=Rational::from_fmpq(exact);
+  fmpq_clear(exact);arf_clear(side);return result;
+}
+// The real zeros of an exact real polynomial strictly between two rational
+// points where it does not vanish, ascending, each with a rational enclosure
+// and the sign of the derivative there. A zero is accepted as real only on an
+// exact change of sign over its enclosure, which also proves it simple; a
+// repeated real zero in the range is an error, because no contour passes it.
+struct SimpleRealRoot {Rational low,high;int slope;};
+inline std::vector<SimpleRealRoot> simple_real_roots(const Exact& polynomial,unsigned variable,
+    const Rational& from,const Rational& to,slong bits=256) {
+  std::vector<SimpleRealRoot> out;
+  if(polynomial.is_rational())return out;
+  std::vector<Exact> point;for(std::size_t i=0;i<polynomial.variable_count();++i)point.push_back(polynomial.variable(i));
+  const auto sign_at=[&](const Rational& at){point[variable]=polynomial.constant(at);return polynomial.substitute(point).rational().sign();};
+  if(!(from<to) || !sign_at(from) || !sign_at(to))throw std::invalid_argument("real root range must have regular ordered ends");
+  for(const auto& root:isolated_roots(polynomial,variable,bits)) {
+    if(!arb_contains_zero(acb_imagref(root.value.raw())))continue;
+    const auto low=rational_bound(acb_realref(root.value.raw()),false),high=rational_bound(acb_realref(root.value.raw()),true);
+    if(high<from || to<low)continue;
+    if(!(from<low) || !(high<to))throw std::runtime_error("a zero near "+low.str()+" is not separated from the end of its range");
+    if(root.multiplicity>1)throw std::domain_error("repeated zero at x = "+root.value.real_midpoint(20)+" (multiplicity "+std::to_string(root.multiplicity)+")");
+    const int left=sign_at(low),right=sign_at(high);
+    if(!left || !right) {
+      // The enclosure ends on the zero itself: step off it.
+      const auto exact=!left?low:high;const Rational width=(to-from)/Rational(1L<<20);
+      Rational step=width;int before=0,after=0;
+      for(unsigned attempt=0;attempt<64 && (!before || !after || before==after);++attempt,step=step/Rational(2)) {
+        before=from<exact-step?sign_at(exact-step):0;after=exact+step<to?sign_at(exact+step):0;
+        // Only this zero may lie between the two probes.
+        bool alone=true;
+        for(const auto& other:isolated_roots(polynomial,variable,bits)) {
+          if(acb_overlaps(other.value.raw(),root.value.raw()) || !arb_contains_zero(acb_imagref(other.value.raw())))continue;
+          const auto l=rational_bound(acb_realref(other.value.raw()),false),h=rational_bound(acb_realref(other.value.raw()),true);
+          if(!(h<exact-step) && !(exact+step<l))alone=false;
+        }
+        if(!alone)before=after=0;
+      }
+      if(!before || !after || before==after)throw std::runtime_error("cannot orient the zero at x = "+exact.str());
+      out.push_back({exact-step*Rational(2),exact+step*Rational(2),after});
+      // step was halved once more by the loop increment.
+      continue;
+    }
+    if(left==right)continue; // a conjugate pair next to the axis, not a real zero
+    out.push_back({low,high,right});
+  }
+  std::sort(out.begin(),out.end(),[](const auto& a,const auto& b){return a.low<b.low;});
   return out;
 }
 

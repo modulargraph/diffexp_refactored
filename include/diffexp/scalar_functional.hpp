@@ -210,6 +210,152 @@ inline std::vector<Jet> expand(const Integrand& g,const Chart& chart,const std::
 // parameters specialized. The lower weight must be jointly analytic after
 // monomial deflation; the upper endpoint is regular.
 namespace scalar_functional_detail {
+// The charts from the overlap to the upper endpoint when F has simple real
+// zeros in between. The path is the real segment with a triangle over each
+// zero, in a disk about the zero that holds no other singular point of the
+// integrand, on the side Im x = rim*sign(F') where F enters its selected rim:
+// there the integrand is the boundary value that F - i0 (rim -1) defines, and
+// for the epsilon where the zero is integrable the deformation is Cauchy's
+// theorem, so it is the dimensional continuation for every epsilon.
+// The logarithms of U and F are continued along the path from chart to chart
+// (each difference is a principal logarithm of a ratio that its chart's disk
+// proof keeps off the cut) and compared, at every return to the real axis,
+// with the rim value: a path on the wrong side of a zero fails that check.
+inline void detour(const Integrand& g,const Symanzik& geometry,std::size_t variable,long u_power,long f_power,
+    const std::vector<SimpleRealRoot>& zeros,const Rational& overlap,const std::vector<Exact>& weight_coefficients,
+    long v,unsigned loops,int d0,unsigned gamma_order,unsigned depth,bool monomial,long weight_power,
+    unsigned taylor_order,const CertifiedDeepestBetaOptions& options,std::vector<B>& matched,int offset) {
+  const auto bits=B::precision();
+  using Point=std::pair<Rational,Rational>;
+  const auto sample=geometry.U;
+  // Every other singular point of the integrand: zeros of U and F and poles
+  // of the weight.
+  std::vector<B> singular;
+  {
+    std::map<std::string,Exact> polynomials;
+    const auto add=[&](const Exact& polynomial){if(!polynomial.is_rational())polynomials.emplace(polynomial.str(),polynomial);};
+    add(geometry.U.numerator());add(geometry.U.denominator());add(geometry.F.numerator());add(geometry.F.denominator());
+    for(const auto& coefficient:weight_coefficients)if(!coefficient.is_zero())add(coefficient.denominator());
+    for(const auto& [text,polynomial]:polynomials)
+      for(auto& root:polynomial_roots(polynomial,static_cast<unsigned>(variable),bits))singular.push_back(std::move(root));
+  }
+  std::vector<Point> vertices{{overlap,Rational(0)}};
+  Rational previous=overlap;
+  for(const auto& zero:zeros) {
+    B at;arb_set_fmpq(acb_realref(at.raw()),((zero.low+zero.high)/Rational(2)).raw(),bits);
+    {B width;arb_set_fmpq(acb_realref(width.raw()),(zero.high-zero.low).raw(),bits);arb_add_error(acb_realref(at.raw()),acb_realref(width.raw()));}
+    double clearance=1;
+    const auto lower=[&](const B& point) {
+      auto difference=point-at;arf_t bound;arf_init(bound);acb_get_abs_lbound_arf(bound,difference.raw(),bits);
+      const double value=arf_get_d(bound,ARF_RND_FLOOR);arf_clear(bound);return value;
+    };
+    for(const auto& point:singular) {
+      // The zero itself is in the list; its enclosure overlaps.
+      if(acb_overlaps(point.raw(),at.raw()))continue;
+      clearance=std::min(clearance,lower(point));
+    }
+    {B end;arb_set_fmpq(acb_realref(end.raw()),previous.raw(),bits);clearance=std::min(clearance,lower(end));}
+    clearance=std::min(clearance,lower(B(1)));
+    if(!(clearance>0))throw std::runtime_error("scalar functional: a zero of F is not separated from its neighbours");
+    Rational size(1);double size_value=1;
+    for(unsigned k=0;k<1000 && !(size_value*4<=clearance);++k){size=size/Rational(2);size_value/=2;}
+    const Rational grid=size/Rational(4),ratio=(zero.low+zero.high)/Rational(2)/grid+Rational("1/2");
+    fmpz_t whole;fmpz_init(whole);fmpz_fdiv_q(whole,fmpq_numref(ratio.raw()),fmpq_denref(ratio.raw()));
+    const Rational centre=Rational::from_integer(whole)*grid;fmpz_clear(whole);
+    const int side=options.f_rim*zero.slope;
+    if(!(previous<centre-size) || !(centre+size<Rational(1)))throw std::runtime_error("scalar functional: no room for a detour around a zero of F");
+    vertices.push_back({centre-size,Rational(0)});
+    vertices.push_back({centre,size*Rational(side)});
+    vertices.push_back({centre+size,Rational(0)});
+    previous=centre+size;
+  }
+  vertices.push_back({Rational(1),Rational(0)});
+  std::vector<Exact> exact_point;for(std::size_t i=0;i<sample.variable_count();++i)exact_point.push_back(sample.variable(i));
+  struct Branch {B log_u,log_f;};
+  const auto on_axis=[&](const Rational& at) {
+    exact_point[variable]=sample.constant(at);
+    const auto u=geometry.U.substitute(exact_point).rational(),f=geometry.F.substitute(exact_point).rational();
+    if(f.is_zero() || u<=Rational(0))throw std::domain_error("certified scalar functional real path meets a zero of U or F");
+    Branch out;auto ball=B::from_strings(u.str());acb_log(out.log_u.raw(),ball.raw(),bits);
+    out.log_f=rim_logarithm(f,options.f_rim);return out;
+  };
+  auto branch=on_axis(overlap);
+  const auto limit=M::lower_abs(B::from_strings("1/1"+std::string(options.requested_digits+20,'0')));
+  const double log_limit=-std::log(10.)*(options.requested_digits+20.);
+  unsigned charts=0;
+  for(std::size_t leg=0;leg+1<vertices.size();++leg) {
+    const auto& from=vertices[leg];const auto& to=vertices[leg+1];
+    const Point delta{to.first-from.first,to.second-from.second};
+    const Rational length=(delta.first.sign()<0?-delta.first:delta.first)+(delta.second.sign()<0?-delta.second:delta.second);
+    Rational position(0),half("1/2");long sixtyfourths=16;
+    while(position<Rational(1)) {
+      if(charts++>=4*options.max_charts)throw std::runtime_error("certified scalar functional chart budget exhausted before the upper endpoint");
+      const Rational remaining=(Rational(1)-position)/Rational(2);if(remaining<half)half=remaining;
+      std::optional<Chart> chart;TadpoleBoundary seed;B step,scale;std::vector<M> tails;long next_sixtyfourths=sixtyfourths;Branch next;
+      for(unsigned attempt=0;attempt<options.max_disk_attempts && !chart;++attempt) {
+        const Rational middle=position+half;
+        try {
+          const auto centre=B::from_strings((from.first+delta.first*middle).str(),(from.second+delta.second*middle).str());
+          const auto disk_radius=B::from_strings((length*half*Rational(64)/Rational(sixtyfourths)).str());
+          step=B::from_strings((delta.first*half).str(),(delta.second*half).str());
+          B disk(0);M::upper_abs(disk_radius).add_error_to(disk);
+          const auto u=localize(g.u,centre,disk,bits),f=localize(g.f,centre,disk,bits);
+          // No ratio leaves the principal sheet anywhere on the disk, so the
+          // principal logarithm of a ratio at a point of it is its
+          // continuation from the centre.
+          ball_log(u.enclosure/u.centre_value);ball_log(f.enclosure/f.centre_value);
+          if(u_power || f_power)ball_log(B(1)+disk/centre);
+          const auto change=[&](const Local& local,long power,const B& to_point) {
+            auto value=ball_log(local.numerator.evaluate_polynomial(to_point)/local.denominator.evaluate_polynomial(to_point)/local.centre_value);
+            if(power)value=value+B(power)*ball_log(B(1)+to_point/centre);
+            return value;
+          };
+          const auto back=B(0)-step;
+          const auto log_u=branch.log_u-change(u,u_power,back),log_f=branch.log_f-change(f,f_power,back);
+          B u_centre,f_centre;
+          acb_pow_si(u_centre.raw(),centre.raw(),u_power,bits);acb_pow_si(f_centre.raw(),centre.raw(),f_power,bits);
+          u_centre=u_centre*u.centre_value;f_centre=f_centre*f.centre_value;
+          if(u_centre.contains_zero() || f_centre.contains_zero())throw std::domain_error("scalar functional chart centre meets a zero");
+          seed=tadpole_branch(u_centre,f_centre,log_u,log_f,static_cast<unsigned>(v),loops,d0,gamma_order);
+          auto candidate=prove(g,seed.coefficients,centre,monomial,M::upper_abs(disk_radius),depth,bits);
+          acb_pow_si(scale.raw(),centre.raw(),weight_power,bits);
+          const auto ratio=M::upper_abs(step)/M::lower_abs(disk_radius);
+          const auto gap=M::positive_difference_lower(M::one(),ratio);
+          if(gap.is_zero())throw std::domain_error("certified scalar functional chart outside its disk");
+          const auto common=M::from_ui(2)*M::upper_abs(scale)*M::upper_abs(step)*ratio.power_upper(taylor_order+1)/
+            (gap*M::lower_abs(B(static_cast<long>(taylor_order)+2)));
+          bool small=true;tails.clear();double largest=0;
+          for(const auto& bound:candidate.bounds){tails.push_back(common*bound);if(!(tails.back()<=limit))small=false;largest=std::max(largest,tails.back().approximate_upper());}
+          const double current=sixtyfourths/64.;
+          const long admissible=largest>0?std::clamp(static_cast<long>(64*0.97*current*std::exp((log_limit-std::log(largest))/(taylor_order+2.))),1L,24L):24L;
+          if(small) {
+            next={log_u+change(u,u_power,step),log_f+change(f,f_power,step)};
+            chart.emplace(std::move(candidate));next_sixtyfourths=admissible;break;
+          }
+          const long shorter=std::min(admissible,sixtyfourths-1);
+          if(shorter<1)throw std::domain_error("certified scalar functional tail cannot be reduced on this disk");
+          half=half*Rational(shorter)/Rational(sixtyfourths);sixtyfourths=shorter;
+        }catch(const std::domain_error&) {half=half/Rational(2);}
+      }
+      if(!chart)throw std::runtime_error("certified scalar functional chart disk/tail-proof budget exhausted");
+      const auto series=expand(g,*chart,seed.coefficients,depth,taylor_order+1,bits);
+      for(unsigned k=0;k<=depth;++k) {
+        B sum(0),power=step;const auto square=step*step;
+        for(unsigned n=0;n<=taylor_order;n+=2){sum+=series[k].at(n)*power/B(static_cast<long>(n)+1);power=power*square;}
+        sum=B(2)*scale*sum;tails[k].add_error_to(sum);
+        matched[offset+static_cast<int>(k)]+=sum;
+      }
+      branch=std::move(next);
+      position+=half*Rational(2);half=half*Rational(2)*Rational(next_sixtyfourths)/Rational(sixtyfourths);sixtyfourths=next_sixtyfourths;
+    }
+    if(to.second.is_zero()) {
+      const auto expected=on_axis(to.first);
+      if(!acb_overlaps(branch.log_f.raw(),expected.log_f.raw()) || !acb_overlaps(branch.log_u.raw(),expected.log_u.raw()))
+        throw std::logic_error("scalar functional detour returned to the real axis off the selected F rim");
+      branch=expected;
+    }
+  }
+}
 inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,int d0,
     unsigned power,const Exact& weight,unsigned epsilon_top,const CertifiedDeepestBetaOptions& options={}) {
   const unsigned taylor_order=options.taylor_order;
@@ -331,6 +477,19 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
     const bool monomial=q!=0 || slope!=0;
     const auto limit=M::lower_abs(B::from_strings("1/1"+std::string(options.requested_digits+20,'0')));
     const double log_limit=-std::log(10.)*(options.requested_digits+20.);
+    // Zeros of F between the overlap and the upper endpoint. Each is simple
+    // and is passed off the real axis, on the side where F leaves the real
+    // axis into its selected rim.
+    std::vector<SimpleRealRoot> zeros;
+    try {zeros=simple_real_roots(ff.regular.numerator(),static_cast<unsigned>(variable),overlap,Rational(1),bits);}
+    catch(const std::domain_error& error) {
+      throw std::domain_error(std::string("scalar functional: F has a ")+error.what()+
+        " inside the integration interval; the contour is pinched there and no causal detour exists");
+    }
+    if(!zeros.empty()) {
+      detour(g,geometry,variable,uf.power,ff.power,zeros,overlap,weight_coefficients,v,loops,d0,gamma_order,depth,monomial,
+        weights.x_power,taylor_order,options,matched,source_low-low);
+    } else {
     Rational position=overlap,half=(Rational(1)-overlap)/Rational(2);unsigned charts=0;long sixtyfourths=16;
     while(position<Rational(1)) {
       if(charts++>=options.max_charts)throw std::runtime_error("certified scalar functional chart budget exhausted before the upper endpoint");
@@ -374,6 +533,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
       // Start the next chart on a disk twice as large, at its admissible rho.
       position+=half*Rational(2);half=half*Rational(2)*Rational(next_sixtyfourths)/Rational(sixtyfourths);sixtyfourths=next_sixtyfourths;
     }
+    }
   }
   const std::string tolerance="1/1"+std::string(options.requested_digits,'0');
   if(!native_enclosure_meets_tolerance({matched},tolerance))
@@ -385,8 +545,9 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
 // A singular upper endpoint is handled by reversing the second half of the
 // same scalar functional. Both arms certify their full omitted tails; their
 // final sum is checked again. This is the same meromorphic DR endpoint
-// prescription on each arm, with an explicit common F rim. No chart crosses an
-// interior zero of U or F: its disk proof cannot succeed there.
+// prescription on each arm, with an explicit common F rim. A simple interior
+// zero of F is passed off the real axis on the side of that rim (see detour);
+// a zero of U, or a repeated zero of F, is an error.
 inline LaurentValue certified_scalar_functional(const Symanzik& geometry,unsigned loops,int d0,
     unsigned power,const Exact& weight,unsigned epsilon_top,const CertifiedDeepestBetaOptions& options={}) {
   using B=kernel::ComplexBall;
@@ -413,9 +574,15 @@ inline LaurentValue certified_scalar_functional(const Symanzik& geometry,unsigne
   auto separation=native_tail_detail::eval(data::Reader(upper_denominator.str()).read(),B(0),"x").value;
   if(separation.contains_zero() || !separation.is_finite())split=true;
   if(!split)return scalar_functional_detail::integrate_one_sided(geometry,loops,d0,power,weight,epsilon_top,options);
-  const Rational anchor(options.scalar_split_anchor);
+  Rational anchor(options.scalar_split_anchor);
   if(anchor<=Rational(0) || anchor>=Rational(1) || options.requested_digits>=10000)
     throw std::invalid_argument("invalid scalar two-endpoint split anchor or precision budget");
+  // Each arm needs a regular far end: an anchor on a zero of U or F is moved.
+  for(const char* candidate:{"","2/5","3/5","3/10","7/10","9/20","11/20"}) {
+    if(*candidate)anchor=Rational(candidate);
+    auto at=upper;at[variable]=weight.constant(anchor);
+    if(!geometry.U.substitute(at).is_zero() && !geometry.F.substitute(at).is_zero())break;
+  }
   auto inner=options;++inner.requested_digits;
   std::vector<LaurentValue> halves;
   for(bool reverse:{false,true}) {

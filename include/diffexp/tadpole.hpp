@@ -8,10 +8,14 @@ struct TadpoleBoundary {int epsilon_low;std::vector<Jet::Ball> coefficients;};
 // Gamma(v-L*d/2)/Gamma(v) U^(v-(L+1)d/2) F^(-v+Ld/2).
 // The affine dimension is d0-2 eps. Integer dimension and explicit negative-F
 // rims cover the current examples; unsupported U phases fail explicitly.
-inline TadpoleBoundary tadpole(const Rational& U,const Rational& F,unsigned power,
-    unsigned loops,int d0,unsigned epsilon_order,int rim=1) {
+// The same boundary from enclosures of U, F and of the selected branches of
+// their logarithms: integer powers of U and F are single valued, so the
+// branch enters through the logarithms alone. A point off the real axis
+// supplies the logarithms continued along its path.
+inline TadpoleBoundary tadpole_branch(const Jet::Ball& u,const Jet::Ball& f,const Jet::Ball& log_u,
+    const Jet::Ball& log_f,unsigned power,unsigned loops,int d0,unsigned epsilon_order) {
   using B=Jet::Ball;
-  if(!power || !loops || d0%2 || U<=Rational(0) || F.is_zero() || (rim!=1 && rim!=-1) || epsilon_order>1000)
+  if(!power || !loops || d0%2 || u.contains_zero() || f.contains_zero() || epsilon_order>1000)
     throw std::invalid_argument("unsupported or invalid tadpole boundary parameters");
   const long a=static_cast<long>(power)-static_cast<long>(loops)*d0/2;
   const long c=static_cast<long>(power)-(static_cast<long>(loops)+1)*d0/2;
@@ -25,12 +29,6 @@ inline TadpoleBoundary tadpole(const Rational& U,const Rational& F,unsigned powe
     shift=eps.constant(1)/b;
     for(long k=a;k<0;++k)shift=shift/(eps.constant(k)+b*eps);
   }
-  B log_u,log_f;auto u=B::from_strings(U.str()),f=B::from_strings(F.str());
-  acb_log(log_u.raw(),u.raw(),B::precision());
-  if(F<Rational(0)) {
-    auto abs_f=B::from_strings((-F).str());acb_log(log_f.raw(),abs_f.raw(),B::precision());
-    B pi;acb_const_pi(pi.raw(),B::precision());log_f+=pi*B::from_strings("0",rim==1?"1":"-1");
-  } else acb_log(log_f.raw(),f.raw(),B::precision());
   auto lambda=eps.constant(0);lambda.set(0,B(loops+1)*log_u-B(loops)*log_f);
   auto exponential=(lambda*eps).exp();
   B numerator,denominator,gamma_v;
@@ -40,5 +38,26 @@ inline TadpoleBoundary tadpole(const Rational& U,const Rational& F,unsigned powe
   auto result=constant*gamma*shift*exponential;
   TadpoleBoundary out{low,{}};for(unsigned n=0;n<eps.length();++n)out.coefficients.push_back(result.at(n));
   return out;
+}
+// log F on the selected rim of a real F: log|F| + i*pi*rim for F<0 (rim -1 is
+// the Feynman F - i0).
+inline Jet::Ball rim_logarithm(const Rational& F,int rim) {
+  using B=Jet::Ball;
+  if(F.is_zero() || (rim!=1 && rim!=-1))throw std::invalid_argument("rim logarithm needs a nonzero F and a rim");
+  B log_f;auto f=B::from_strings(F.str());
+  if(F<Rational(0)) {
+    auto abs_f=B::from_strings((-F).str());acb_log(log_f.raw(),abs_f.raw(),B::precision());
+    B pi;acb_const_pi(pi.raw(),B::precision());log_f+=pi*B::from_strings("0",rim==1?"1":"-1");
+  } else acb_log(log_f.raw(),f.raw(),B::precision());
+  return log_f;
+}
+inline TadpoleBoundary tadpole(const Rational& U,const Rational& F,unsigned power,
+    unsigned loops,int d0,unsigned epsilon_order,int rim=1) {
+  using B=Jet::Ball;
+  if(!power || !loops || d0%2 || U<=Rational(0) || F.is_zero() || (rim!=1 && rim!=-1) || epsilon_order>1000)
+    throw std::invalid_argument("unsupported or invalid tadpole boundary parameters");
+  B log_u;auto u=B::from_strings(U.str()),f=B::from_strings(F.str());
+  acb_log(log_u.raw(),u.raw(),B::precision());
+  return tadpole_branch(u,f,log_u,rim_logarithm(F,rim),power,loops,d0,epsilon_order);
 }
 } // namespace diffexp::feynman

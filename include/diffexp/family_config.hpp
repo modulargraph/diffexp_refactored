@@ -132,9 +132,21 @@ inline Configuration parse(const json::value& value) {
   }
   if(auto p=o.if_contains("causal")) {
     const auto& a=p->as_object();known_keys(a,{"f_rim","level_signs","provenance"},"causal");
-    causal::Prescription prescription;prescription.f_rim=integer(a.at("f_rim"),-1,1,"F rim");
-    for(const auto& sign:a.at("level_signs").as_array())prescription.levels.push_back({static_cast<int>(integer(sign,-1,1,"contour sign"))});
-    prescription.provenance=std::string(a.at("provenance").as_string());prescription.validate(f.physical_count-1);
+    // Without level_signs the sides are derived, as without the object, for
+    // the stated F rim. With them every real singular point of a level is
+    // passed on that level's side.
+    causal::Prescription prescription;
+    if(auto rim=a.if_contains("f_rim"))prescription.f_rim=integer(*rim,-1,1,"F rim");
+    if(auto signs=a.if_contains("level_signs")) {
+      for(const auto& sign:signs->as_array())prescription.levels.push_back({static_cast<int>(integer(sign,-1,1,"contour sign"))});
+      prescription.provenance=std::string(a.at("provenance").as_string());
+    } else {
+      if(prescription.f_rim!=1 && prescription.f_rim!=-1)throw std::invalid_argument("causal f_rim must be 1 or -1");
+      auto derived=causal::derived(f.physical_count-1,prescription.f_rim);
+      if(auto text=a.if_contains("provenance"))derived.provenance=std::string(text->as_string());
+      prescription=std::move(derived);
+    }
+    prescription.validate(f.physical_count-1);
     c.numerical.causal_prescription=std::move(prescription);
   }
   return c;

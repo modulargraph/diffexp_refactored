@@ -168,6 +168,11 @@ if(BUILD_TESTING)
     -DDIFFEXP_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli.cmake)
   set_tests_properties(cli.interface PROPERTIES TIMEOUT 30)
+  add_test(NAME cli.causal COMMAND ${CMAKE_COMMAND}
+    -DDIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>
+    -DDIFFEXP_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/causal.cmake)
+  set_tests_properties(cli.causal PROPERTIES TIMEOUT 120)
   set(DIFFEXP_WOLFRAMSCRIPT "" CACHE FILEPATH "Optional wolframscript executable for the process-wrapper smoke test")
   set(DIFFEXP_WOLFRAM_KERNEL "" CACHE FILEPATH "Optional WolframKernel override for wolframscript")
   if(DIFFEXP_WOLFRAMSCRIPT)

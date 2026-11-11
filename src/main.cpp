@@ -717,8 +717,9 @@ Feynman-trick recursion
   --leaf-digits N                 1..100000 (default 28)
   --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
   --uncertainty probe|map         how a transport carries the uncertainty it inherits. probe
-                                  (default): midpoints, with two probe rows following the size of
-                                  the uncertainty, an estimate. map: the chart map applied to the
+                                  (default): midpoints, with two probe rows (one beside a single
+                                  row) following the size of the uncertainty, an estimate; steps
+                                  are judged on the midpoints. map: the chart map applied to the
                                   intervals, a rigorous enclosure, one expansion per master on
                                   every chart that needs it
   --transport-bits N              relative Taylor tail admitted per chart, as a power of two

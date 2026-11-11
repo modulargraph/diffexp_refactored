@@ -36,9 +36,11 @@ int main(){try {
     require(acb_contains(centered.coefficients[0][row][0].raw(),expected[row][0].raw()),"integrated chart excluded exact interval flow");
   require(adjoint_detail::enclosure_quality(Boundary{centered.coefficients[0][0],centered.coefficients[0][1]}).approximate_upper()<1e-80,"integrated chart retained fictitious interval growth");
   {
-    // Probe propagation: midpoints only, two homogeneous probe rows carry the
-    // size of the input uncertainty. The exact flow has radius 2001*2^-300 and
-    // 1999*2^-300; the all-plus probe alone would see (1,1)*2^-300.
+    // Probe propagation: midpoints only, homogeneous probe rows carry the
+    // size of the input uncertainty (beside this single row one probe, with
+    // the alternating direction in its imaginary part). The exact flow has
+    // radius 2001*2^-300 and 1999*2^-300; the all-plus direction alone would
+    // see (1,1)*2^-300.
     AdjointConditioningStats probe_stats;AdjointOptions probe;probe.conditioning_stats=&probe_stats;
     probe.uncertainty=AdjointOptions::Uncertainty::probe;
     auto estimated=transport_adjoint_rows(connection,start,forcing,{zero,one},probe);

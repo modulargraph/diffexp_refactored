@@ -83,7 +83,9 @@ struct AdjointOptions {
   // extra homogeneous rows, into which every chart's radii are added without
   // cancellation; the final radii are eight times the largest probe
   // coefficient of each epsilon order. That is an estimate along two
-  // directions, not an enclosure, at the cost of two rows.
+  // directions, not an enclosure, at the cost of two rows. A transport of a
+  // single row carries both directions in one probe row, the second one in
+  // its imaginary part.
   // Once a leg transports midpoints, the radii of a chart are the defect
   // radii of its recurrence (rational_circuit::expand): the rounding the
   // chart itself commits, not a bound that the absolute values of the
@@ -397,8 +399,14 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         if(arf_is_zero(largest))continue;
         for(unsigned p=0;p<probes;++p) {
           auto* value=state[(rows+p)*d+j][k].raw();
+          unsigned pattern=p;
           for(auto* part:{acb_realref(value),acb_imagref(value)}) {
-            const int sign=arf_is_zero(arb_midref(part))?((p&1)&&(j&1)?-1:1):arf_sgn(arb_midref(part));
+            // The sign pattern a part starts with: all plus, or alternating
+            // with the master. Two probes take one each, in both parts; a
+            // single probe has the first in its real and the second in its
+            // imaginary part, which a real flow transports separately.
+            const int sign=arf_is_zero(arb_midref(part))?((pattern&1)&&(j&1)?-1:1):arf_sgn(arb_midref(part));
+            if(probes==1)pattern=1;
             if(sign>0)arf_add(arb_midref(part),arb_midref(part),largest,bits,ARF_RND_UP);
             else arf_sub(arb_midref(part),arb_midref(part),largest,bits,ARF_RND_DOWN);
           }
@@ -561,8 +569,15 @@ inline LaurentRows transport_adjoint_rows(const ExactEpsilonMatrix& matrix,Laure
   using B=Jet::Ball;
   if(options.uncertainty==AdjointOptions::Uncertainty::map)
     return adjoint_detail::transport_rows(matrix,std::move(initial),forcing,vertices,options,0);
-  const unsigned probes=2;
   const auto d=initial.columns(),r=initial.coefficients.size();
+  // Two probe rows beside one transported row would triple the work of every
+  // chart after folding starts. One complex row holds two real directions:
+  // along a real path with a real connection its real and imaginary parts
+  // are transported independently, exactly as the two probes are, and the
+  // size below is taken over the parts separately. With a complex flow the
+  // two patterns mix into one complex direction, which is still an estimate
+  // of the same kind along a generic direction.
+  const unsigned probes=r==1?1:2;
   if(vertices.empty())throw std::invalid_argument("adjoint transport dimensions/path/budget");
   initial.coefficients.insert(initial.coefficients.end(),probes,
     std::vector(d,std::vector<B>(initial.high-initial.low+1,B(0))));

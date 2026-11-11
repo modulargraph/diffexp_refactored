@@ -42,13 +42,25 @@ Transport time is linear in the number of epsilon orders carried.
   the axis between points that ask for opposite sides.
 - **Uncertainty by probes** (`--uncertainty probe`). Midpoints are
   transported and the size of discarded radii is followed along two probe
-  rows. This is an estimate, not an enclosure; `--uncertainty map` gives the
-  rigorous chart map at several times the cost.
+  rows (one, with the second direction in its imaginary part, beside a
+  single transported row). This is an estimate, not an enclosure;
+  `--uncertainty map` gives the rigorous chart map at several times the
+  cost. Steps are not shortened by inherited or inflated interval radii:
+  once a leg transports midpoints, the radii of a chart are the rounding
+  that chart itself commits (the integrated defect of its recurrence, not a
+  bound propagated through the absolute values of the connection), and a
+  step is halved only if that loses half the working precision. Near an
+  endpoint where the master basis has higher-order poles the interval bound
+  used to force each chart down to 1/128 of its geometric step.
 - **Endpoint series.** The exact series at each endpoint has order 22 and is
   summed at most 1/64 of the way to the nearest other singular point, a
   2^-128 tail (`--endpoint-order`, `--overlap-ratio`; samples use 32 and
   1/16). The exact work grows like the order to the power 2.4, while a
-  smaller overlap costs the transport about 1.25 charts per halving.
+  smaller overlap costs the transport about 1.25 charts per halving. The
+  overlap is chosen per endpoint, from the distance of that endpoint to its
+  own nearest singular point: a singular point next to x = 0 does not move
+  the overlap point at x = 1 (the progress line `endpoint overlap=` shows
+  both).
 - **Moving poles removed** (`--moving-poles remove`). Denominator factors
   that mix the merge parameter with epsilon are removed by exchanging a
   master. This narrows no epsilon window but shrinks the connection where

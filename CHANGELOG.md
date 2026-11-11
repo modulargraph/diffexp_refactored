@@ -2,6 +2,11 @@
 
 ## 2.2.1
 
+- Transport: the endpoint overlap is chosen per endpoint (a singular point
+  next to one end no longer costs charts at the other); in probe mode a
+  chart's radii are its own rounding (defect radii of the midpoint
+  recurrence), so steps are no longer halved by inflated interval bounds;
+  a single transported row is followed by one probe row instead of two.
 - The Feynman i0 is derived (`causal.hpp`): `diffexp ft` evaluates families
   in physical regions from their definition, with no `causal` object. Every
   real singular point of a level is passed on the side

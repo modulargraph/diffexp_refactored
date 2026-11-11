@@ -368,7 +368,9 @@ int main(int argc, char** argv) {
         std::vector<std::string> child{self.string(),"ft",argv[2]};
         child.insert(child.end(),sample_arguments.begin(),sample_arguments.end());
         if(std::find(sample_arguments.begin(),sample_arguments.end(),"--cache")==sample_arguments.end()){child.push_back("--cache");child.push_back(cache.string());}
-        child.insert(child.end(),{"--json","--epsilon-order","0"});
+        // A family file that selects sampling itself would make each sample
+        // sample again: the samples are told to expand.
+        child.insert(child.end(),{"--json","--epsilon-order","0","--epsilon-strategy","expand"});
         const auto points=es::nodes(diffexp::Rational(sample_step),samples);
         progress<<"Epsilon sampling: "<<samples<<" samples at epsilon = +-k*"<<sample_step<<", "<<sample_jobs<<" at a time.\n"<<std::flush;
         const auto numerical_start=std::chrono::steady_clock::now();

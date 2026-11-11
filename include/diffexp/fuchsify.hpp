@@ -148,6 +148,18 @@ inline Matrix nullspace(Matrix m) {
 // column pivots[i] and vanishes in the pivot columns of all earlier rows, so
 // reducing a candidate by the rows in insertion order clears every pivot
 // column; the candidate lies in the span exactly when nothing is left.
+// Span as a plain matrix, re-reduced at every insertion: used where spans are
+// small (affine_frobenius.hpp).
+inline bool extend(Matrix &span, const std::vector<Exact> &v) {
+  auto next = span;
+  next.push_back(v);
+  auto rank = rref(next, v.size()).size();
+  if (rank == span.size())
+    return false;
+  next.resize(rank);
+  span = std::move(next);
+  return true;
+}
 struct Echelon {
   Matrix rows;
   std::vector<unsigned> pivots;

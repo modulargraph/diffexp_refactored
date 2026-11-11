@@ -11,18 +11,18 @@ default options and `--no-numerical-cache`.
 
 | Example | Total | Preparation / numerical |
 | --- | ---: | --- |
-| `sunrise` | 0.19 s | 0.06 / 0.13 s |
-| `box` | 0.13 s | 0.08 / 0.04 s |
-| `pentagon` | 0.93 s | 0.32 / 0.60 s |
-| `box_bubble` | 0.85 s | 0.81 / 0.03 s |
-| `pentagon_massive` | 1.64 s | 0.66 / 0.95 s |
-| `box_triangle` | 3.69 s | 3.42 / 0.26 s |
-| `banana` (three loops) | 1.76 s | 0.46 / 1.27 s |
-| `banana_unequal` | 2.54 s | 0.54 / 1.97 s |
-| `kite` | 2.2 s | 0.5 / 1.7 s |
-| `double_box_planar` | 19.1 s | 7.8 / 11.2 s |
-| `banana4` (four loops, equal masses) | 47.6 s | 19.4 / 27.9 s |
-| `banana4_unequal` (four loops, four masses) | 87.1 s | 27.4 / 59.5 s |
+| `sunrise` | 0.23 s | 0.08 / 0.14 s |
+| `box` | 0.16 s | 0.10 / 0.05 s |
+| `pentagon` | 0.82 s | 0.26 / 0.54 s |
+| `box_bubble` | 0.63 s | 0.58 / 0.04 s |
+| `pentagon_massive` | 1.52 s | 0.66 / 0.82 s |
+| `box_triangle` | 1.44 s | 1.11 / 0.31 s |
+| `banana` (three loops) | 1.85 s | 0.52 / 1.30 s |
+| `banana_unequal` | 2.70 s | 0.68 / 1.98 s |
+| `kite` | 1.6 s | 0.4 / 1.1 s |
+| `double_box_planar` | 7.9 s | 3.1 / 4.7 s |
+| `banana4` (four loops, equal masses) | 50.3 s | 28.4 / 21.7 s |
+| `banana4_unequal` (four loops, four masses) | 69.2 s | 31.3 / 37.6 s |
 
 The finite parts of the four-loop bananas reproduce the stored references
 (39.655526834297652529... and 28.647167500233570163...).
@@ -42,8 +42,8 @@ needs twelve samples of about 150 s each on four threads, or of one thread
 each side by side on a larger machine.
 
 `higgs_jet_family_f` (non-planar, seven propagators, four massive; Euclidean
-point, experimental): preparation 88 s, one epsilon sample 107 s on four
-threads.
+point, experimental): preparation 48 s, one epsilon sample 24 s on four
+threads (`--leaf-digits 12`).
 
 Preparation of the built-in IBP solver, four threads against one: planar
 double box 3.4 s / 5.2 s, four-loop banana 15.3 s / 33.7 s.

@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
-      unsigned ibp_max_degree=0;std::string merge_selection="auto";
+      unsigned ibp_max_degree=0;std::string merge_selection="auto",boundary="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
       // What a sample process is started with: this command line without the
       // options that select and shape the sampling itself.
@@ -116,6 +116,10 @@ int main(int argc, char** argv) {
         else if(option=="--merge-selection"){
           merge_selection=option_value;
           if(merge_selection!="auto"&&merge_selection!="first")throw std::invalid_argument("--merge-selection must be auto or first");
+        }
+        else if(option=="--boundary"){
+          boundary=option_value;
+          if(boundary!="anchor"&&boundary!="endpoint"&&boundary!="auto")throw std::invalid_argument("--boundary must be anchor, endpoint or auto");
         }
         else if(option=="--ibp-threads"){
           const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_threads);
@@ -323,6 +327,19 @@ int main(int argc, char** argv) {
           catch(const std::exception&){return std::nullopt;}
         };
       }
+      // A level whose endpoint qualifies takes its boundary there
+      // (endpoint_boundary.hpp). Explicit anchors, a stated causal
+      // prescription and the Henn projection are written for the ladder of
+      // interior anchors and keep it.
+      const bool stated_ladder=!options.anchors.empty() || !henn_basis.empty() ||
+        (numerical.causal_prescription && !(numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty()));
+      if(boundary=="endpoint" && stated_ladder)
+        throw std::invalid_argument("--boundary endpoint cannot be combined with explicit anchors, stated causal sides or --henn-basis");
+      options.boundary=boundary=="anchor" || stated_ladder?diffexp::recursion::BoundaryPolicy::anchor:
+        boundary=="endpoint"?diffexp::recursion::BoundaryPolicy::endpoint:diffexp::recursion::BoundaryPolicy::automatic;
+      options.endpoint_refused=[&progress](unsigned level,bool upper,const std::string& reason) {
+        progress<<"Level "<<level<<": boundary not taken at x = "<<(upper?1:0)<<": "<<reason<<"\n"<<std::flush;
+      };
       // exchange: a level swaps masters for cached integrals of the same sector
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
@@ -339,7 +356,9 @@ int main(int argc, char** argv) {
               if(event.scalar_leaf)progress<<"analytic scalar boundary";
               else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
               progress<<"; elapsed "<<event.elapsed_seconds<<" s\n";
-              if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
+              if(event.boundary!=diffexp::recursion::BoundarySite::anchor)progress<<"Level "<<event.depth<<": boundary at the endpoint x = "<<event.anchor.str()
+                <<": the next level is the family with propagator "<<(event.boundary==diffexp::recursion::BoundarySite::lower?event.left:event.right)<<" removed\n";
+              else if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
                 <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
               progress<<std::flush;
             });
@@ -358,6 +377,17 @@ int main(int argc, char** argv) {
         {"status",command=="prepare"?"prepared":"completed"},{"levels",graph.nodes.size()},
         {"systems_built",built},{"systems_reused",reused}};
       report["ibp_provider"]=ibp_provider;
+      {
+        // Per level: its masters and where it takes its boundary.
+        boost::json::array ladder;
+        for(const auto& event:graph.events) {
+          if(event.scalar_leaf)continue;
+          ladder.push_back(boost::json::object{{"level",event.depth},{"masters",event.masters},
+            {"boundary",event.boundary==diffexp::recursion::BoundarySite::lower?"lower":event.boundary==diffexp::recursion::BoundarySite::upper?"upper":"anchor"},
+            {"x",event.anchor.str()}});
+        }
+        report["ladder"]=std::move(ladder);
+      }
       // Verified level closures are exact and provider independent, and their
       // cache key deliberately omits the provider. A reused closure therefore
       // keeps the master basis of whichever provider and seeds first built it.
@@ -726,6 +756,18 @@ IBP preparation (prepare/ft)
                                   counted from its Symanzik polynomials with Singular for every
                                   pair; without Singular, by IBP eliminations for large levels.
                                   first merges the first two
+  --boundary anchor|endpoint|auto where a level takes its boundary data. anchor: at an interior value of
+                                  its merge parameter (1/3 unless singular), where the next level is
+                                  the merged family at that value. auto (default): at x = 0 or 1
+                                  where that endpoint qualifies; the next level is then the family
+                                  with one of the two merged propagators removed, at its original
+                                  kinematics. An endpoint qualifies if the family's U and F have
+                                  positive monomials, the two propagators share their loop momentum,
+                                  the one that remains is massive, and the level's equation shows
+                                  that the masters' values at the endpoint fix its analytic solution
+                                  (docs/performance.md). endpoint: as auto, an error if no level
+                                  qualifies. Explicit anchors, stated causal sides and --henn-basis
+                                  keep the anchors
   --ibp-max-degree N              4..256 (default 16, doubled automatically when a reduction meets it): largest total degree, in the merge
                                   parameter and the dimension together, of a reduction
                                   coefficient the built-in solver reconstructs

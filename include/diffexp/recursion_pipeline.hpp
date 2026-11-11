@@ -17,6 +17,7 @@
 #include "diffexp/level_cache.hpp"
 #include "diffexp/ft_functional_reduction.hpp"
 #include "diffexp/exact_jet_composition.hpp"
+#include "diffexp/endpoint_boundary.hpp"
 #include <map>
 
 namespace diffexp::recursion {
@@ -304,6 +305,9 @@ class Evaluator {
     // extended to higher epsilon orders afterwards.
     std::optional<affine_operator::Prepared> inverse;
     std::optional<Rational> inverse_point;
+    // Of the endpoint that carries the level's boundary: the fundamental
+    // solution in the masters' own coordinates.
+    std::optional<Expansion> physical_frame;
   };
   struct SingularPoint {
     Rational low,high;
@@ -343,6 +347,11 @@ class Evaluator {
     Matrix pullback_map;
     // Exact valuations read by every demand propagation of this plan.
     std::optional<epsilon_demand::Valuations> connection_valuations,anchor_inverse_valuations;
+    // A level with its boundary at an endpoint: the masters at the overlap
+    // point as an exact matrix applied to their values at the endpoint, which
+    // the child provides. It is stated in the masters' coordinates and so is
+    // the same for every internal basis of the level.
+    std::optional<Matrix> boundary_map;
   };
   struct DirectDemand {int low=0;epsilon_demand::Highs needs;};
   struct Seconds {
@@ -433,6 +442,7 @@ class Evaluator {
   PreparedFactoredConsumers prepare_factored_consumers(std::size_t depth,unsigned high) {
     if(depth>=graph_.nodes.size() || graph_.nodes[depth].scalar_leaf || high>options_.max_epsilon)
       throw std::invalid_argument("factored consumer fixture depth or order");
+    require_anchor(depth,"factored consumer fixture");
     PrecisionScope precision(options_.working_bits);auto& p=plan(depth,0);
     Matrix beta(p.lower.functionals.size(),std::vector<Exact>(p.gauge.matrix.size(),graph_.dimension.constant(0)));
     for(std::size_t i=0;i<p.beta_indices.size();++i)beta[p.beta_indices[i]]=p.beta_rows[i];
@@ -445,6 +455,7 @@ class Evaluator {
     if(depth>=graph_.nodes.size() || high>options_.max_epsilon ||
         graph_.nodes[depth].scalar_leaf || graph_.nodes[depth].closure.ordered_basis.empty())
       throw std::invalid_argument("local adjoint preparation depth or epsilon budget");
+    require_anchor(depth,"standalone adjoint-stage export");
     PrecisionScope precision(options_.working_bits);
     if(!plans_[depth])report(depth,"endpoint preparation",high);
     // The standalone v1 stage contract exports the original ordered masters.
@@ -527,7 +538,8 @@ class Evaluator {
     }
     if(!plans_[depth])report(depth,"endpoint preparation",desired_top);
     auto& prepared=plan(depth,desired_top);
-    auto method=options_.linear_method;
+    // The boundary map of an endpoint level is composed with transported rows.
+    auto method=node.boundary==BoundarySite::anchor?options_.linear_method:LinearMethod::adjoint;
     if(method==LinearMethod::automatic) {
       const auto width=shared_source_width(depth+1);
       std::size_t connections=0,observables=0;
@@ -575,6 +587,25 @@ class Evaluator {
   std::vector<std::optional<LaurentBoundary>> cache_;
   std::vector<std::optional<linear_boundary::Expression>> expressions_;
   std::vector<std::optional<DirectDemand>> direct_demands_;
+  void require_anchor(std::size_t depth,const char* what)const {
+    if(graph_.nodes[depth].boundary!=BoundarySite::anchor)
+      throw std::domain_error(std::string(what)+" does not cover a level whose boundary is at an endpoint; use the recursive evaluator");
+  }
+  // Where the two transported arms meet and the child's values enter: the
+  // anchor, or the overlap point next to the endpoint that carries the
+  // boundary, where its exact series is summed.
+  Rational matching_point(std::size_t depth,const Plan& prepared)const {
+    const auto& node=graph_.nodes[depth];
+    return node.boundary==BoundarySite::lower?prepared.geometry.overlap:
+      node.boundary==BoundarySite::upper?Rational(1)-prepared.geometry.overlap:node.anchor;
+  }
+  // Lowest epsilon order of the boundary map, at most zero.
+  int boundary_map_low(const Plan& prepared)const {
+    int low=0;
+    if(prepared.boundary_map)for(const auto& row:*prepared.boundary_map)for(const auto& value:row)
+      if(!value.is_zero())low=std::min(low,checked(*exact_epsilon_valuation(value,ei_)));
+    return low;
+  }
   LaurentRows ordinary_transport(const Matrix& matrix,LaurentRows initial,const Matrix& forcing,
       const std::vector<Exact>& vertices,const AdjointOptions& settings) {
     if(options_.ordinary_problem_observer)options_.ordinary_problem_observer(matrix,initial,forcing,vertices);
@@ -803,7 +834,9 @@ class Evaluator {
     auto fuchs=fuchsify::prepare(matrix,xi_,options_.fuchsification);
     if(!fuchs.success)throw std::domain_error("recursive endpoint fuchsification unsupported: "+fuchs.reason);
     const std::string side=upper?"upper":"lower";
-    if(auto result=direct_endpoint(matrix,diagonal,fuchs,node,upper)) {
+    // The endpoint that carries the boundary needs its fundamental series.
+    const bool boundary=node.boundary==(upper?BoundarySite::upper:BoundarySite::lower);
+    if(auto result=boundary?std::optional<Endpoint>{}:direct_endpoint(matrix,diagonal,fuchs,node,upper)) {
       ++statistics_.direct_endpoints;
       report(depth,side+" direct endpoint functionals; no fundamental series",high);
       return std::move(*result);
@@ -830,6 +863,7 @@ class Evaluator {
       if(matching_frame.wronskian_prefactor)report(depth,side+" Wronskian certified from exact trace and rational factors",high);
     }
     Endpoint result{std::move(series),std::move(matching_frame),std::vector<std::optional<Expansion>>(node.operations.size()),{}};
+    if(boundary)result.physical_frame=result.series->project(physical_gauge);
     const auto collect=[&](const Matrix& coefficients){for(const auto& row:coefficients)for(const auto& c:row)if(!c.is_zero())result.clearance_coefficients.push_back(c);};
     collect(matrix);collect(fuchs.matrix);collect(fuchs.transform);collect(fuchs.inverse_transform);collect(physical_gauge);
     const auto x=graph_.dimension.variable(xi_);
@@ -894,6 +928,7 @@ class Evaluator {
     candidate->beta_indices=base.beta_indices;
     if(!base.beta_rows.empty())candidate->beta_rows=fuchsify::detail::multiply(base.beta_rows,candidate->pullback_map);
     candidate->has_physical_basis=true;
+    candidate->boundary_map=base.boundary_map;
     for(const auto& row:candidate->inverse_diagonal)for(const auto& entry:row)if(!entry.is_zero())
       candidate->largest_shift=std::max(candidate->largest_shift,-*exact_epsilon_valuation(entry,ei_));
     candidate->lower_operator=pulled_back_operator(base,candidate->pullback_map,false,0);
@@ -1114,6 +1149,17 @@ class Evaluator {
     auto result=std::make_unique<Plan>(Plan{std::move(gauge),std::move(diagonal),std::move(inverse),std::move(lower),std::move(upper),std::move(beta),std::move(indices),largest,std::move(geometry)});
     result->constraint_labels=std::move(labels);
     result->has_physical_basis=chosen!=nullptr;
+    if(node.boundary!=BoundarySite::anchor) {
+      const auto& carrier=node.boundary==BoundarySite::upper?result->upper:result->lower;
+      const auto determination=endpoint_boundary::determine(*carrier.series,*carrier.physical_frame,ei_);
+      // The exact preparation chose this endpoint on the same test.
+      if(!determination.determined)throw std::domain_error("level "+std::to_string(depth+1)+
+        ": the endpoint values do not fix the level's solution: "+determination.reason);
+      result->boundary_map=endpoint_boundary::taylor_map(*carrier.physical_frame,determination,result->geometry.overlap);
+      report(depth,std::string(node.boundary==BoundarySite::upper?"upper":"lower")+" endpoint boundary: "+
+        std::to_string(determination.columns.size())+" analytic local solutions of "+std::to_string(d)+
+        " fixed by the masters at the endpoint; epsilon order of the map from "+std::to_string(boundary_map_low(*result)),desired_top);
+    }
     // Exact endpoint functionals already encode the prescribed singular limit.
     // At ordinary cuts their rational maps can participate in a jointly
     // certified rewrite. Numerical Frobenius operators never enter this path.
@@ -1325,14 +1371,16 @@ class Evaluator {
   // Exact rows applied to the child at the anchor: their pole depth and the
   // child-component highs they need for an output at order zero. They depend
   // on the graph node only, never on the internal basis of a plan.
-  const DirectDemand& direct_demand(std::size_t depth) {
+  const DirectDemand& direct_demand(std::size_t depth,const Plan* prepared=nullptr) {
     auto& saved=direct_demands_[depth];if(saved)return *saved;
     const auto& node=graph_.nodes[depth];DirectDemand result;
+    if(node.boundary!=BoundarySite::anchor && !prepared)throw std::logic_error("direct rows of an endpoint level need its plan");
+    const Rational point=prepared?matching_point(depth,*prepared):node.anchor;
     result.needs.assign(node.closure.ordered_basis.size(),std::nullopt);
     for(std::size_t i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)
       for(std::size_t j=0;j<node.observable_rows[i].size();++j) {
         const auto& entry=node.observable_rows[i][j];if(entry.is_zero())continue;
-        const auto at=entry.substitute(exact_point(entry,xi_,entry.constant(node.anchor)));
+        const auto at=entry.substitute(exact_point(entry,xi_,entry.constant(point)));
         if(at.is_zero())continue;
         const int valuation=checked(*exact_epsilon_valuation(at,ei_));
         result.low=std::min(result.low,valuation);
@@ -1373,13 +1421,21 @@ class Evaluator {
     int q=0;
     for(const auto& row:prepared.beta_rows)for(const auto& entry:row)if(!entry.is_zero())
       q=std::min(q,checked(*exact_epsilon_valuation(entry,ei_)));
-    const int direct=direct_demand(depth).low;
+    const int direct=direct_demand(depth,&prepared).low;
     const long loss=std::max<std::int64_t>(0,prepared.largest_shift);
     // Epsilon-regular homogeneous transport preserves lower bounds, while
     // forcing can lower them to q; the inverse D gauge follows. This is the
     // bound of one common window for all child components.
     const int uniform=checked(std::max(loss+std::max({-static_cast<long>(l),-static_cast<long>(r),-static_cast<long>(q)}),-static_cast<long>(direct)));
     int tight=uniform;epsilon_demand::Highs component;
+    if(graph_.nodes[depth].boundary!=BoundarySite::anchor) {
+      // The child enters through the boundary map: one common window, deeper
+      // by the map's own pole order.
+      tight=checked(static_cast<long>(uniform)-boundary_map_low(prepared));
+      prepared.component_child_loss.clear();
+      prepared.factored_child_loss=tight;prepared.adjoint_child_loss=tight;
+      ++statistics_.demand_preflights;return;
+    }
     if(options_.component_epsilon_demands) {
       component=component_child_needs(depth,prepared,0);
       tight=std::min(tight,std::max(0,epsilon_demand::maximum(component)));
@@ -1415,14 +1471,16 @@ class Evaluator {
     Matrix forcing(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
     for(unsigned i=0;i<prepared.beta_indices.size();++i)forcing[prepared.beta_indices[i]]=prepared.beta_rows[i];
     auto upper_forcing=forcing;for(auto& row:upper_forcing)for(auto& entry:row)entry=-entry;
-    const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),
+    (void)node;
+    const auto anchor=sample.constant(matching_point(depth,prepared)),h=sample.constant(prepared.geometry.overlap),
       end=sample.constant(Rational(1)-prepared.geometry.overlap);
     return {prepared.gauge.matrix,std::move(forcing),std::move(upper_forcing),
       std::move(left),std::move(right),path(h,anchor,depth,prepared),path(end,anchor,depth,prepared),prepared.gauge.shifts};
   }
   LaurentBoundary evaluate_adjoint(std::size_t depth,unsigned desired_top,Plan& prepared) {
     const auto& node=graph_.nodes[depth];auto sample=graph_.dimension;
-    const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),end=sample.constant(Rational(1)-prepared.geometry.overlap);
+    const auto anchor=sample.constant(matching_point(depth,prepared));
+    const bool at_endpoint=node.boundary!=BoundarySite::anchor;
     preflight_linear_demands(depth,prepared);
     // With component demands the local operator is tightened to its structural
     // columns below, so the child is needed through the tight bound only. The
@@ -1434,13 +1492,19 @@ class Evaluator {
       report(depth,"child boundary",demand);auto child=evaluate_child(depth+1,demand);
       const int needed_operator=checked(static_cast<long>(desired_top)-child_window_low(depth+1,child));
       if(!combined || combined->high<needed_operator) {
-        const int high=checked(needed_operator+prepared.largest_shift);
+        // Rows on the masters at the matching point; at an endpoint level the
+        // boundary map follows, whose poles ask for more of them.
+        const int local_high=checked(static_cast<long>(needed_operator)-boundary_map_low(prepared));
+        const int high=checked(local_high+prepared.largest_shift);
         auto stage=adjoint_stage(depth,prepared,high);
         auto settings=options_.adjoint;settings.taylor_order=options_.ordinary_order;
         // What a leg cost and why: its size, path and chart counts.
         const auto summarized=[&](const char* side,LaurentRows input,const Matrix& forcing,const std::vector<Exact>& vertices) {
           const auto* stats=settings.conditioning_stats;
           const AdjointConditioningStats before=stats?*stats:AdjointConditioningStats{};
+          // The arm of the endpoint that carries the boundary starts at the
+          // matching point.
+          if(vertices.size()<2)return input;
           const auto rows=input.coefficients.size(),columns=input.coefficients.empty()?0:input.coefficients[0].size();
           const int low=input.low,top=input.high;
           const auto began=std::chrono::steady_clock::now();
@@ -1464,12 +1528,18 @@ class Evaluator {
         auto transported=add_laurent_rows(left,right);
         if(prepared.has_physical_basis) {
           const auto inverse=exact_laurent_rows(prepared.inverse_diagonal,anchor,
-            std::max(0,checked(static_cast<long>(needed_operator)-transported.low)));
-          combined=linear_boundary::compose(transported,inverse,needed_operator);
+            std::max(0,checked(static_cast<long>(local_high)-transported.low)));
+          combined=linear_boundary::compose(transported,inverse,local_high);
         } else combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
         Matrix direct(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
         for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)direct[i]=node.observable_rows[i];
         combined=add_laurent_rows(*combined,exact_laurent_rows(direct,anchor,combined->high));
+        if(at_endpoint) {
+          const auto map=exact_laurent_rows(*prepared.boundary_map,anchor,
+            std::max(0,checked(static_cast<long>(needed_operator)-combined->low)));
+          combined=linear_boundary::compose(*combined,map,needed_operator);
+          linear_boundary::tighten(*combined);
+        } else
         if(options_.component_epsilon_demands)impose_structural_columns(depth,prepared,*combined,high);
         observe_operator(depth,"combined local operator",*combined);
       } else ++statistics_.local_operator_reuses;

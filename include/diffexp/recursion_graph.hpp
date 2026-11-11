@@ -5,12 +5,23 @@
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/merge_pullback.hpp"
 #include "diffexp/geometry.hpp"
+#include "diffexp/causal.hpp"
+#include "diffexp/endpoint_boundary.hpp"
 #include <algorithm>
 #include <map>
 #include <numeric>
 #include <limits>
 
 namespace diffexp::recursion {
+// Where a level takes its boundary data: at an interior anchor of the merge
+// parameter, where the child is the merged family at that value, or at an
+// endpoint, where the child is the incoming family with one of the two merged
+// lines removed (endpoint_boundary.hpp).
+enum class BoundarySite { anchor, lower, upper };
+// anchor: every level matches at its interior anchor. automatic: a level
+// whose endpoint qualifies matches there. endpoint: as automatic, and a
+// preparation in which no level qualifies is an error.
+enum class BoundaryPolicy { anchor, automatic, endpoint };
 struct Options {
   level::Options reduction;
   pullback::Budget numerator_expansion;
@@ -45,6 +56,12 @@ struct Options {
   // IBP counting only: alternatives are counted only when the first pair
   // gives a level of at least this many masters.
   std::size_t merge_selection_threshold=24;
+  // Explicit anchors keep every level at its anchor whatever the policy.
+  BoundaryPolicy boundary=BoundaryPolicy::anchor;
+  endpoint_boundary::Options endpoint;
+  // Told why an endpoint of a level (one-based depth) that passed the
+  // kinematic rule was refused by the level's equation or its numerators.
+  std::function<void(unsigned,bool,const std::string&)> endpoint_refused;
 };
 struct Event {
   unsigned depth,physical_propagators;
@@ -55,6 +72,7 @@ struct Event {
   // The merged pair, the number of pairs considered (1: no selection), and
   // the master counts of the chosen pair and of the first pair.
   unsigned left=0,right=1;std::size_t candidates=1,counted_masters=0,first_pair_masters=0;
+  BoundarySite boundary=BoundarySite::anchor;
 };
 using PrepareLevel=std::function<level::Result(const ibp::PropagatorBasis&,const Exact&,
   const ExactField&,std::size_t,const std::vector<ibp::Integral>&,const level::Options&)>;
@@ -67,6 +85,9 @@ struct Node {
   level::Result closure;
   std::vector<std::vector<Exact>> observable_rows;
   bool scalar_leaf=false;
+  // At an endpoint the anchor is 0 or 1 and the child computes the masters'
+  // values there, which are integrals of the pinched family.
+  BoundarySite boundary=BoundarySite::anchor;
 };
 struct Graph {
   ExactField field;
@@ -264,6 +285,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
   // Each present line as a combination of the original propagators.
   std::vector<std::vector<Rational>> composition(family.physical_count,std::vector<Rational>(family.physical_count,Rational(0)));
   for(unsigned i=0;i<family.physical_count;++i)composition[i][i]=Rational(1);
+  std::optional<bool> euclidean;
   for(unsigned depth=0;depth<levels;++depth) {
     const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     if(elapsed>=options.total_timeout_seconds)throw std::runtime_error("recursive preparation total time budget exhausted");
@@ -390,7 +412,30 @@ inline Graph prepare(const feynman::ExampleFamily& family,
         }
         node.observable_rows.push_back(std::move(row));
       }
-      anchor=select_regular_anchor(node.closure.matrix,node.observable_rows,0,1,anchor,options.anchors);
+      // An endpoint is taken where the integrals are analytic there (the
+      // kinematic rule), the level's numerator slots stay independent at it
+      // (the masters keep their meaning in the pinched family) and the
+      // level's equation confirms that the endpoint values fix the solution.
+      // A level made of exact identities alone has no equation to solve.
+      const bool transported=std::any_of(node.operations.begin(),node.operations.end(),
+        [](const auto& operation){return operation.operation!=feynman::Operation::Direct;});
+      if(options.boundary!=BoundaryPolicy::anchor && options.anchors.empty() && transported && !node.closure.ordered_basis.empty()) {
+        if(!euclidean)try{euclidean=causal::euclidean(family);}catch(const std::exception&){euclidean=false;}
+        for(const bool upper:{false,true}) {
+          if(!endpoint_boundary::kinematics(family,*euclidean,composition,left,right,upper?left:right).qualifies)continue;
+          std::string refusal;
+          try {(void)ibp::PropagatorBasis(at_anchor(node.merged,0,Rational(upper?1:0)));}
+          catch(const std::exception&) {refusal="a numerator slot of the level depends on its propagators at the endpoint";}
+          if(refusal.empty()) {
+            const auto verdict=endpoint_boundary::examine(node.closure.matrix,0,1,upper,options.endpoint);
+            if(verdict.qualifies){node.boundary=upper?BoundarySite::upper:BoundarySite::lower;break;}
+            refusal=verdict.reason;
+          }
+          if(options.endpoint_refused)options.endpoint_refused(depth+1,upper,refusal);
+        }
+      }
+      if(node.boundary==BoundarySite::anchor)anchor=select_regular_anchor(node.closure.matrix,node.observable_rows,0,1,anchor,options.anchors);
+      else anchor=Rational(node.boundary==BoundarySite::upper?1:0);
       node.anchor=anchor;
       requested=node.closure.ordered_basis;
       // This is the only numerical anchor substitution in exact preparation.
@@ -402,13 +447,16 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     Event event{depth+1,static_cast<unsigned>(node.merged.physical_count),node.requested.size(),
       node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf,anchors[depth],anchor,
-      left,right,candidates,counted_masters,first_pair_masters};
+      left,right,candidates,counted_masters,first_pair_masters,node.boundary};
     const bool done=node.scalar_leaf || node.closure.ordered_basis.empty();
     graph.nodes.push_back(std::move(node));graph.events.push_back(event);if(progress)progress(event);
     // The total budget gates the START of a level (top of this loop). A level
     // that has just completed is never discarded for finishing late.
     if(done)break;
   }
+  if(options.boundary==BoundaryPolicy::endpoint && options.anchors.empty() &&
+      std::none_of(graph.nodes.begin(),graph.nodes.end(),[](const Node& node){return node.boundary!=BoundarySite::anchor;}))
+    throw std::domain_error("an endpoint boundary was requested, but no level of this family qualifies for one");
   return graph;
 }
 } // namespace diffexp::recursion

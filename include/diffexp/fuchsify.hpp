@@ -144,14 +144,35 @@ inline Matrix nullspace(Matrix m) {
     }
   return out;
 }
-inline bool extend(Matrix &span, const std::vector<Exact> &v) {
-  auto next = span;
-  next.push_back(v);
-  auto rank = rref(next, v.size()).size();
-  if (rank == span.size())
+// Incremental echelon basis of a row span.  Row i is normalised to one in
+// column pivots[i] and vanishes in the pivot columns of all earlier rows, so
+// reducing a candidate by the rows in insertion order clears every pivot
+// column; the candidate lies in the span exactly when nothing is left.
+struct Echelon {
+  Matrix rows;
+  std::vector<unsigned> pivots;
+};
+inline bool extend(Echelon &span, std::vector<Exact> v) {
+  for (std::size_t i = 0; i < span.rows.size(); ++i) {
+    const auto q = v[span.pivots[i]];
+    if (q.is_zero())
+      continue;
+    const auto &row = span.rows[i];
+    for (std::size_t j = 0; j < v.size(); ++j)
+      if (!row[j].is_zero())
+        v[j] = v[j] - q * row[j];
+  }
+  unsigned p = 0;
+  while (p < v.size() && v[p].is_zero())
+    ++p;
+  if (p == v.size())
     return false;
-  next.resize(rank);
-  span = std::move(next);
+  const auto q = v[p];
+  for (auto &e : v)
+    if (!e.is_zero())
+      e = e / q;
+  span.rows.push_back(std::move(v));
+  span.pivots.push_back(p);
   return true;
 }
 inline std::vector<Exact> action(const Matrix &m, const std::vector<Exact> &v) {
@@ -167,19 +188,27 @@ inline Matrix nilpotent_frame(const Matrix &m) {
   unsigned d = m.size();
   auto z = m[0][0].constant(0);
   auto pow = identity(d, z);
-  std::vector<Matrix> kernels(d + 1);
-  for (unsigned l = 1; l <= d; ++l) {
+  // kernels[l] is the kernel of m^l up to the nilpotency index: the first l
+  // with m^l = 0.  Every higher power vanishes as well, its kernel is the
+  // whole space, and a level above the index starts from a span that is
+  // already everything and selects no chain head, so those levels are not
+  // formed at all.
+  std::vector<Matrix> kernels(1);
+  unsigned index = 0;
+  for (unsigned l = 1; l <= d && !index; ++l) {
     pow = multiply(pow, m);
-    kernels[l] = nullspace(pow);
+    kernels.push_back(nullspace(pow));
+    if (zero(pow))
+      index = l;
   }
-  if (!zero(pow))
+  if (!index)
     throw std::domain_error(
         "irregular endpoint: highest-pole coefficient is not nilpotent");
   Matrix selected;
   auto t = zeros(d, d, z), jordan = zeros(d, d, z);
   unsigned column = 0;
-  for (unsigned l = d; l > 0; --l) {
-    Matrix span;
+  for (unsigned l = index; l > 0; --l) {
+    Echelon span;
     for (auto &v : selected)
       extend(span, v);
     for (auto &v : kernels[l - 1])

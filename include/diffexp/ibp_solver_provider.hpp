@@ -25,8 +25,10 @@ struct Options {
   // An integral left unreduced that lies outside the seeds of its sector (more
   // dots or a higher numerator degree than any seed there) was never the seed
   // of an equation: it is not a master integral but the edge of the system.
-  // The seeds of its sector and subsectors are then widened to contain it and
-  // the elimination is repeated, at most this many times for one batch.
+  // The seeds of its sector alone are then widened to contain it and the
+  // elimination is repeated, at most this many times for one batch: what the
+  // new equations leave unreduced outside the seeds of a subsector widens
+  // that subsector in the next repetition.
   unsigned max_seed_widenings=4;
   // Fresh primal eliminations certify a reconstruction (see Sampler). By
   // default each eliminates ALL generated equations. With selected_source_rows
@@ -244,11 +246,11 @@ class Sampler {
             if((dots<=bound.first&&nums<=bound.second)||dots>8||nums>8)continue;
             if(wider.empty()){wider=widened_;wider.resize(std::size_t(1)<<basis_.physical_count);}
             if(example.empty()){example="[";for(unsigned i=0;i<input_geometry_.n;++i)example+=std::to_string(a.powers[i])+",";example.back()=']';}
-            for(std::size_t sub=mask;;sub=(sub-1)&mask){auto& w=wider[sub];w.first=std::max(w.first,dots);w.second=std::max(w.second,nums);if(!sub)break;}
+            auto& w=wider[mask];w.first=std::max(w.first,dots);w.second=std::max(w.second,nums);
           }
           if(!wider.empty()){
             widened_=std::move(wider);++widenings_;++stats_.seed_widenings;
-            if(options_.progress)options_.progress("integral "+example+" is left unreduced outside the seeds of its sector; widening the seeds of that sector and its subsectors");
+            if(options_.progress)options_.progress("integral "+example+" is left unreduced outside the seeds of its sector; widening the seeds of that sector");
             auto again=limits;again.timeout_seconds=std::max(1u,static_cast<unsigned>(remaining()));
             return (*this)(requested,point,modulus,again,independent,complete);
           }

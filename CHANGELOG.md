@@ -51,7 +51,7 @@
   criterion on U + F as zero sectors (`scaleless_sectors.hpp`), not only
   those with a free loop momentum, and no longer accepts as a master an
   integral left unreduced outside the seeds of its sector: the seeds of that
-  sector and its subsectors are widened and the elimination repeated
+  sector are widened and the elimination repeated
   (`seed_widenings` in `ibp_statistics`). A level whose requests carry two
   dots on one line used to close on ever higher dots. Planar double box with
   its second level merging the two outer lines of the second loop: 9

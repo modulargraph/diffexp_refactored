@@ -294,41 +294,11 @@ inline Graph prepare(const feynman::ExampleFamily& family,
         for(unsigned t=1;t<threads;++t)workers.emplace_back(work);
         work();
       }
-      // The first pair is kept unless another has strictly fewer masters. A
-      // smaller graph is not always a cheaper reduction: where the IBP
-      // counter is available, a candidate is taken only if its level, closed
-      // under derivatives, is counted smaller than the first pair's within
-      // three times the time that one took. Candidates are tried in the
-      // order of their graph counts.
+      // The first pair is kept unless another has strictly fewer masters.
       if(pairs.size()>1 && counts.front()) {
-        candidates=0;for(const auto& c:counts)if(c)++candidates;
-        first_pair_masters=counted_masters=*counts.front();
-        std::vector<std::size_t> better;
-        for(std::size_t i=1;i<pairs.size();++i)if(counts[i] && *counts[i]<*counts.front())better.push_back(i);
-        std::stable_sort(better.begin(),better.end(),[&](std::size_t a,std::size_t b){return *counts[a]<*counts[b];});
-        const auto reduced=[&](unsigned l,unsigned r,const level::Options& allowance)->std::optional<std::size_t> {
-          try {
-            const ibp::PropagatorBasis incoming(raw),merged(ibp::merge(raw,l,r,x));
-            std::set<ibp::Integral,ibp::IntegralOrder> wanted;
-            for(const auto& target:requested)
-              for(const auto& [a,c]:pullback::plan(incoming,merged,l,r,target,x,options.numerator_expansion).source_row)if(!c.is_zero())wanted.insert(a);
-            if(wanted.empty() || wanted.size()>options.max_sources_per_level)return std::nullopt;
-            return options.count_masters(merged,dimension,field,0,{wanted.begin(),wanted.end()},allowance);
-          } catch(const std::exception&) {return std::nullopt;}
-        };
-        if(!better.empty() && !options.count_masters) {
-          left=pairs[better.front()].first;right=pairs[better.front()].second;counted_masters=*counts[better.front()];
-        } else if(!better.empty()) {
-          const auto began_first=std::chrono::steady_clock::now();
-          const auto first=reduced(0,1,options.reduction);
-          auto allowance=options.reduction;
-          allowance.provider.timeout_seconds=std::min(allowance.provider.timeout_seconds,
-            static_cast<unsigned>(3*std::chrono::duration<double>(std::chrono::steady_clock::now()-began_first).count())+2u);
-          if(first)for(const auto i:better) {
-            const auto confirmed=reduced(pairs[i].first,pairs[i].second,allowance);
-            if(confirmed && *confirmed<*first){left=pairs[i].first;right=pairs[i].second;counted_masters=*counts[i];break;}
-          }
-        }
+        std::size_t best=0;candidates=0;
+        for(std::size_t i=0;i<pairs.size();++i)if(counts[i]){++candidates;if(*counts[i]<*counts[best])best=i;}
+        left=pairs[best].first;right=pairs[best].second;counted_masters=*counts[best];first_pair_masters=*counts.front();
         chosen_from_graph=true;
       }
     }

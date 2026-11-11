@@ -61,11 +61,9 @@ Transport time is linear in the number of epsilon orders carried.
   Lee-Pomeransky polynomial U + F, found with Singular over a finite field
   in seconds (`critical_points.hpp`; it agrees with the IBP counts: 16 for
   the kite, 12 for the double box, 75 and 49 for two merges of the
-  Higgs+jet family F, 69 for the double pentagon). A pair with fewer masters
-  than the first pair is taken once a quick IBP count confirms that its
-  level is smaller, since a smaller graph is not always a cheaper reduction.
-  Without Singular only IBP counts are used, for levels of 24 or more
-  masters. An explicit `merges` or `anchors` entry, or stated causal signs,
+  Higgs+jet family F, 69 for the double pentagon). The pair with the fewest
+  is merged, the first pair on a tie. Without Singular the masters are
+  counted by IBP eliminations instead, for levels of 24 or more masters. An explicit `merges` or `anchors` entry, or stated causal signs,
   keep the ladder as written. For family F (seven propagators, four
   massive) the choice turns levels of 75, 47, 21 masters into 49, 19, 13:
   preparation about a minute instead of eleven, one epsilon sample under two

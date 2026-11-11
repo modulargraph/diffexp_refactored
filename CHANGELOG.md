@@ -34,9 +34,8 @@
   level merges the pair of propagators whose merged graph has the fewest
   master integrals. The count is the number of critical points of U + F,
   computed with Singular in seconds for the pairs on one loop momentum
-  (`critical_points.hpp`), and a smaller candidate is confirmed by a quick
-  IBP count (`ibp_solver::Session::count_masters`) before it replaces the
-  first pair; without Singular, IBP counts alone decide for large levels.
+  (`critical_points.hpp`); without Singular, IBP counts
+  (`ibp_solver::Session::count_masters`) decide for large levels.
   Higgs+jet family F: levels of 75, 47, 21 masters become 49, 19, 13; the
   kite's second level 7 instead of 10.
 - The executables are compiled for the host CPU by default

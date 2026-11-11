@@ -2027,13 +2027,29 @@ class Evaluator {
           linear_boundary::tighten(expression.transform);
           auto result=linear_boundary::materialize(expression,static_cast<int>(desired_top));
           result.taylor_tail_certified=false;
+          {
+            const auto size=[](const B& value){mag_t m;mag_init(m);acb_get_mag(m,value.raw());const double out=mag_is_zero(m)?-std::numeric_limits<double>::infinity():mag_get_d_log2_approx(m);mag_clear(m);return out;};
+            const auto& source=*expression.leaf_source;const auto& map=expression.transform;
+            for(const auto& row:map.coefficients) {
+              double largest=-std::numeric_limits<double>::infinity();
+              for(std::size_t column=0;column<row.size();++column)for(std::size_t a=0;a<row[column].size();++a) {
+                const double weight=size(row[column][a]);
+                if(!std::isfinite(weight))continue;
+                for(std::size_t b=0;b<source.values[column].size();++b) {
+                  if(static_cast<long>(map.low)+static_cast<long>(a)+source.low+static_cast<long>(b)>static_cast<long>(desired_top))break;
+                  largest=std::max(largest,weight+size(source.values[column][b]));
+                }
+              }
+              result.term_log2.push_back(largest);
+            }
+          }
           if(result.values.size()!=targets+labels.size() || expression.transform.coefficients.size()!=result.values.size())
             throw std::logic_error("weighted constrained expression shape mismatch");
           // A constraint row is the constraint functional of its level applied
           // to that level's solution, contracted with the terminal values like
           // a target; it must vanish. Checked through desired_top.
           for(std::size_t i=0;i<labels.size();++i)check_endpoint_constraint(result,static_cast<unsigned>(targets+i),labels[i]);
-          expression.transform.coefficients.resize(targets);result.values.resize(targets);
+          expression.transform.coefficients.resize(targets);result.values.resize(targets);result.term_log2.resize(targets);
           observe_operator(0,"composed shared-source map",expression.transform);
           expressions_[0]=std::move(expression);cache_[0]=std::move(result);
           return *cache_[0];

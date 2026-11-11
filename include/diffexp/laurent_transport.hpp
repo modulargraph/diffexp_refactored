@@ -7,6 +7,10 @@ struct LaurentBoundary {
   int low;
   Boundary values;
   bool taylor_tail_certified=false;
+  // By row, log2 of the largest product of a composed weight and a terminal
+  // value that enters it: the scale the terms of a row have before they
+  // cancel. Empty when it was not recorded.
+  std::vector<double> term_log2={};
   int high() const {
     if(values.empty() || values[0].empty())throw std::invalid_argument("empty Laurent boundary");
     const auto n=values[0].size();

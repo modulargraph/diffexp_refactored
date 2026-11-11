@@ -54,16 +54,26 @@ Transport time is linear in the number of epsilon orders carried.
   master. This narrows no epsilon window but shrinks the connection where
   such a factor exists; see [moving-poles.md](moving-poles.md).
 - **Merge selection** (`--merge-selection auto`). Which two propagators a
-  level merges decides how large the levels below become. When the first
-  two propagators give a level of 24 or more masters, the built-in solver
-  counts the masters of every pair with a common loop momentum (one
-  finite-field elimination per closure pass, no reconstruction) and the
-  recursion merges the pair with the fewest. An explicit `merges`, `anchors`
-  or `causal` entry in the family file keeps the ladder as written. For the
-  non-planar Higgs+jet family F (seven propagators, four of them massive)
-  this turns levels of 75, 47 and 21 masters into 49, 19 and 13:
-  preparation 110 s instead of 654 s, one epsilon sample 107 s instead of
-  1600 s, with the same value to all 28 digits.
+  level merges decides how large the levels below become. Candidates are
+  the pairs on one loop momentum, whose merged line is again an ordinary
+  propagator. For each, the number of master integrals of the merged graph
+  is counted from its Symanzik polynomials: the critical points of the
+  Lee-Pomeransky polynomial U + F, found with Singular over a finite field
+  in seconds (`critical_points.hpp`; it agrees with the IBP counts: 16 for
+  the kite, 12 for the double box, 75 and 49 for two merges of the
+  Higgs+jet family F, 69 for the double pentagon). A pair with fewer masters
+  than the first pair is taken once a quick IBP count confirms that its
+  level is smaller, since a smaller graph is not always a cheaper reduction.
+  Without Singular only IBP counts are used, for levels of 24 or more
+  masters. An explicit `merges` or `anchors` entry, or stated causal signs,
+  keep the ladder as written. For family F (seven propagators, four
+  massive) the choice turns levels of 75, 47, 21 masters into 49, 19, 13:
+  preparation about a minute instead of eleven, one epsilon sample under two
+  minutes instead of 27. The kite's second level has 7 masters instead of
+  10.
+- **Solver limits.** A reduction of the built-in IBP solver that meets its
+  degree or sample bound is repeated with the bounds doubled; the time and
+  memory budgets (a day and 4 GiB by default) are what ends a preparation.
 - **Threads.** With OpenMP the streams and rows of a Taylor order run in
   parallel once an order costs 5000 multiply-adds; endpoint series solve
   their columns on separate threads; the built-in IBP solver works ahead on

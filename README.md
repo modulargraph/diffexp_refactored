@@ -39,7 +39,8 @@ Details and conditions are in [timings](docs/timings.md); comparisons with
 ## Build
 
 Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and
-pkg-config. OpenMP is used when available (`-DDIFFEXP_OPENMP=OFF` disables
+pkg-config. [Singular](https://www.singular.uni-kl.de) is optional: with it on the
+PATH the recursion chooses its merges from the graph. OpenMP is used when available (`-DDIFFEXP_OPENMP=OFF` disables
 it); results do not depend on the thread count. Mathematica is optional.
 
 ```sh

@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <thread>
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/merge_pullback.hpp"
@@ -14,7 +16,7 @@ struct Options {
   pullback::Budget numerator_expansion;
   std::vector<Rational> anchors;
   std::vector<std::pair<unsigned,unsigned>> merges;
-  unsigned max_levels=16,total_timeout_seconds=600;
+  unsigned max_levels=16,total_timeout_seconds=86400;
   std::size_t max_sources_per_level=5000;
   // Optional exchange of masters of a freshly closed level (zero-based depth)
   // for other integrals, before its masters become the child's requests. The
@@ -31,8 +33,17 @@ struct Options {
   // Without it, each level merges its first two propagators.
   std::function<std::optional<std::size_t>(const ibp::PropagatorBasis&,const Exact&,const ExactField&,std::size_t,
     const std::vector<ibp::Integral>&,const level::Options&)> count_masters;
-  // Alternatives are counted only when the first pair gives a level of at
-  // least this many masters.
+  // The same choice from the graph alone: the number of masters of the family
+  // that merges lines `left` and `right`, given each present line as a
+  // combination of the original propagators (critical_points.hpp). It is
+  // cheap, so every pair of every level is counted; where it answers, it
+  // decides and count_masters is not asked.
+  std::function<std::optional<std::size_t>(const std::vector<std::vector<Rational>>&,unsigned,unsigned)> count_critical_points;
+  // Told the choice of a level (one-based depth, pair, candidates, masters of
+  // the pair and of the first pair) before that level is reduced.
+  std::function<void(unsigned,unsigned,unsigned,std::size_t,std::size_t,std::size_t)> merge_chosen;
+  // IBP counting only: alternatives are counted only when the first pair
+  // gives a level of at least this many masters.
   std::size_t merge_selection_threshold=24;
 };
 struct Event {
@@ -250,13 +261,78 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     ibp::Integral scalar(raw.scalar_products.size(),0);
     std::fill_n(scalar.begin(),family.physical_count,1);requested.push_back(std::move(scalar));
   }
+  // Each present line as a combination of the original propagators.
+  std::vector<std::vector<Rational>> composition(family.physical_count,std::vector<Rational>(family.physical_count,Rational(0)));
+  for(unsigned i=0;i<family.physical_count;++i)composition[i][i]=Rational(1);
   for(unsigned depth=0;depth<levels;++depth) {
     const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     if(elapsed>=options.total_timeout_seconds)throw std::runtime_error("recursive preparation total time budget exhausted");
     auto [left,right]=options.merges.empty()?std::pair{0u,1u}:options.merges[depth];
     std::size_t candidates=1,counted_masters=0,first_pair_masters=0;
     const unsigned lines=static_cast<unsigned>(ibp::PropagatorBasis(raw).physical_count);
-    if(options.merges.empty() && options.count_masters && lines>2) {
+    // Two lines with the same loop momentum merge into an ordinary propagator
+    // with a shifted momentum and mass. A pair with different loop momenta
+    // makes a new topology: where its master count is small, its reduction
+    // has still been far more expensive, so such pairs are not candidates.
+    const std::size_t quadratic=family.momenta.loops*(family.momenta.loops+1)/2;
+    const auto same_routing=[&](unsigned l,unsigned r) {
+      for(std::size_t k=0;k<quadratic && k<raw.physical[l].linear.size();++k)
+        if(!(raw.physical[l].linear[k]-raw.physical[r].linear[k]).is_zero())return false;
+      return true;
+    };
+    bool chosen_from_graph=false;
+    if(options.merges.empty() && options.count_critical_points && lines>2) {
+      std::vector<std::pair<unsigned,unsigned>> pairs;
+      for(unsigned l=0;l<lines;++l)for(unsigned r=l+1;r<lines;++r)if((l==0 && r==1) || same_routing(l,r))pairs.emplace_back(l,r);
+      std::vector<std::optional<std::size_t>> counts(pairs.size());
+      std::atomic<std::size_t> next{0};
+      const auto work=[&]{for(std::size_t i;(i=next++)<pairs.size();)
+        try{counts[i]=options.count_critical_points(composition,pairs[i].first,pairs[i].second);}catch(const std::exception&){}};
+      {
+        std::vector<std::jthread> workers;
+        const unsigned threads=std::min<unsigned>(std::max(1u,std::thread::hardware_concurrency()),static_cast<unsigned>(pairs.size()));
+        for(unsigned t=1;t<threads;++t)workers.emplace_back(work);
+        work();
+      }
+      // The first pair is kept unless another has strictly fewer masters. A
+      // smaller graph is not always a cheaper reduction: where the IBP
+      // counter is available, a candidate is taken only if its level, closed
+      // under derivatives, is counted smaller than the first pair's within
+      // three times the time that one took. Candidates are tried in the
+      // order of their graph counts.
+      if(pairs.size()>1 && counts.front()) {
+        candidates=0;for(const auto& c:counts)if(c)++candidates;
+        first_pair_masters=counted_masters=*counts.front();
+        std::vector<std::size_t> better;
+        for(std::size_t i=1;i<pairs.size();++i)if(counts[i] && *counts[i]<*counts.front())better.push_back(i);
+        std::stable_sort(better.begin(),better.end(),[&](std::size_t a,std::size_t b){return *counts[a]<*counts[b];});
+        const auto reduced=[&](unsigned l,unsigned r,const level::Options& allowance)->std::optional<std::size_t> {
+          try {
+            const ibp::PropagatorBasis incoming(raw),merged(ibp::merge(raw,l,r,x));
+            std::set<ibp::Integral,ibp::IntegralOrder> wanted;
+            for(const auto& target:requested)
+              for(const auto& [a,c]:pullback::plan(incoming,merged,l,r,target,x,options.numerator_expansion).source_row)if(!c.is_zero())wanted.insert(a);
+            if(wanted.empty() || wanted.size()>options.max_sources_per_level)return std::nullopt;
+            return options.count_masters(merged,dimension,field,0,{wanted.begin(),wanted.end()},allowance);
+          } catch(const std::exception&) {return std::nullopt;}
+        };
+        if(!better.empty() && !options.count_masters) {
+          left=pairs[better.front()].first;right=pairs[better.front()].second;counted_masters=*counts[better.front()];
+        } else if(!better.empty()) {
+          const auto began_first=std::chrono::steady_clock::now();
+          const auto first=reduced(0,1,options.reduction);
+          auto allowance=options.reduction;
+          allowance.provider.timeout_seconds=std::min(allowance.provider.timeout_seconds,
+            static_cast<unsigned>(3*std::chrono::duration<double>(std::chrono::steady_clock::now()-began_first).count())+2u);
+          if(first)for(const auto i:better) {
+            const auto confirmed=reduced(pairs[i].first,pairs[i].second,allowance);
+            if(confirmed && *confirmed<*first){left=pairs[i].first;right=pairs[i].second;counted_masters=*counts[i];break;}
+          }
+        }
+        chosen_from_graph=true;
+      }
+    }
+    if(!chosen_from_graph && options.merges.empty() && options.count_masters && lines>2) {
       // (masters, not the first pair, sources, pair): the first pair is kept
       // unless another has strictly fewer masters.
       std::optional<std::tuple<std::size_t,bool,std::size_t,unsigned,unsigned>> best;
@@ -270,12 +346,6 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       // shifted momentum and mass. A pair with different loop momenta makes a
       // new topology; where counted, such pairs closed on larger levels and
       // cost the most to count.
-      const std::size_t quadratic=family.momenta.loops*(family.momenta.loops+1)/2;
-      const auto same_routing=[&](unsigned l,unsigned r) {
-        for(std::size_t k=0;k<quadratic && k<raw.physical[l].linear.size();++k)
-          if(!(raw.physical[l].linear[k]-raw.physical[r].linear[k]).is_zero())return false;
-        return true;
-      };
       for(unsigned l=0;l<lines;++l)for(unsigned r=l+1;r<lines;++r) {
         if(!(l==0 && r==1) && !same_routing(l,r))continue;
         if(l==0 && r==1) {
@@ -312,6 +382,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       if(best){left=std::get<3>(*best);right=std::get<4>(*best);counted_masters=std::get<0>(*best);}
       candidates=std::max<std::size_t>(candidates,1);
     }
+    if(options.merge_chosen && candidates>1)options.merge_chosen(depth+1,left,right,candidates,counted_masters,first_pair_masters);
     auto anchor=anchors[depth];
     auto merged_raw=ibp::merge(raw,left,right,x);
     Node node{ibp::PropagatorBasis(raw),ibp::PropagatorBasis(std::move(merged_raw)),
@@ -354,6 +425,9 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       requested=node.closure.ordered_basis;
       // This is the only numerical anchor substitution in exact preparation.
       raw=at_anchor(node.merged,0,anchor);
+      for(std::size_t i=0;i<composition[left].size();++i)
+        composition[left][i]=anchor*composition[left][i]+(Rational(1)-anchor)*composition[right][i];
+      composition.erase(composition.begin()+right);
     }
     const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     Event event{depth+1,static_cast<unsigned>(node.merged.physical_count),node.requested.size(),

@@ -67,7 +67,7 @@ if(BUILD_TESTING)
     target_link_libraries(diffexp_master_basis_report PRIVATE DiffExp::core)
   endif()
   list(APPEND native_tests rational_circuit rational_circuit_dot compact_recurrence compact_adjoint uncertainty_support basis_persistence
-    component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening moving_poles epsilon_sampling)
+    component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening moving_poles epsilon_sampling critical_points)
   foreach(name IN LISTS native_tests)
     add_executable(diffexp_test_${name} tests/test_${name}.cpp)
     target_link_libraries(diffexp_test_${name} PRIVATE DiffExp::core)

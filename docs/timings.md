@@ -11,16 +11,16 @@ default options and `--no-numerical-cache`.
 
 | Example | Total | Preparation / numerical |
 | --- | ---: | --- |
-| `sunrise` | 0.16 s | 0.05 / 0.10 s |
-| `box` | 0.11 s | 0.06 / 0.05 s |
-| `pentagon` | 0.70 s | 0.17 / 0.52 s |
-| `box_bubble` | 0.49 s | 0.46 / 0.03 s |
-| `pentagon_massive` | 1.43 s | 0.56 / 0.84 s |
-| `box_triangle` | 2.12 s | 1.43 / 0.67 s |
+| `sunrise` | 0.19 s | 0.06 / 0.13 s |
+| `box` | 0.13 s | 0.08 / 0.04 s |
+| `pentagon` | 0.93 s | 0.32 / 0.60 s |
+| `box_bubble` | 0.85 s | 0.81 / 0.03 s |
+| `pentagon_massive` | 1.64 s | 0.66 / 0.95 s |
+| `box_triangle` | 3.69 s | 3.42 / 0.26 s |
 | `banana` (three loops) | 1.76 s | 0.46 / 1.27 s |
 | `banana_unequal` | 2.54 s | 0.54 / 1.97 s |
-| `kite` | 4.6 s | 1.0 / 3.5 s |
-| `double_box_planar` | 14.2 s | 3.7 / 10.3 s |
+| `kite` | 2.2 s | 0.5 / 1.7 s |
+| `double_box_planar` | 19.1 s | 7.8 / 11.2 s |
 | `banana4` (four loops, equal masses) | 47.6 s | 19.4 / 27.9 s |
 | `banana4_unequal` (four loops, four masses) | 87.1 s | 27.4 / 59.5 s |
 

@@ -146,7 +146,7 @@ class Sampler {
             auto& bound=sector_bounds[sub];bound.first=std::max(bound.first,dots?dots-1:0);bound.second=std::max(bound.second,nums);if(!sub)break;}
 }
       }
-      seeds.max_terms=std::min<std::size_t>(10000000,limits.memory_bytes/64);seeds.seconds=remaining();
+      seeds.max_terms=limits.memory_bytes/64;seeds.max_seeds=std::size_t(1)<<30;seeds.max_states=std::size_t(1)<<34;seeds.seconds=remaining();
       if(!seeds.max_terms)throw std::invalid_argument("IBP solver memory budget too small");
       if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms){
         auto fresh=std::make_unique<Plan>();fresh->program=std::make_shared<::ibp::ParametricProgram>(::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds));
@@ -408,7 +408,7 @@ class Session {
     std::size_t masters=0;bool stable=false;
     for(unsigned pass=0;pass<options_.max_planning_passes&&!stable;++pass){
       const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
-      if(elapsed>=limits.timeout_seconds||demanded.size()>2000)throw std::runtime_error("IBP master count budget");
+      if(elapsed>=limits.timeout_seconds||demanded.size()>50000)throw std::runtime_error("IBP master count budget");
       auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
       auto reduced=(*sampler_)({demanded.begin(),demanded.end()},modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass),prime(1),receiving);
       if(!reduced.success)throw std::runtime_error("IBP master count failed: "+reduced.reason);
@@ -449,7 +449,7 @@ class Session {
       auto cached=fire_modular::detail::read(path);
       if(artifacts::detail::string(cached.at("identity"))!=key||cached.at("schema")!="DiffExp.IBPClosurePlan/v1"||!cached.at("planning_hint_only").as_bool())throw std::runtime_error("IBP closure plan identity mismatch");
       std::set<ibp::Integral,ibp::IntegralOrder> planned;
-      if(cached.at("demands").as_array().size()>2000)throw std::length_error("IBP closure plan demand budget");
+      if(cached.at("demands").as_array().size()>50000)throw std::length_error("IBP closure plan demand budget");
       for(const auto& entry:cached.at("demands").as_array()){
         ibp::Integral a;for(const auto& power:entry.as_array())a.push_back(power.to_number<int>());fire_batch::validate_index(a,basis_);
         if(!planned.insert(a).second)throw std::runtime_error("duplicate closure plan demand");
@@ -479,7 +479,7 @@ class Session {
       sampler_->anticipate(std::move(points),left());};
     for(unsigned pass=0;pass<options_.max_planning_passes;++pass){
       expect(pass);
-      if(demanded.size()>2000)throw std::length_error("IBP closure planning demand budget");
+      if(demanded.size()>50000)throw std::length_error("IBP closure planning demand budget");
       std::vector<ibp::Integral> batch(demanded.begin(),demanded.end());std::set<ibp::Integral> terminal;
       for(unsigned check=0;check<2;++check){
         auto elapsed=duration<double>(steady_clock::now()-started).count();if(elapsed>=limits.timeout_seconds)throw std::runtime_error("IBP closure planning time budget");
@@ -547,9 +547,25 @@ class Session {
 inline Options recursion_options(const std::filesystem::path& cache_directory,std::size_t parameter,
     unsigned elimination_seconds,bool strict=false) {
   Options native;native.cache_directory=cache_directory;
+  // The degree bounds also set how many samples a reconstruction takes, so
+  // they start small; a caller that meets them raises them (see escalate).
   native.degree_slices=true;native.max_samples_per_prime=1024;
   native.closure_parameter=parameter;native.probe_timeout_seconds=elimination_seconds;
   if(!strict){native.selected_source_rows=true;native.complete_validation_anchor=true;}
   return native;
+}
+// Whether a failed reduction stopped at a degree or sample bound, and if so
+// the options with those bounds doubled; nothing once they are at the most
+// the reconstruction accepts. Progress made under the old bounds is kept on
+// disk by the reconstruction itself.
+inline std::optional<Options> escalate(const Options& options,const std::string& reason) {
+  if(reason.find("degree budget")==std::string::npos && reason.find("sample/degree budget")==std::string::npos &&
+     reason.find("sample budget")==std::string::npos)return std::nullopt;
+  if(options.max_degree>=256 && options.max_variable_degree>=4096 && options.max_samples_per_prime>=(std::size_t(1)<<20))return std::nullopt;
+  auto next=options;
+  next.max_degree=std::min(256u,2*options.max_degree);
+  next.max_variable_degree=std::min(4096u,2*options.max_variable_degree);
+  next.max_samples_per_prime=std::min<std::size_t>(std::size_t(1)<<20,2*options.max_samples_per_prime);
+  return next;
 }
 } // namespace diffexp::ibp_solver

@@ -30,13 +30,19 @@
   pole order is detected (`--sample-poles` fixes it), and the fit reports
   each coefficient with an estimated error. `epsilon_sampling.hpp` holds the
   fit; `tools/experiments/epsilon_sampling.py` is removed.
-- Merge selection (`--merge-selection auto|first`, default `auto` with the
-  built-in solver): a level whose first two propagators give 24 or more
-  masters merges instead the pair with a common loop momentum that has the
-  fewest masters, counted by finite-field eliminations
-  (`recursion::Options::count_masters`, `ibp_solver::Session::count_masters`).
-  Higgs+jet family F: preparation 654 s -> 110 s, one epsilon sample
-  1600 s -> 107 s, same value.
+- Merge selection (`--merge-selection auto|first`, default `auto`): every
+  level merges the pair of propagators whose merged graph has the fewest
+  master integrals. The count is the number of critical points of U + F,
+  computed with Singular in seconds for the pairs on one loop momentum
+  (`critical_points.hpp`), and a smaller candidate is confirmed by a quick
+  IBP count (`ibp_solver::Session::count_masters`) before it replaces the
+  first pair; without Singular, IBP counts alone decide for large levels.
+  Higgs+jet family F: levels of 75, 47, 21 masters become 49, 19, 13; the
+  kite's second level 7 instead of 10.
+- The built-in IBP solver no longer stops at fixed sizes: degree and sample
+  bounds double automatically when met, seed and term counts are bounded by
+  memory only, and the default time budgets are an hour per elimination and
+  a day per level and in total.
 - With `--transport-bits` below 87 the endpoint-constraint check uses half
   the bits of the admitted Taylor tail as its tolerance.
 - `--ibp-max-degree N` raises the degree of reduction coefficients the

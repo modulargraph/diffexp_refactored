@@ -6,7 +6,7 @@ struct Options {
   fire::Options provider;
   std::filesystem::path batch_cache_directory,pending_cache_directory;
   std::size_t max_passes=8,max_masters=256,max_demands=2000,max_equations=20000;
-  unsigned total_timeout_seconds=180;
+  unsigned total_timeout_seconds=86400;
 };
 struct Result {
   bool success=false;

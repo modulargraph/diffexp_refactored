@@ -19,6 +19,7 @@
 #include "diffexp/fire_modular.hpp"
 #include "diffexp/ibp_solver_provider.hpp"
 #include "diffexp/henn_boundary.hpp"
+#include "diffexp/critical_points.hpp"
 #include "diffexp/epsilon_sampling.hpp"
 #include "diffexp/moving_poles.hpp"
 #endif
@@ -247,7 +248,21 @@ int main(int argc, char** argv) {
             native.max_samples_per_prime=std::max<std::size_t>(native.max_samples_per_prime,64u*ibp_max_degree);
           }
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
-          fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
+          // A reduction that meets a degree or sample bound is repeated with
+          // the bounds doubled, as often as it takes: the time and memory
+          // budgets are what ends a reduction, not a degree chosen in advance.
+          fallback=[&,current=std::make_shared<diffexp::ibp_solver::Options>(native)](const auto& batch,const auto& limits){
+            for(;;) {
+              if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,*current);
+              auto result=(*native_session)(batch,limits);
+              if(result.success)return result;
+              auto wider=diffexp::ibp_solver::escalate(*current,result.reason);
+              if(!wider)return result;
+              std::cerr<<"IBP solver: "<<result.reason<<"; repeating with total degree "<<wider->max_degree<<", degree per variable "
+                <<wider->max_variable_degree<<" and "<<wider->max_samples_per_prime<<" samples per prime\n";
+              *current=*wider;native_session.reset();
+            }
+          };
         }else if(ibp_provider=="fire-modular") {
           diffexp::fire_modular::Options modular;modular.executable=fire_prime;modular.cache_directory=cache/"fire-modular";
           modular.progress=[](const std::string& message){std::cerr<<message<<'\n';};
@@ -287,7 +302,19 @@ int main(int argc, char** argv) {
       // Explicit anchors and a causal prescription are stated level by level
       // for the ladder as written, so they keep it.
       if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() &&
-          (!numerical.causal_prescription || (numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty())))
+          (!numerical.causal_prescription || (numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty()))) {
+        options.merge_chosen=[&progress](unsigned level,unsigned left,unsigned right,std::size_t candidates,std::size_t masters,std::size_t first) {
+          if(left==0 && right==1)return;
+          progress<<"Level "<<level<<": merging propagators "<<left<<" and "<<right<<", the pair with the fewest masters of "
+            <<candidates<<" ("<<masters<<"; the first pair has "<<first<<")\n"<<std::flush;
+        };
+        // From the graph where Singular is installed: every pair, in seconds.
+        if(diffexp::critical_points::available()) {
+          auto physical=configuration.family.momenta;physical.lines.resize(configuration.family.physical_count);
+          options.count_critical_points=[physical,directory=cache/"critical-points"](const auto& lines,unsigned left,unsigned right) {
+            return diffexp::critical_points::count(physical,lines,left,right,directory);
+          };
+        } else progress<<"Singular is not installed: merges are chosen by counting masters with the IBP solver, for large levels and pairs on one loop momentum only.\n";
         options.count_masters=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget)
             ->std::optional<std::size_t> {
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,options.reduction.provider.timeout_seconds,false);
@@ -295,6 +322,7 @@ int main(int argc, char** argv) {
           try{return diffexp::ibp_solver::Session(basis,dimension,field,native).count_masters(sources,budget.provider);}
           catch(const std::exception&){return std::nullopt;}
         };
+      }
       // exchange: a level swaps masters for cached integrals of the same sector
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
@@ -311,8 +339,6 @@ int main(int argc, char** argv) {
               if(event.scalar_leaf)progress<<"analytic scalar boundary";
               else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
               progress<<"; elapsed "<<event.elapsed_seconds<<" s\n";
-              if(event.candidates>1)progress<<"Level "<<event.depth<<": merged propagators "<<event.left<<" and "<<event.right<<", the pair with the fewest masters of "
-                <<event.candidates<<" ("<<event.counted_masters<<"; the first pair has "<<event.first_pair_masters<<")\n";
               if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
                 <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
               progress<<std::flush;
@@ -695,10 +721,12 @@ IBP preparation (prepare/ft)
                                   executable
   --ibp-dots N --ibp-numerators N seed controls of the built-in solver
   --merge-selection auto|first    which two propagators each level merges, unless the family file
-                                  lists preparation.merges: auto (default, built-in solver) counts
-                                  the master integrals of every pair by one finite-field
-                                  elimination and takes the fewest; first merges the first two
-  --ibp-max-degree N              4..256 (default 16): largest total degree, in the merge
+                                  lists preparation.merges or anchors: auto (default) takes the
+                                  pair whose merged graph has the fewest master integrals,
+                                  counted from its Symanzik polynomials with Singular for every
+                                  pair; without Singular, by IBP eliminations for large levels.
+                                  first merges the first two
+  --ibp-max-degree N              4..256 (default 16, doubled automatically when a reduction meets it): largest total degree, in the merge
                                   parameter and the dimension together, of a reduction
                                   coefficient the built-in solver reconstructs
   --ibp-threads N                 threads of the built-in solver (default: the hardware threads
@@ -710,9 +738,9 @@ IBP preparation (prepare/ft)
                                   dependency subset of original equations, with one complete
                                   elimination per attempt; strict eliminates every equation at
                                   every point
-  --fire-seconds N                one IBP elimination or FIRE call (default 60)
-  --level-seconds N               one recursion level (default 180)
-  --total-seconds N               the whole preparation (default 600)
+  --fire-seconds N                one IBP elimination or FIRE call (default 3600)
+  --level-seconds N               one recursion level (default 86400)
+  --total-seconds N               the whole preparation (default 86400)
   --fire PATH | --fire-prime PATH FIRE executable | FIRE7p for fire-modular (durable samples under
                                   --cache, no symbolic fallback)
   --fire-threads N --fire-simplifier-threads N

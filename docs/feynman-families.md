@@ -75,7 +75,7 @@ Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 `ibp_dots`, and `ibp_numerators`. Provider choices are `auto`, `ibp-solver`,
 `fire`, and `fire-modular`. Seed controls are integers from 0 through 8. A merge is a pair
 of zero-based positions in the current physical propagator list, after earlier
-merges. Without `merges` the built-in solver chooses the pair for large levels
+merges. Without `merges` each level merges the pair with the fewest master integrals
 ([merge selection](performance.md#what-the-defaults-do)); explicit `merges`,
 `anchors`, `causal.level_signs` or `causal.points` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
 Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`

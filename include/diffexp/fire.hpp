@@ -106,7 +106,7 @@ inline std::string start(const ibp::PropagatorBasis& b,const Exact& dimension,
 struct Options {
   std::filesystem::path executable;
   std::filesystem::path scratch_root=std::filesystem::temp_directory_path();
-  unsigned timeout_seconds=60;
+  unsigned timeout_seconds=3600;
   unsigned threads=1,simplifier_threads=1;
   unsigned max_completed_forward_sectors=0,max_completed_backward_sectors=0; // Optional deterministic progress slices; zero disables.
   std::size_t memory_bytes=std::size_t(4)*1024*1024*1024;

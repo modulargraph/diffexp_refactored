@@ -129,7 +129,7 @@ class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>64||!options_.max_variable_degree||options_.max_variable_degree>256||options_.max_primes<2||options_.prime_count<4||options_.max_primes>options_.prime_count-ordinals::validation_primes||options_.max_samples_per_prime<8||options_.max_samples_per_prime>4096||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>256||!options_.max_variable_degree||options_.max_variable_degree>4096||options_.max_primes<2||options_.prime_count<4||options_.max_primes>options_.prime_count-ordinals::validation_primes||options_.max_samples_per_prime<8||options_.max_samples_per_prime>(std::size_t(1)<<20)||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
     if(!options_.sample_checkpoint_interval||options_.sample_checkpoint_interval>4096)throw std::invalid_argument("modular checkpoint interval must be 1..4096");
     if(options_.max_skipped_samples>64)throw std::invalid_argument("modular exceptional-sample budget must be 0..64");

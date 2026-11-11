@@ -52,6 +52,17 @@ Transport time is linear in the number of epsilon orders carried.
   that mix the merge parameter with epsilon are removed by exchanging a
   master. This narrows no epsilon window but shrinks the connection where
   such a factor exists; see [moving-poles.md](moving-poles.md).
+- **Merge selection** (`--merge-selection auto`). Which two propagators a
+  level merges decides how large the levels below become. When the first
+  two propagators give a level of 24 or more masters, the built-in solver
+  counts the masters of every pair with a common loop momentum (one
+  finite-field elimination per closure pass, no reconstruction) and the
+  recursion merges the pair with the fewest. An explicit `merges`, `anchors`
+  or `causal` entry in the family file keeps the ladder as written. For the
+  non-planar Higgs+jet family F (seven propagators, four of them massive)
+  this turns levels of 75, 47 and 21 masters into 49, 19 and 13:
+  preparation 110 s instead of 654 s, one epsilon sample 107 s instead of
+  1600 s, with the same value to all 28 digits.
 - **Threads.** With OpenMP the streams and rows of a Taylor order run in
   parallel once an order costs 5000 multiply-adds; endpoint series solve
   their columns on separate threads; the built-in IBP solver works ahead on

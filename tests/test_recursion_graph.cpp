@@ -70,6 +70,28 @@ int main(int argc,char** argv){try {
     require(late.nodes.size()==1 && late.nodes[0].closure.ordered_basis.empty() && late.events.back().elapsed_seconds>1,
       "completed terminal level discarded for finishing after the total budget");
   }
+  {
+    // Merge selection: the pair with the fewest counted masters is merged, the
+    // first pair unless another has strictly fewer, and a small first level
+    // is not searched at all.
+    auto choosing=options;unsigned calls=0;
+    choosing.merge_selection_threshold=0;
+    choosing.count_masters=[&](const auto&,const auto&,const auto&,auto,const auto&,const auto&)->std::optional<std::size_t> {
+      ++calls;return calls==1?5u:calls==2?3u:calls==3?3u:9u;
+    };
+    // A stand-in reduction with no masters ends the ladder after one level.
+    auto zero=[](const ibp::PropagatorBasis&,const Exact&,const ExactField&,std::size_t,
+        const std::vector<ibp::Integral>& requested,const level::Options&) {
+      level::Result result;result.success=true;result.target_rows.assign(requested.size(),{});return result;
+    };
+    std::vector<recursion::Event> events;
+    auto chosen=recursion::prepare(feynman::example_family("box"),{},choosing,zero,[&](const auto& e){events.push_back(e);});
+    require(chosen.nodes.front().left==0 && chosen.nodes.front().right==2,"the first pair with the fewest masters is merged");
+    require(events.front().candidates==6 && events.front().counted_masters==3 && events.front().first_pair_masters==5,"merge selection is reported");
+    calls=0;choosing.merge_selection_threshold=24;
+    auto kept=recursion::prepare(feynman::example_family("box"),{},choosing,zero);
+    require(kept.nodes.front().left==0 && kept.nodes.front().right==1 && calls==1,"a small level keeps its first pair after one count");
+  }
   if(argc>1) {
     options.reduction.provider.executable=argv[1];options.reduction.provider.timeout_seconds=90;
     options.reduction.total_timeout_seconds=180;options.total_timeout_seconds=300;

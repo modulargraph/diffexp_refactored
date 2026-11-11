@@ -9,6 +9,15 @@
   pole order is detected (`--sample-poles` fixes it), and the fit reports
   each coefficient with an estimated error. `epsilon_sampling.hpp` holds the
   fit; `tools/experiments/epsilon_sampling.py` is removed.
+- Merge selection (`--merge-selection auto|first`, default `auto` with the
+  built-in solver): a level whose first two propagators give 24 or more
+  masters merges instead the pair with a common loop momentum that has the
+  fewest masters, counted by finite-field eliminations
+  (`recursion::Options::count_masters`, `ibp_solver::Session::count_masters`).
+  Higgs+jet family F: preparation 654 s -> 110 s, one epsilon sample
+  1600 s -> 107 s, same value.
+- With `--transport-bits` below 87 the endpoint-constraint check uses half
+  the bits of the admitted Taylor tail as its tolerance.
 - `--ibp-max-degree N` raises the degree of reduction coefficients the
   built-in solver reconstructs (default 16), with its per-variable degree and
   sample budgets.

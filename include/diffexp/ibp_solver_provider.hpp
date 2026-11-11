@@ -382,6 +382,58 @@ class Session {
   }
   const ClosurePlanningStatistics& planning_statistics()const{return planning_;}
   const Statistics& statistics()const{return sampler_->statistics();}
+  // The number of master integrals of the level the requested integrals
+  // generate: its masters and their derivatives in the closure parameter are
+  // added to the demands until the set of masters is stable, each pass one
+  // finite-field elimination at a fixed point, with no reconstruction. It
+  // ranks alternative families (recursion::Options::count_masters) and is
+  // kept on disk, as the ranking is repeated by every run on the same cache.
+  // Counting only what the requests reduce to is not enough: a pair of
+  // propagators can look small that way and close on a far larger level.
+  std::size_t count_masters(const std::vector<ibp::Integral>& requested,const fire::Options& limits) {
+    if(!options_.closure_parameter)throw std::invalid_argument("IBP master count needs a closure parameter");
+    const auto parameter=*options_.closure_parameter;
+    auto science=fire_batch::identity(basis_,dimension_,field_,requested,limits).json_value();
+    boost::json::object identity{{"science",science},{"parameter",parameter},{"counter","one-point-derivative-closure-v1"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_sector_seeds",options_.target_sector_seeds}};
+    const auto key=artifacts::detail::sha256(artifacts::detail::canonical(identity));
+    const auto path=options_.cache_directory/"master-counts"/(key+".json");
+    if(std::filesystem::exists(path)){
+      auto cached=fire_modular::detail::read(path);
+      if(artifacts::detail::string(cached.at("identity"))!=key||cached.at("schema")!="DiffExp.IBPMasterCount/v1")throw std::runtime_error("IBP master count identity mismatch");
+      return cached.at("masters").to_number<std::size_t>();
+    }
+    const auto started=std::chrono::steady_clock::now();
+    ibp::Generator generator(basis_,dimension_);
+    std::set<ibp::Integral,ibp::IntegralOrder> demanded(requested.begin(),requested.end());
+    std::size_t masters=0;bool stable=false;
+    for(unsigned pass=0;pass<options_.max_planning_passes&&!stable;++pass){
+      const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+      if(elapsed>=limits.timeout_seconds||demanded.size()>2000)throw std::runtime_error("IBP master count budget");
+      auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
+      auto reduced=(*sampler_)({demanded.begin(),demanded.end()},modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass),prime(1),receiving);
+      if(!reduced.success)throw std::runtime_error("IBP master count failed: "+reduced.reason);
+      std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.reductions)for(const auto& [master,c]:row)if(!c.is_zero())found.insert(master);
+      const auto before=demanded.size();
+      for(const auto& master:found){demanded.insert(master);for(const auto& [a,c]:generator.derivative(master,parameter))if(!c.is_zero())demanded.insert(a);}
+      masters=found.size();stable=demanded.size()==before;
+    }
+    if(!stable)throw std::runtime_error("IBP master count did not stabilize");
+    // The stable demands are what closure planning would find: leave them as
+    // its hint, so that preparing the chosen level does not plan again.
+    {
+      boost::json::object plan_identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v2"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_sector_seeds",options_.target_sector_seeds}};
+      const auto plan_key=artifacts::detail::sha256(artifacts::detail::canonical(plan_identity));
+      const auto plan_path=options_.cache_directory/"closure-plans"/(plan_key+".json");
+      if(!std::filesystem::exists(plan_path)){
+        boost::json::array rows;for(const auto& a:demanded){boost::json::array row;for(int power:a)row.push_back(power);rows.push_back(row);}
+        std::filesystem::create_directories(plan_path.parent_path());
+        fire_modular::detail::save(plan_path,{{"schema","DiffExp.IBPClosurePlan/v1"},{"identity",plan_key},{"planning_hint_only",true},{"demands",rows}});
+      }
+    }
+    std::filesystem::create_directories(path.parent_path());
+    fire_modular::detail::save(path,{{"schema","DiffExp.IBPMasterCount/v1"},{"identity",key},{"masters",masters}});
+    return masters;
+  }
  private:
   std::vector<ibp::Integral> closure_plan(const std::vector<ibp::Integral>& requested,const fire::Options& limits) {
     using namespace std::chrono;const auto started=steady_clock::now();

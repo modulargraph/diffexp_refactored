@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
-      unsigned ibp_max_degree=0;
+      unsigned ibp_max_degree=0;std::string merge_selection="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
       // What a sample process is started with: this command line without the
       // options that select and shape the sampling itself.
@@ -111,6 +111,10 @@ int main(int argc, char** argv) {
         else if(option=="--ibp-max-degree"){
           const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_max_degree);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||ibp_max_degree<4||ibp_max_degree>256)throw std::invalid_argument("IBP maximal degree must be 4..256");
+        }
+        else if(option=="--merge-selection"){
+          merge_selection=option_value;
+          if(merge_selection!="auto"&&merge_selection!="first")throw std::invalid_argument("--merge-selection must be auto or first");
         }
         else if(option=="--ibp-threads"){
           const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_threads);
@@ -279,6 +283,17 @@ int main(int argc, char** argv) {
           {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
         progress<<std::flush;
       };
+      // Each level merges the pair of propagators with the fewest masters.
+      // Explicit anchors and a causal prescription are stated level by level
+      // for the ladder as written, so they keep it.
+      if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() && !numerical.causal_prescription)
+        options.count_masters=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget)
+            ->std::optional<std::size_t> {
+          auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,options.reduction.provider.timeout_seconds,false);
+          native.dots=ibp_dots;native.numerators=ibp_numerators;native.threads=1;
+          try{return diffexp::ibp_solver::Session(basis,dimension,field,native).count_masters(sources,budget.provider);}
+          catch(const std::exception&){return std::nullopt;}
+        };
       // exchange: a level swaps masters for cached integrals of the same sector
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
@@ -295,6 +310,8 @@ int main(int argc, char** argv) {
               if(event.scalar_leaf)progress<<"analytic scalar boundary";
               else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
               progress<<"; elapsed "<<event.elapsed_seconds<<" s\n";
+              if(event.candidates>1)progress<<"Level "<<event.depth<<": merged propagators "<<event.left<<" and "<<event.right<<", the pair with the fewest masters of "
+                <<event.candidates<<" ("<<event.counted_masters<<"; the first pair has "<<event.first_pair_masters<<")\n";
               if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
                 <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
               progress<<std::flush;
@@ -651,6 +668,10 @@ IBP preparation (prepare/ft)
                                   auto selects the built-in ibp-solver unless --fire names a FIRE
                                   executable
   --ibp-dots N --ibp-numerators N seed controls of the built-in solver
+  --merge-selection auto|first    which two propagators each level merges, unless the family file
+                                  lists preparation.merges: auto (default, built-in solver) counts
+                                  the master integrals of every pair by one finite-field
+                                  elimination and takes the fewest; first merges the first two
   --ibp-max-degree N              4..256 (default 16): largest total degree, in the merge
                                   parameter and the dimension together, of a reduction
                                   coefficient the built-in solver reconstructs

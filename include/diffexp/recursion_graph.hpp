@@ -21,6 +21,19 @@ struct Options {
   // returned closure must describe the same requested integrals in its own
   // ordered basis; see moving_poles::exchange.
   std::function<level::Result(level::Result,unsigned)> exchange_masters;
+  // Which two propagators a level merges. Without explicit `merges` and with
+  // this counter, the pairs with a common loop momentum are tried at every
+  // level and the one whose merged family has the fewest master integrals is
+  // taken (the first pair unless
+  // another has strictly fewer): the masters of a level are the rows its
+  // child transports, and the child of the top level is where a run spends
+  // its time. The counter returns nothing if it cannot count a candidate.
+  // Without it, each level merges its first two propagators.
+  std::function<std::optional<std::size_t>(const ibp::PropagatorBasis&,const Exact&,const ExactField&,std::size_t,
+    const std::vector<ibp::Integral>&,const level::Options&)> count_masters;
+  // Alternatives are counted only when the first pair gives a level of at
+  // least this many masters.
+  std::size_t merge_selection_threshold=24;
 };
 struct Event {
   unsigned depth,physical_propagators;
@@ -28,6 +41,9 @@ struct Event {
   double elapsed_seconds;
   bool scalar_leaf;
   Rational requested_anchor,anchor;
+  // The merged pair, the number of pairs considered (1: no selection), and
+  // the master counts of the chosen pair and of the first pair.
+  unsigned left=0,right=1;std::size_t candidates=1,counted_masters=0,first_pair_masters=0;
 };
 using PrepareLevel=std::function<level::Result(const ibp::PropagatorBasis&,const Exact&,
   const ExactField&,std::size_t,const std::vector<ibp::Integral>&,const level::Options&)>;
@@ -235,6 +251,64 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     if(elapsed>=options.total_timeout_seconds)throw std::runtime_error("recursive preparation total time budget exhausted");
     auto [left,right]=options.merges.empty()?std::pair{0u,1u}:options.merges[depth];
+    std::size_t candidates=1,counted_masters=0,first_pair_masters=0;
+    const unsigned lines=static_cast<unsigned>(ibp::PropagatorBasis(raw).physical_count);
+    if(options.merges.empty() && options.count_masters && lines>2) {
+      // (masters, not the first pair, sources, pair): the first pair is kept
+      // unless another has strictly fewer masters.
+      std::optional<std::tuple<std::size_t,bool,std::size_t,unsigned,unsigned>> best;
+      candidates=0;
+      // The first pair is counted first and sets the time allowed for each
+      // other pair, its own plus a second: a family that takes longer to
+      // count is a larger one.
+      auto allowance=options.reduction;
+      // Candidates are the first pair and the pairs with the same loop
+      // momentum, whose merged line is again an ordinary propagator with a
+      // shifted momentum and mass. A pair with different loop momenta makes a
+      // new topology; where counted, such pairs closed on larger levels and
+      // cost the most to count.
+      const std::size_t quadratic=family.momenta.loops*(family.momenta.loops+1)/2;
+      const auto same_routing=[&](unsigned l,unsigned r) {
+        for(std::size_t k=0;k<quadratic && k<raw.physical[l].linear.size();++k)
+          if(!(raw.physical[l].linear[k]-raw.physical[r].linear[k]).is_zero())return false;
+        return true;
+      };
+      for(unsigned l=0;l<lines;++l)for(unsigned r=l+1;r<lines;++r) {
+        if(!(l==0 && r==1) && !same_routing(l,r))continue;
+        if(l==0 && r==1) {
+          bool alternatives=false;
+          for(unsigned a=0;a<lines && !alternatives;++a)for(unsigned b=a+1;b<lines;++b)if(!(a==0 && b==1) && same_routing(a,b)){alternatives=true;break;}
+          if(!alternatives){candidates=1;l=lines;break;}
+        }
+        const auto candidate_start=std::chrono::steady_clock::now();
+        if(std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()>=options.total_timeout_seconds)break;
+        std::optional<std::size_t> masters;std::size_t source_count=0;
+        try {
+          const ibp::PropagatorBasis incoming(raw),merged(ibp::merge(raw,l,r,x));
+          if(merged.physical_count==1){candidates=1;best.reset();l=lines;break;}
+          std::set<ibp::Integral,ibp::IntegralOrder> candidate_sources;
+          for(const auto& target:requested)
+            for(const auto& [a,c]:pullback::plan(incoming,merged,l,r,target,x,options.numerator_expansion).source_row)if(!c.is_zero())candidate_sources.insert(a);
+          if(candidate_sources.empty() || candidate_sources.size()>options.max_sources_per_level)continue;
+          source_count=candidate_sources.size();
+          masters=options.count_masters(merged,dimension,field,0,{candidate_sources.begin(),candidate_sources.end()},allowance);
+        } catch(const std::exception&) {}
+        if(l==0 && r==1) {
+          // A small level is not worth the search: counting the alternatives
+          // would cost more than transporting it.
+          if(!masters || *masters<options.merge_selection_threshold){candidates=1;best.reset();l=lines;break;}
+          const double first=std::chrono::duration<double>(std::chrono::steady_clock::now()-candidate_start).count();
+          allowance.provider.timeout_seconds=std::min(allowance.provider.timeout_seconds,static_cast<unsigned>(first)+1u);
+        }
+        if(!masters)continue;
+        ++candidates;
+        if(l==0 && r==1)first_pair_masters=*masters;
+        const std::tuple<std::size_t,bool,std::size_t,unsigned,unsigned> score{*masters,!(l==0 && r==1),source_count,l,r};
+        if(!best || score<*best)best=score;
+      }
+      if(best){left=std::get<3>(*best);right=std::get<4>(*best);counted_masters=std::get<0>(*best);}
+      candidates=std::max<std::size_t>(candidates,1);
+    }
     auto anchor=anchors[depth];
     auto merged_raw=ibp::merge(raw,left,right,x);
     Node node{ibp::PropagatorBasis(raw),ibp::PropagatorBasis(std::move(merged_raw)),
@@ -280,7 +354,8 @@ inline Graph prepare(const feynman::ExampleFamily& family,
     }
     const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     Event event{depth+1,static_cast<unsigned>(node.merged.physical_count),node.requested.size(),
-      node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf,anchors[depth],anchor};
+      node.source_indices.size(),node.closure.ordered_basis.size(),node.closure.passes,total,node.scalar_leaf,anchors[depth],anchor,
+      left,right,candidates,counted_masters,first_pair_masters};
     const bool done=node.scalar_leaf || node.closure.ordered_basis.empty();
     graph.nodes.push_back(std::move(node));graph.events.push_back(event);if(progress)progress(event);
     // The total budget gates the START of a level (top of this loop). A level

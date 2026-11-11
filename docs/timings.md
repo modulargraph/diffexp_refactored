@@ -41,6 +41,10 @@ samples 0.9 s, giving epsilon^-2..0 to 1e-12, 3e-12 and 5e-7; `banana4` with
 needs twelve samples of about 150 s each on four threads, or of one thread
 each side by side on a larger machine.
 
+`higgs_jet_family_f` (non-planar, seven propagators, four massive; Euclidean
+point, experimental): preparation 88 s, one epsilon sample 107 s on four
+threads.
+
 Preparation of the built-in IBP solver, four threads against one: planar
 double box 3.4 s / 5.2 s, four-loop banana 15.3 s / 33.7 s.
 

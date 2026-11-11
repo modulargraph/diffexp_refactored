@@ -33,6 +33,14 @@ build/diffexp ft examples/feynman/henn_double_pentagon_x0.json --cache /path/to/
 
 ([details and timing](performance.md)).
 
+`examples/feynman/higgs_jet_family_f.json` holds the seven propagators of the
+non-planar Higgs+jet family F of arXiv:1907.13156 (four massive lines) at the
+Euclidean point s=-1, t=-2, u=-3, m^2=1, also without a reference. It prepares
+in about a minute and a half and one epsilon sample
+(`--epsilon-shift 1/400 --epsilon-order 0 --leaf-digits 12`) takes under two
+minutes on four threads; two different merge ladders give the same sample
+value to 28 digits.
+
 ## Original DiffExp examples
 
 The three download scripts fetch upstream matrices and verify their SHA-256

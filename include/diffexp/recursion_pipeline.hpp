@@ -1161,6 +1161,12 @@ class Evaluator {
       // The exact preparation chose this endpoint on the same test.
       if(!determination.determined)throw std::domain_error("level "+std::to_string(depth+1)+
         ": the endpoint values do not fix the level's solution: "+determination.reason);
+      // At a numeric dimension an exponent that depends on epsilon is told
+      // from an integer by its value: a dimension at which one of them is an
+      // integer would be taken for an analytic solution.
+      if(node.analytic_solutions && determination.analytic_dimension!=node.analytic_solutions)
+        throw std::domain_error("level "+std::to_string(depth+1)+": "+std::to_string(determination.analytic_dimension)+
+          " local solutions are analytic at the endpoint in this dimension, "+std::to_string(node.analytic_solutions)+" in general");
       result->boundary_map=endpoint_boundary::taylor_map(*carrier.physical_frame,determination,result->geometry.overlap);
       report(depth,std::string(node.boundary==BoundarySite::upper?"upper":"lower")+" endpoint boundary: "+
         std::to_string(determination.analytic_dimension)+" analytic local solutions of "+std::to_string(d)+

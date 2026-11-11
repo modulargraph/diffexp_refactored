@@ -88,6 +88,9 @@ struct Node {
   // At an endpoint the anchor is 0 or 1 and the child computes the masters'
   // values there, which are integrals of the pinched family.
   BoundarySite boundary=BoundarySite::anchor;
+  // Dimension of the space of analytic solutions at that endpoint, from the
+  // level's equation with symbolic epsilon.
+  std::size_t analytic_solutions=0;
 };
 struct Graph {
   ExactField field;
@@ -476,7 +479,10 @@ inline Graph prepare(const feynman::ExampleFamily& family,
           if(!pinched)refusal="a numerator of the level's masters depends on the propagators at the endpoint";
           else {
             const auto verdict=endpoint_boundary::examine(node.closure.matrix,0,1,upper,options.endpoint);
-            if(verdict.qualifies){node.boundary=upper?BoundarySite::upper:BoundarySite::lower;child=std::move(pinched);break;}
+            if(verdict.qualifies) {
+              node.boundary=upper?BoundarySite::upper:BoundarySite::lower;node.analytic_solutions=verdict.analytic_dimension;
+              child=std::move(pinched);break;
+            }
             refusal=verdict.reason;
           }
           if(options.endpoint_refused)options.endpoint_refused(depth+1,upper,refusal);

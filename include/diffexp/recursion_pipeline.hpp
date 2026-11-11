@@ -60,6 +60,10 @@ struct NumericalOptions {
   unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
+  // Expand the leaf of a shifted recursion at the shifted dimension itself;
+  // otherwise, and wherever that is not possible, its series at epsilon=0
+  // is summed.
+  bool direct_shifted_leaf=true;
   unsigned shifted_leaf_orders=60;
   Rational overlap{Rational("1/16")},contour_height{Rational("1/10")};
   unsigned leaf_digits=28;
@@ -679,14 +683,22 @@ class Evaluator {
     if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);
     return result;
   }
-  // The scalar leaf is a closed form whose Laurent series at epsilon_total=0
-  // the leaf integrator provides to any order. Around a shifted point its
-  // Taylor coefficients follow by re-expansion: (shift+eps)^k contributes
-  // binomial(k,m)*shift^(k-m) to eps^m, for negative k as well. The series is
-  // cut where the retained terms have decayed below the working precision or
-  // at the epsilon budget.
+  // The scalar leaf is a closed form. Around a shifted epsilon the leaf
+  // integrator expands it there directly (CertifiedDeepestBetaOptions::
+  // epsilon_shift), through the requested order only. Where it cannot (the
+  // shift on a pole of a gamma function, or resonant with an endpoint power)
+  // the Laurent series at epsilon_total=0, which it provides to any order, is
+  // re-expanded: (shift+eps)^k contributes binomial(k,m)*shift^(k-m) to
+  // eps^m, for negative k as well, and the series is cut where the retained
+  // terms have decayed below the leaf tolerance or at the epsilon budget.
   LeafBoundary shifted_leaf(const Node& node,unsigned desired_top,const feynman::CertifiedDeepestBetaOptions& leaf) {
     if(graph_.epsilon_shift.is_zero())return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);
+    if(options_.direct_shifted_leaf) {
+      auto direct=leaf;direct.epsilon_shift=graph_.epsilon_shift;
+      try {return evaluate_leaf(node,graph_.dimension,d0_,desired_top,direct,options_.gaussian);}
+      catch(const std::domain_error&) {}
+      catch(const std::invalid_argument&) {}
+    }
     const auto epsilon=graph_.dimension.variable(ei_),shift=graph_.dimension.constant(graph_.epsilon_shift);
     const auto back=exact_point(graph_.dimension,ei_,epsilon-shift);
     Node unshifted=node;

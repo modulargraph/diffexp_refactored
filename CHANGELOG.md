@@ -2,6 +2,16 @@
 
 ## 2.2.1
 
+- The scalar leaf of a recursion around a shifted epsilon is expanded at
+  the shifted dimension itself (`CertifiedDeepestBetaOptions::epsilon_shift`,
+  `feynman::tadpole_branch` with a shift), through the requested order,
+  instead of summing some twenty orders of its series at epsilon=0 and
+  re-expanding them. The leaf of an epsilon sample costs 15 to 50 times
+  less (double box 1.07 s -> 0.04 s, four-loop banana 1.8 s -> 0.05 s),
+  half of the numerical time of a sample of a small family. A shift on a
+  pole of the gamma function or resonant with an endpoint power falls back
+  to the series (`NumericalOptions::direct_shifted_leaf`).
+
 - Endpoint operators of a recursion at a numeric dimension: the leading
   coefficients of a functional composed with the ball inverse that vanish
   exactly are exact zeros again. They are proved like the zeros of the

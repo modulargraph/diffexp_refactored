@@ -12,13 +12,37 @@ struct TadpoleBoundary {int epsilon_low;std::vector<Jet::Ball> coefficients;};
 // their logarithms: integer powers of U and F are single valued, so the
 // branch enters through the logarithms alone. A point off the real axis
 // supplies the logarithms continued along its path.
+//
+// With a nonzero `epsilon_shift` s the dimension is d0-2(s+eps) and the result is
+// the Taylor series in eps about that dimension: the same closed form, whose
+// gamma function is then expanded at a+L*s instead of at the integer a.
+// A shift that puts it on a pole is refused.
 inline TadpoleBoundary tadpole_branch(const Jet::Ball& u,const Jet::Ball& f,const Jet::Ball& log_u,
-    const Jet::Ball& log_f,unsigned power,unsigned loops,int d0,unsigned epsilon_order) {
+    const Jet::Ball& log_f,unsigned power,unsigned loops,int d0,unsigned epsilon_order,const Rational& epsilon_shift=Rational(0)) {
   using B=Jet::Ball;
   if(!power || !loops || d0%2 || u.contains_zero() || f.contains_zero() || epsilon_order>1000)
     throw std::invalid_argument("unsupported or invalid tadpole boundary parameters");
   const long a=static_cast<long>(power)-static_cast<long>(loops)*d0/2;
   const long c=static_cast<long>(power)-(static_cast<long>(loops)+1)*d0/2;
+  if(!epsilon_shift.is_zero()) {
+    const Rational argument=Rational(a)+Rational(static_cast<long>(loops))*epsilon_shift;
+    if(argument.str().find('/')==std::string::npos && !(Rational(0)<argument))
+      throw std::domain_error("shifted tadpole boundary lies on a pole of its gamma function");
+    Jet eps(0,epsilon_order+1,B::precision());if(eps.length()>1)eps.set(1,B(1));
+    const auto at=B::from_strings(epsilon_shift.str());
+    auto gamma=(eps.constant(0)+eps*eps.constant(loops));gamma.set(0,B::from_strings(argument.str()));
+    gamma=gamma.gamma();
+    const auto lambda_value=B(loops+1)*log_u-B(loops)*log_f;
+    auto lambda=eps.constant(0);lambda.set(0,lambda_value);
+    B numerator,denominator,gamma_v,offset;
+    acb_pow_si(numerator.raw(),u.raw(),c,B::precision());acb_pow_si(denominator.raw(),f.raw(),a,B::precision());
+    acb_gamma(gamma_v.raw(),B(power).raw(),B::precision());
+    {auto exponent=lambda_value*at;acb_exp(offset.raw(),exponent.raw(),B::precision());}
+    auto constant=eps.constant(0);constant.set(0,numerator*offset/(denominator*gamma_v));
+    auto result=constant*gamma*(lambda*eps).exp();
+    TadpoleBoundary out{0,{}};for(unsigned n=0;n<eps.length();++n)out.coefficients.push_back(result.at(n));
+    return out;
+  }
   const int low=a<=0?-1:0;
   Jet eps(0,epsilon_order-low+1,B::precision());if(eps.length()>1)eps.set(1,B(1));
   auto b=eps.constant(loops),gamma=(eps.constant(1)+b*eps).gamma();
@@ -52,12 +76,12 @@ inline Jet::Ball rim_logarithm(const Rational& F,int rim) {
   return log_f;
 }
 inline TadpoleBoundary tadpole(const Rational& U,const Rational& F,unsigned power,
-    unsigned loops,int d0,unsigned epsilon_order,int rim=1) {
+    unsigned loops,int d0,unsigned epsilon_order,int rim=1,const Rational& shift=Rational(0)) {
   using B=Jet::Ball;
   if(!power || !loops || d0%2 || U<=Rational(0) || F.is_zero() || (rim!=1 && rim!=-1) || epsilon_order>1000)
     throw std::invalid_argument("unsupported or invalid tadpole boundary parameters");
   B log_u;auto u=B::from_strings(U.str()),f=B::from_strings(F.str());
   acb_log(log_u.raw(),u.raw(),B::precision());
-  return tadpole_branch(u,f,log_u,rim_logarithm(F,rim),power,loops,d0,epsilon_order);
+  return tadpole_branch(u,f,log_u,rim_logarithm(F,rim),power,loops,d0,epsilon_order,shift);
 }
 } // namespace diffexp::feynman

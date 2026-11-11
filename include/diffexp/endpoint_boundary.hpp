@@ -4,7 +4,9 @@
 #include "diffexp/families.hpp"
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 // Boundary data of a Feynman-trick level taken at an endpoint of its merge
@@ -61,7 +63,7 @@ inline Kinematics kinematics(const feynman::ExampleFamily& family,bool euclidean
   return {true,{}};
 }
 
-// Constants of the local solutions with a fixed exponent, from the values of
+// Constants of the local solutions with an integer exponent, from the values of
 // the masters at the endpoint: constants[columns[k]] = sum_j solve[k][j] *
 // value[j], every other constant being zero.
 struct Determination {
@@ -69,77 +71,119 @@ struct Determination {
   std::string reason;
   std::vector<unsigned> columns;
   Matrix solve;
+  // Dimension of the space of analytic solutions.
+  std::size_t analytic_dimension=0;
 };
 // `frame` is the fundamental solution in the masters' own coordinates, as an
-// expansion at the endpoint (AffineFrobeniusSeries::project of the gauge that
-// leads from the series' coordinates to the masters). The solution is
-// determined if every fixed-exponent column is a Laurent series without
-// logarithm, and if the absence of negative powers together with the values at
-// the endpoint fixes all their constants.
-inline Determination determine(const AffineFrobeniusSeries& series,const Expansion& frame,std::size_t ei) {
-  using affine_frobenius_detail::is_integer;
+// expansion at the endpoint (AffineFrobeniusSeries::project of the gauge G
+// that leads from the series' coordinates to the masters), and
+// `inverse_pole_order` the order of the pole of G^-1 at the endpoint.
+//
+// An analytic solution has no component on a column whose exponent is not an
+// integer, whether that exponent depends on epsilon (x^(-2 eps), a regulated
+// sector) or not (x^(-1/2)); with `fixed_noninteger` false the latter kind is
+// refused instead. Among the columns with integer exponents it is a
+// combination without negative powers and without logarithms. A logarithmic
+// part of such a combination is, at its highest degree, itself a solution
+// with an integer exponent: it vanishes identically once it vanishes through
+// the power (largest integer exponent + inverse_pole_order), so finitely many
+// coefficient rows state the absence of logarithms exactly. The solution is
+// determined if these rows and the values at the endpoint fix every constant.
+inline Determination determine(const AffineFrobeniusSeries& series,const Expansion& frame,std::size_t ei,
+    unsigned inverse_pole_order,bool fixed_noninteger=true) {
+  using affine_frobenius_detail::is_integer;using affine_frobenius_detail::integer_value;
   Determination out;
   const unsigned d=frame.columns;
-  if(frame.rows!=d || d!=series.dimension())throw std::invalid_argument("endpoint boundary frame shape");
-  std::vector<int> fixed(d,-1);
+  if(frame.rows!=d || d!=series.dimension() || frame.row_x_valuations.size()!=d)throw std::invalid_argument("endpoint boundary frame shape");
+  // Per column: 1 for an integer exponent without epsilon, 0 for any other.
+  // The powers of a column differ by integers and share its slope.
+  std::vector<int> integer(d,-1);
   for(const auto& term:frame.terms) {
-    const int zero=term.slope.is_zero()?1:0;
-    if(fixed[term.column]<0)fixed[term.column]=zero;
-    else if(fixed[term.column]!=zero)throw std::logic_error("endpoint boundary column mixes fixed and regulated exponents");
-    if(!zero)continue;
-    if(!is_integer(term.power)){out.reason="a local solution has the fixed non-integer exponent "+term.power.str();return out;}
-    if(term.log_degree){out.reason="a local solution with a fixed exponent has a logarithm";return out;}
+    const int analytic=term.slope.is_zero() && is_integer(term.power)?1:0;
+    if(integer[term.column]<0)integer[term.column]=analytic;
+    else if(integer[term.column]!=analytic)throw std::logic_error("endpoint boundary column mixes analytic and other exponents");
+    if(term.slope.is_zero() && !analytic && !fixed_noninteger) {
+      out.reason="a local solution has the fixed non-integer exponent "+term.power.str();return out;
+    }
   }
+  std::optional<long> largest;
   for(unsigned c=0;c<d;++c) {
-    if(fixed[c]<0){out.reason="a local solution has no retained term";return out;}
-    if(fixed[c])out.columns.push_back(c);
+    if(integer[c]<0){out.reason="a local solution has no retained term";return out;}
+    if(!integer[c])continue;
+    out.columns.push_back(c);
+    const long exponent=integer_value(series.exponents().at(c).power);
+    if(!largest || exponent>*largest)largest=exponent;
   }
   if(out.columns.empty()){out.reason="no local solution is analytic at the endpoint";return out;}
-  Matrix constant;std::vector<AffineFrobeniusSeries::ZeroConstraint> constraints;
-  try {
-    auto domain=series.dr_domain(frame,false);
-    constant=series.dr_endpoint_constant(domain.admissible);
-    constraints=std::move(domain.zero_constraints);
-  } catch(const std::domain_error& error) {out.reason=error.what();return out;}
-  const auto zero=constant[0][0].constant(0);
-  const unsigned width=static_cast<unsigned>(out.columns.size());
-  // [negative-power rows; value rows | 0; 1], reduced on the constants.
-  Matrix system;
-  for(const auto& constraint:constraints) {
-    std::vector<Exact> row(width+d,zero);bool any=false;
-    for(unsigned k=0;k<width;++k){row[k]=constraint.coefficients[out.columns[k]];any=any||!row[k].is_zero();}
-    if(any)system.push_back(std::move(row));
-  }
+  // Logarithms are excluded through this power; the values sit at power zero.
+  const long cut=std::max(0l,*largest+static_cast<long>(inverse_pole_order));
   for(unsigned i=0;i<d;++i) {
-    std::vector<Exact> row(width+d,zero);
-    for(unsigned k=0;k<width;++k)row[k]=constant[i][out.columns[k]];
-    row[width+i]=zero.constant(1);system.push_back(std::move(row));
+    if(frame.row_x_valuations[i]==AffineFrobeniusSeries::Valuations::zero_valuation)continue;
+    for(const auto c:out.columns)
+      if(series.absolute_x_frontiers().at(c)+Rational(frame.row_x_valuations[i])<Rational(cut)) {
+        out.reason="the retained series does not reach x^"+std::to_string(cut)+" in every master; increase the endpoint x order";return out;
+      }
   }
+  const auto zero=frame.terms.front().coefficient.constant(0);
+  const unsigned width=static_cast<unsigned>(out.columns.size());
+  std::vector<int> position(d,-1);
+  for(unsigned k=0;k<width;++k)position[out.columns[k]]=static_cast<int>(k);
+  // Rows on the constants: the coefficient of each negative power and of each
+  // logarithmic term must vanish; the coefficient of x^0 is the value.
+  std::map<std::tuple<unsigned,long,unsigned>,std::vector<Exact>> vanishing;
+  Matrix system;
+  auto values=fuchsify::detail::zeros(d,width+d,zero);
+  for(unsigned i=0;i<d;++i)values[i][width+i]=zero.constant(1);
+  for(const auto& term:frame.terms) {
+    if(position[term.column]<0)continue;
+    const long power=integer_value(term.power);
+    if(power>cut)continue;
+    if(!term.log_degree && power==0){auto& entry=values[term.row][position[term.column]];entry=entry+term.coefficient;continue;}
+    if(!term.log_degree && power>0)continue;
+    auto [at,inserted]=vanishing.try_emplace({term.row,power,term.log_degree},width+d,zero);
+    at->second[position[term.column]]=at->second[position[term.column]]+term.coefficient;
+  }
+  for(auto& [key,row]:vanishing)system.push_back(std::move(row));
+  const std::size_t conditions=system.size();
+  for(auto& row:values)system.push_back(std::move(row));
   // Elimination with the pivot of lowest epsilon order: every multiplier is
   // then regular at epsilon=0, and the solution has no deeper pole than the
   // pivots ask for. A left inverse with spurious poles would ask the child
-  // for epsilon orders that cancel in the result.
-  for(unsigned column=0;column<width;++column) {
-    std::optional<unsigned> pivot;std::int64_t lowest=0;
-    for(unsigned row=column;row<system.size();++row) {
-      const auto valuation=exact_epsilon_valuation(system[row][column],ei);
-      if(valuation && (!pivot || *valuation<lowest)){pivot=row;lowest=*valuation;}
+  // for epsilon orders that cancel in the result. The vanishing conditions
+  // are used first; the columns they do not fix are the analytic solutions,
+  // which the values must then fix.
+  std::vector<int> pivot_of(width,-1);std::vector<bool> used(system.size(),false);
+  const auto eliminate=[&](std::size_t first,std::size_t last) {
+    for(unsigned column=0;column<width;++column) {
+      if(pivot_of[column]>=0)continue;
+      std::optional<std::size_t> pivot;std::int64_t lowest=0;
+      for(std::size_t row=first;row<last;++row) {
+        if(used[row])continue;
+        const auto valuation=exact_epsilon_valuation(system[row][column],ei);
+        if(valuation && (!pivot || *valuation<lowest)){pivot=row;lowest=*valuation;}
+      }
+      if(!pivot)continue;
+      used[*pivot]=true;pivot_of[column]=static_cast<int>(*pivot);
+      auto& chosen=system[*pivot];
+      const auto scale=chosen[column];
+      for(auto& entry:chosen)if(!entry.is_zero())entry=entry/scale;
+      for(std::size_t row=0;row<system.size();++row) {
+        if(row==*pivot)continue;
+        const auto factor=system[row][column];
+        if(factor.is_zero())continue;
+        for(unsigned j=0;j<system[row].size();++j)if(!chosen[j].is_zero())system[row][j]=system[row][j]-factor*chosen[j];
+      }
     }
-    if(!pivot) {
-      out.reason="the values at the endpoint do not fix the analytic solution (Taylor coefficients would be needed)";return out;
-    }
-    std::swap(system[*pivot],system[column]);
-    const auto scale=system[column][column];
-    for(auto& entry:system[column])if(!entry.is_zero())entry=entry/scale;
-    for(unsigned row=0;row<system.size();++row) {
-      if(row==column)continue;
-      const auto factor=system[row][column];
-      if(factor.is_zero())continue;
-      for(unsigned j=0;j<system[row].size();++j)if(!system[column][j].is_zero())system[row][j]=system[row][j]-factor*system[column][j];
-    }
+  };
+  eliminate(0,conditions);
+  out.analytic_dimension=width-static_cast<std::size_t>(std::count_if(pivot_of.begin(),pivot_of.end(),[](int row){return row>=0;}));
+  if(!out.analytic_dimension){out.reason="no local solution is analytic at the endpoint";return out;}
+  eliminate(conditions,system.size());
+  if(std::any_of(pivot_of.begin(),pivot_of.end(),[](int row){return row<0;})) {
+    out.reason="the values at the endpoint do not fix the analytic solution (Taylor coefficients would be needed)";return out;
   }
   out.solve=fuchsify::detail::zeros(width,d,zero);
-  for(unsigned k=0;k<width;++k)for(unsigned j=0;j<d;++j)out.solve[k][j]=system[k][width+j];
+  for(unsigned k=0;k<width;++k)for(unsigned j=0;j<d;++j)out.solve[k][j]=system[pivot_of[k]][width+j];
   out.determined=true;
   return out;
 }
@@ -155,7 +199,8 @@ inline Matrix taylor_map(const Expansion& frame,const Determination& determinati
   auto values=fuchsify::detail::zeros(d,width,zero);
   std::map<long,Rational> powers;
   for(const auto& term:frame.terms) {
-    if(position[term.column]<0)continue;
+    // Negative powers and logarithms cancel in the determined combination.
+    if(position[term.column]<0 || term.log_degree || term.power.sign()<0)continue;
     const long power=affine_frobenius_detail::integer_value(term.power);
     auto found=powers.find(power);
     if(found==powers.end()) {
@@ -175,8 +220,12 @@ inline Matrix taylor_map(const Expansion& frame,const Determination& determinati
 struct Options {
   fuchsify::Options fuchsification=[]{fuchsify::Options value;value.max_dimension=256;return value;}();
   AffineFrobeniusSeries::Options series=[]{AffineFrobeniusSeries::Options value;value.max_dimension=256;return value;}();
+  // Whether an endpoint with a local solution x^q, q a non-integer without
+  // epsilon, may qualify. The analyticity of the integrals excludes such a
+  // solution exactly as it excludes x^(q+c*eps).
+  bool fixed_noninteger_exponents=true;
   // Series orders tried in turn: a basis whose gauge has a pole at the
-  // endpoint needs more orders to reach the constant term.
+  // endpoint needs more orders to reach the terms that decide.
   std::vector<unsigned> orders{4,8,16};
 };
 struct Verdict {
@@ -204,8 +253,9 @@ inline Verdict examine(const Matrix& connection,std::size_t xi,std::size_t ei,bo
     const auto physical=fuchsify::detail::multiply(diagonal,fuchs.transform);
     for(const auto order:options.orders) {
       const auto series=AffineFrobeniusSeries::prepare(fuchs.matrix,xi,ei,order,options.series);
-      const auto determination=determine(series,series.project(physical),ei);
-      if(determination.determined){out.qualifies=true;out.analytic_dimension=determination.columns.size();out.reason.clear();return out;}
+      const auto determination=determine(series,series.project(physical),ei,
+        fuchsify::detail::pole_order(fuchs.inverse_transform,xi),options.fixed_noninteger_exponents);
+      if(determination.determined){out.qualifies=true;out.analytic_dimension=determination.analytic_dimension;out.reason.clear();return out;}
       out.reason=determination.reason;
       // Only a series too short to reach the constant term is worth extending.
       if(out.reason.find("increase the endpoint x order")==std::string::npos)return out;

@@ -82,7 +82,7 @@ if(BUILD_TESTING)
     target_link_libraries(diffexp_master_basis_report PRIVATE DiffExp::core)
   endif()
   list(APPEND native_tests rational_circuit rational_circuit_dot compact_recurrence compact_adjoint uncertainty_support basis_persistence
-    component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening moving_poles epsilon_sampling critical_points)
+    component_demands physical_basis_candidates ft_functional_reduction exact_jet_composition basis_screening moving_poles epsilon_sampling critical_points endpoint_boundary)
   foreach(name IN LISTS native_tests)
     add_executable(diffexp_test_${name} tests/test_${name}.cpp)
     target_link_libraries(diffexp_test_${name} PRIVATE DiffExp::core)
@@ -188,6 +188,11 @@ if(BUILD_TESTING)
     -DDIFFEXP_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/causal.cmake)
   set_tests_properties(cli.causal PROPERTIES TIMEOUT 120)
+  add_test(NAME cli.endpoint_boundary COMMAND ${CMAKE_COMMAND}
+    -DDIFFEXP_EXECUTABLE=$<TARGET_FILE:diffexp>
+    -DDIFFEXP_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/endpoint_boundary.cmake)
+  set_tests_properties(cli.endpoint_boundary PROPERTIES TIMEOUT 120)
   set(DIFFEXP_WOLFRAMSCRIPT "" CACHE FILEPATH "Optional wolframscript executable for the process-wrapper smoke test")
   set(DIFFEXP_WOLFRAM_KERNEL "" CACHE FILEPATH "Optional WolframKernel override for wolframscript")
   if(DIFFEXP_WOLFRAMSCRIPT)

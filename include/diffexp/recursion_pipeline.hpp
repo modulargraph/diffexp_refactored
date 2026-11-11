@@ -306,8 +306,10 @@ class Evaluator {
     std::optional<affine_operator::Prepared> inverse;
     std::optional<Rational> inverse_point;
     // Of the endpoint that carries the level's boundary: the fundamental
-    // solution in the masters' own coordinates.
+    // solution in the masters' own coordinates, and the order of the pole at
+    // the endpoint of the gauge that leads back from them.
     std::optional<Expansion> physical_frame;
+    unsigned physical_inverse_pole_order=0;
   };
   struct SingularPoint {
     Rational low,high;
@@ -830,7 +832,7 @@ class Evaluator {
     collect(*result.direct_operator);
     return result;
   }
-  Endpoint endpoint(const Matrix& matrix,const Matrix& diagonal,const Node& node,bool upper,std::size_t depth,int high) {
+  Endpoint endpoint(const Matrix& matrix,const Matrix& diagonal,const Matrix& inverse_diagonal,const Node& node,bool upper,std::size_t depth,int high) {
     auto fuchs=fuchsify::prepare(matrix,xi_,options_.fuchsification);
     if(!fuchs.success)throw std::domain_error("recursive endpoint fuchsification unsupported: "+fuchs.reason);
     const std::string side=upper?"upper":"lower";
@@ -863,7 +865,10 @@ class Evaluator {
       if(matching_frame.wronskian_prefactor)report(depth,side+" Wronskian certified from exact trace and rational factors",high);
     }
     Endpoint result{std::move(series),std::move(matching_frame),std::vector<std::optional<Expansion>>(node.operations.size()),{}};
-    if(boundary)result.physical_frame=result.series->project(physical_gauge);
+    if(boundary) {
+      result.physical_frame=result.series->project(physical_gauge);
+      result.physical_inverse_pole_order=fuchsify::detail::pole_order(fuchs.inverse_transform,xi_)+fuchsify::detail::pole_order(inverse_diagonal,xi_);
+    }
     const auto collect=[&](const Matrix& coefficients){for(const auto& row:coefficients)for(const auto& c:row)if(!c.is_zero())result.clearance_coefficients.push_back(c);};
     collect(matrix);collect(fuchs.matrix);collect(fuchs.transform);collect(fuchs.inverse_transform);collect(physical_gauge);
     const auto x=graph_.dimension.variable(xi_);
@@ -1124,7 +1129,8 @@ class Evaluator {
       diagonal=exact_jet_composition::fuse(chosen->from_basis,diagonal,ei_,fusion_limits).product;
       inverse=exact_jet_composition::fuse(inverse,chosen->to_basis,ei_,fusion_limits).product;
     }
-    auto lower=endpoint(gauge.matrix,diagonal,node,false,depth,desired_top),upper=endpoint(reverse(gauge.matrix,true),reverse(diagonal),node,true,depth,desired_top);
+    auto lower=endpoint(gauge.matrix,diagonal,inverse,node,false,depth,desired_top),
+      upper=endpoint(reverse(gauge.matrix,true),reverse(diagonal),reverse(inverse),node,true,depth,desired_top);
     const auto constraints=lower.pending_constraints.size()+upper.pending_constraints.size();
     if(constraints>options_.max_endpoint_constraints || node.operations.size()+constraints>5000)
       throw std::length_error("recursive combined endpoint constraint budget exhausted");
@@ -1151,13 +1157,13 @@ class Evaluator {
     result->has_physical_basis=chosen!=nullptr;
     if(node.boundary!=BoundarySite::anchor) {
       const auto& carrier=node.boundary==BoundarySite::upper?result->upper:result->lower;
-      const auto determination=endpoint_boundary::determine(*carrier.series,*carrier.physical_frame,ei_);
+      const auto determination=endpoint_boundary::determine(*carrier.series,*carrier.physical_frame,ei_,carrier.physical_inverse_pole_order);
       // The exact preparation chose this endpoint on the same test.
       if(!determination.determined)throw std::domain_error("level "+std::to_string(depth+1)+
         ": the endpoint values do not fix the level's solution: "+determination.reason);
       result->boundary_map=endpoint_boundary::taylor_map(*carrier.physical_frame,determination,result->geometry.overlap);
       report(depth,std::string(node.boundary==BoundarySite::upper?"upper":"lower")+" endpoint boundary: "+
-        std::to_string(determination.columns.size())+" analytic local solutions of "+std::to_string(d)+
+        std::to_string(determination.analytic_dimension)+" analytic local solutions of "+std::to_string(d)+
         " fixed by the masters at the endpoint; epsilon order of the map from "+std::to_string(boundary_map_low(*result)),desired_top);
     }
     // Exact endpoint functionals already encode the prescribed singular limit.

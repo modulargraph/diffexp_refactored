@@ -53,6 +53,21 @@ int main(){try {
       mag_cmp_2exp_si(arb_radref(acb_imagref(v.raw())),-200)<0;
     check(tight,"numeric row gauge inverse is not accurate");
   }
+  // The exact zeros of the inverse survive: rows built on it must not
+  // carry columns that are not theirs.
+  std::vector<std::vector<Exact>> unit{{q("1"),q("0")},{q("0"),q("1")}};
+  auto triangular=regular.project(unit);
+  auto exact_triangular=affine_operator::prepare(regular,triangular,point,2,exact_settings);
+  auto numeric_triangular=affine_operator::prepare(regular,triangular,point,2,numeric_settings);
+  check(exact_triangular.success() && numeric_triangular.success() && numeric_triangular.recurrence->numeric_gauge,"numeric row gauge on a triangular frame");
+  unsigned zeros=0;
+  for(unsigned i=0;i<2;++i)for(unsigned j=0;j<2;++j)for(int k=numeric_triangular.inverse.low;k<=2;++k) {
+    const auto& u=exact_triangular.inverse.coefficients[i][j][k-exact_triangular.inverse.low];
+    const auto& v=numeric_triangular.inverse.coefficients[i][j][k-numeric_triangular.inverse.low];
+    check(acb_overlaps(u.raw(),v.raw()),"numeric row gauge triangular inverse");
+    if(k==0 && u.is_zero()){++zeros;check(v.is_zero(),"numeric row gauge lost an exact zero of the inverse");}
+  }
+  check(zeros==1,"the triangular frame has one exact zero in its leading inverse");
   // The pole-bearing frame above is singular at leading order: the numeric
   // path must decline and leave the exact gauge in charge.
   auto declined=affine_operator::prepare(series,physical,point,10,numeric_settings);

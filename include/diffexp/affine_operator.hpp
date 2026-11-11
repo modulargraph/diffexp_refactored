@@ -1,5 +1,8 @@
 #pragma once
 #include "diffexp/affine_matching.hpp"
+#include <flint/nmod.h>
+#include <flint/nmod_mat.h>
+#include <flint/ulong_extras.h>
 #include <memory>
 #include <mutex>
 
@@ -288,6 +291,54 @@ struct Recurrence {
     }
     return exact[n];
   }
+  // Whether each entry of the inverse of the order-zero matrix vanishes
+  // modulo a prime, at the exact point x and with the logarithm, which is
+  // transcendental there, replaced by a fixed residue. An exact zero of the
+  // inverse vanishes for every such choice; an entry that vanishes for two
+  // primes is an exact zero except with a probability of the order of its
+  // degree over the prime (2^-50 and less). Empty if the prime is unusable.
+  std::optional<std::vector<std::vector<char>>> inverse_zeros_modulo(
+      const AffineFrobeniusSeries &series, const Rational &x, mp_limb_t prime, mp_limb_t log_residue) const {
+    nmod_t field;
+    nmod_init(&field, prime);
+    const auto residue = [&](const Rational &q) -> std::optional<mp_limb_t> {
+      const mp_limb_t denominator = fmpz_fdiv_ui(fmpq_denref(q.raw()), prime);
+      if (!denominator) return std::nullopt;
+      return nmod_div(fmpz_fdiv_ui(fmpq_numref(q.raw()), prime), denominator, field);
+    };
+    const auto base = residue(x);
+    if (!base || !*base) return std::nullopt;
+    const unsigned d = symbolic.size();
+    nmod_mat_t matrix, inverse;
+    nmod_mat_init(matrix, d, d, prime);
+    nmod_mat_init(inverse, d, d, prime);
+    bool usable = true;
+    for (unsigned i = 0; i < d && usable; ++i)
+      for (unsigned j = 0; j < d && usable; ++j) {
+        mp_limb_t sum = 0;
+        for (const auto &[key, q] : symbolic[i][j][0]) {
+          const auto exponent = key.first - series.exponents()[j].power;
+          const auto coefficient = residue(q);
+          if (!affine_frobenius_detail::is_integer(exponent) || !coefficient) { usable = false; break; }
+          const long power = affine_frobenius_detail::integer_value(exponent);
+          mp_limb_t term = nmod_pow_ui(*base, static_cast<ulong>(power < 0 ? -power : power), field);
+          if (power < 0) term = nmod_inv(term, field);
+          term = nmod_mul(term, nmod_pow_ui(log_residue % prime, key.second, field), field);
+          sum = nmod_add(sum, nmod_mul(term, *coefficient, field), field);
+        }
+        nmod_mat_set_entry(matrix, i, j, sum);
+      }
+    std::optional<std::vector<std::vector<char>>> zeros;
+    if (usable && nmod_mat_inv(inverse, matrix)) {
+      zeros.emplace(d, std::vector<char>(d, 0));
+      for (unsigned i = 0; i < d; ++i)
+        for (unsigned j = 0; j < d; ++j)
+          (*zeros)[i][j] = nmod_mat_entry(inverse, i, j) == 0;
+    }
+    nmod_mat_clear(matrix);
+    nmod_mat_clear(inverse);
+    return zeros;
+  }
   BallMatrix numeric_order(const AffineFrobeniusSeries &series, unsigned n,
                            affine_matching::detail::Budget &budget) {
     BallMatrix out = zeros(symbolic.size(), symbolic.at(0).size());
@@ -500,6 +551,20 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     if (options.numeric_leading_gauge && options.numeric_operator_convolution) {
       state->require_symbolic(physical, foreseen, budget);
       numeric_inverse = am::verified_inverse(state->numeric_order(series, 0, budget));
+      if (numeric_inverse && budget.exact_x) {
+        // The exact gauge returns the exact zeros of the inverse, and the
+        // rows built on it carry through the transport only the columns that
+        // are theirs. A ball inverse returns small balls instead. An entry
+        // is an exact zero again if its ball contains zero and it vanishes
+        // in the inverse modulo two primes.
+        const auto first = state->inverse_zeros_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 61, 1), UWORD(0x9E3779B97F4A7C15));
+        const auto second = state->inverse_zeros_modulo(series, *budget.exact_x, n_nextprime(UWORD(1) << 62, 1), UWORD(0xC2B2AE3D27D4EB4F));
+        if (first && second)
+          for (unsigned i = 0; i < d; ++i)
+            for (unsigned j = 0; j < d; ++j)
+              if ((*first)[i][j] && (*second)[i][j] && (*numeric_inverse)[i][j].contains_zero())
+                (*numeric_inverse)[i][j] = B(0);
+      }
     }
     auto gauge = numeric_inverse
         ? am::RowGauge{{fuchsify::detail::identity(d, state->zero)}, 0, 0, {},

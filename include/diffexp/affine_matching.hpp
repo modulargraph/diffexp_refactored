@@ -38,6 +38,8 @@ struct Options {
   // available on this path, so it is meant for frames without epsilon poles
   // (a recursion specialised to a numeric dimension), where an exact
   // elimination of a d x d matrix of rational numbers is pure overhead.
+  // Entries of the inverse that contain zero and vanish modulo two primes
+  // are set to exact zeros, as the exact gauge would return them.
   bool numeric_leading_gauge = false;
   // When the supplied positive real matchpoint is an exact rational, the
   // row normalization substitutes it and works in Q[log x] instead of

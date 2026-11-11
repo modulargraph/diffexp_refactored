@@ -108,11 +108,14 @@ longer marked by a slope. At a generic Q they are exactly the non-integer
 powers, and the endpoint series labels them so. Values are unchanged to
 every printed digit.
 
-**Probes.** At a numeric dimension the connection has pairs of nearly
-coincident poles with large opposite exponents (the moving poles of the
-master basis, 1/Q apart in exponent). A chart's Taylor recurrence then
-amplifies interval radii by 2^100 and more, although the linear map itself
-is harmless, and the transport fell back to "midpoint plus chart map times
+**Probes.** At a numeric dimension a chart's Taylor recurrence amplifies
+interval radii by 2^100 and more, although the linear map itself is
+harmless. (This note first put that down to moving poles of the master
+basis. The later census in [moving-poles.md](moving-poles.md) finds three
+such factors in the double pentagon and none in the four-loop banana, which
+shows the same amplification, so that explanation does not hold; the cause
+was not pursued once probes made it harmless.) The transport fell back to
+"midpoint plus chart map times
 uncertainty": one expansion per master on nearly every chart. The same
 happens at the one-row top level of the expanded four-loop banana, which
 spent 118 of its 168 s there. The recursion now transports midpoints from the
@@ -157,8 +160,8 @@ hence all shifted coefficients are real, and passes a real singular point of
 its level over a triangle on the causal side (neighbouring points share one
 rectangle). Passing a pole costs about a dozen charts whatever the size of
 the detour, so detours are as wide as the free distance allows. A sampled
-recursion keeps the lifted path: its moving poles are real points in nearly
-coincident pairs all along each segment.
+recursion keeps the lifted path: a double pentagon sample took 348 s on
+real-axis paths, its levels having up to 27 real singular points to pass.
 
 **Compact recurrence.** One chart of the double box performs 2.5 million
 multiply-adds of an exact coefficient, mostly one limb, with a
@@ -233,9 +236,21 @@ of rational numbers with long numerators: 14 of the 37 s a double pentagon
 sample spent outside its transports (found by sampling stacks during the
 step). When the leading coefficient has a certified ball inverse at the
 overlap point its rank is full and no shear exists, so the inverse is used
-directly; the operator step of the sample drops from 13.9 s to 1.6 s and
-its value agrees with the stored one to 37 digits. The expanded recursion
-keeps the exact gauge, whose by-product certifies principal parts.
+directly. One property of the exact gauge has to be kept: its inverse has
+exact zeros, and the rows built on it carry only their own columns through
+the transport. A ball inverse returns small balls there, and the first
+version of this change made the transports of the sample carry up to four
+times the products (140 against 36 million on one leg), a net loss. An
+entry is therefore set to zero when its ball contains zero and it vanishes
+in the inverse modulo two primes (the logarithm, transcendental at the
+rational overlap point, replaced by a fixed residue); the sparsity pattern
+of the matrix alone does not find these zeros. With that the sample does
+1.8 % more products than with the exact gauge, its operator step takes
+1.7 s instead of 14.7 s, and its value is unchanged in every printed digit:
+150 s against 203 s for the whole sample, measured back to back on a
+machine whose four-thread timings scattered by tens of percent that day.
+The expanded recursion keeps the exact gauge, whose by-product certifies
+principal parts.
 
 **Moving poles.** A level's connection can have denominator factors that
 mix the merge parameter with epsilon. They are apparent and can be removed

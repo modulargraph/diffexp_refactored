@@ -10,31 +10,32 @@ same machine at the start of the transport and recursion rework (commit
 
 | Feynman-trick example | Before | Now | Preparation / numerical now |
 | --- | ---: | ---: | --- |
-| `sunrise` | 1.46 s | 0.29 s | 0.05 / 0.24 s |
-| `box` | 0.52 s | 0.16 s | 0.05 / 0.11 s |
-| `pentagon` | 3.71 s | 1.24 s | 0.16 / 1.07 s |
-| `box_bubble` | 3.02 s | 0.73 s | 0.65 / 0.08 s |
-| `pentagon_massive` | 25.1 s | 3.20 s | 0.58 / 2.61 s |
-| `box_triangle` | 17.2 s | 3.20 s | 1.88 / 1.31 s |
-| `banana` | 30.1 s | 4.24 s | 0.48 / 3.74 s |
-| `banana_unequal` | 50.7 s | 6.25 s | 0.63 / 5.59 s |
-| `kite` | failed | 9.7 s | 0.9 / 8.8 s |
-| `double_box_planar` | not run | 29.4 s | 5.3 / 24.1 s |
-| `banana4` (four loops, equal masses) | not run | 85 s | 30.5 / 53.9 s |
-| `banana4_unequal` (four loops, four masses) | not run | 161 s | 34.2 / 126.6 s |
+| `sunrise` | 1.46 s | 0.16 s | 0.05 / 0.10 s |
+| `box` | 0.52 s | 0.11 s | 0.06 / 0.05 s |
+| `pentagon` | 3.71 s | 0.70 s | 0.17 / 0.52 s |
+| `box_bubble` | 3.02 s | 0.49 s | 0.46 / 0.03 s |
+| `pentagon_massive` | 25.1 s | 1.43 s | 0.56 / 0.84 s |
+| `box_triangle` | 17.2 s | 2.12 s | 1.43 / 0.67 s |
+| `banana` | 30.1 s | 1.76 s | 0.46 / 1.27 s |
+| `banana_unequal` | 50.7 s | 2.54 s | 0.54 / 1.97 s |
+| `kite` | failed | 4.6 s | 1.0 / 3.5 s |
+| `double_box_planar` | not run | 14.2 s | 3.7 / 10.3 s |
+| `banana4` (four loops, equal masses) | not run | 47.6 s | 19.4 / 27.9 s |
+| `banana4_unequal` (four loops, four masses) | not run | 87.1 s | 27.4 / 59.5 s |
 
-`kite`, `double_box_planar` and the four-loop bananas were measured with the
-threaded chart expansion and probe propagation of uncertainty (four
-threads); the rows above them before. The finite parts of the four-loop
+All rows are one sequential series on four threads with the defaults of
+version 2.2.0 (threaded IBP solver and chart expansion, probe propagation
+of uncertainty, moving poles removed). The finite parts of the four-loop
 bananas reproduce the stored acceptance references
 (28.647167500233570163... and 39.655526834297652529...).
 
 `henn_double_pentagon_x0` (two loops, eight propagators, experimental): the
-exact preparation of all seven levels takes 299 s cold with the settings in
-its family file (level 1: 69 masters, 153 s; before, it did not get past
+exact preparation of all seven levels takes 158 s cold on four threads with
+the settings in its family file (298 s on one; before, it did not get past
 level 1). The epsilon-expanded numerical recursion completed levels 7 to 3 in
 24 minutes on four threads; levels 2 and 1 run for hours. By epsilon sampling
-the family completes: one sample takes 227 s on four threads, and twelve
+the family completes: one sample now takes about 150 s on four threads (227 s
+when the following was run), and twelve
 samples (four at a time) gave its Laurent coefficients through epsilon^0 in
 48 minutes. [What limits the recursion](recursion-cost-experiments.md) has
 the method, the measurements and the coefficients.

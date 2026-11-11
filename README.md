@@ -51,6 +51,12 @@ build/diffexp --version
 build/diffexp ft examples/feynman/sunrise.json --json
 ```
 
+The executables are compiled for the CPU of the build machine
+(`-DDIFFEXP_NATIVE=OFF` gives a portable build). Most of the run time is spent
+inside GMP and FLINT, and distribution packages of GMP are generic builds:
+`tools/build-tuned-deps.sh PREFIX` builds both for this CPU and prints the
+CMake flags to use them. Homebrew's libraries are already built per architecture.
+
 Install the executable, C++ headers and Mathematica wrapper with
 `cmake --install build --prefix /your/prefix`. CMake consumers use
 `find_package(DiffExp 2.2 CONFIG REQUIRED)` and link `DiffExp::core`; see

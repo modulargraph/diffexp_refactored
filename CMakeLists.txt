@@ -20,6 +20,21 @@ target_include_directories(diffexp_core INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/ibp-solver/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(diffexp_core INTERFACE PkgConfig::FLINT Boost::json Threads::Threads)
+# The executables built here are compiled for the CPU of the build machine
+# (the library is header-only, so consumers choose their own flags).
+# Floating-point contraction stays off: the radii of the compact recurrence
+# are doubles and must not depend on whether the CPU has fused multiply-add.
+option(DIFFEXP_NATIVE "Compile this build's executables for the host CPU" ON)
+if(DIFFEXP_NATIVE)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag(-march=native DIFFEXP_HAS_MARCH_NATIVE)
+  check_cxx_compiler_flag(-mcpu=native DIFFEXP_HAS_MCPU_NATIVE)
+  if(DIFFEXP_HAS_MARCH_NATIVE)
+    add_compile_options(-march=native -ffp-contract=off)
+  elseif(DIFFEXP_HAS_MCPU_NATIVE)
+    add_compile_options(-mcpu=native -ffp-contract=off)
+  endif()
+endif()
 # OpenMP is optional: it expands large Taylor charts on several threads. The
 # results are identical with and without it.
 option(DIFFEXP_OPENMP "Use OpenMP threads for large Taylor charts" ON)

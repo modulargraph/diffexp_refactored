@@ -39,6 +39,10 @@
   first pair; without Singular, IBP counts alone decide for large levels.
   Higgs+jet family F: levels of 75, 47, 21 masters become 49, 19, 13; the
   kite's second level 7 instead of 10.
+- The executables are compiled for the host CPU by default
+  (`DIFFEXP_NATIVE`, with floating-point contraction off so results do not
+  depend on the CPU); `tools/build-tuned-deps.sh PREFIX` builds GMP and FLINT
+  for the host CPU.
 - The built-in IBP solver no longer stops at fixed sizes: degree and sample
   bounds double automatically when met, seed and term counts are bounded by
   memory only, and the default time budgets are an hour per elimination and

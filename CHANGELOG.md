@@ -23,6 +23,14 @@
   the CLI leaves the cores that are busy at start-up to their work
   (`OMP_NUM_THREADS` overrides). Results are
   bit-identical for any thread count.
+- The built-in IBP solver works ahead on several threads (`--ibp-threads N`,
+  default the hardware threads idle at start-up; `ibp_solver::Options::threads`).
+  Trace replays of announced sample points run in batches, and the complete
+  eliminations of closure planning and validation, whose points are fixed in
+  advance, start early on free threads. Reductions, sample points, counts and
+  cached records are identical for every thread count; `ibp_statistics`
+  reports `threads`, `batched_replays`, `early_solves` and
+  `early_solves_used`. See `docs/ibp-solver.md`.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
 - The Taylor recurrence of a chart runs on compact numbers (contiguous

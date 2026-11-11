@@ -27,6 +27,7 @@
 #include <optional>
 #include <chrono>
 #include <cstdlib>
+#include <thread>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -75,6 +76,10 @@ int main(int argc, char** argv) {
       std::string henn_basis,epsilon_shift,moving_poles;
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
+      // As for the chart expansion, the built-in solver leaves the cores that
+      // other work occupies at start-up; --ibp-threads overrides this.
+      unsigned ibp_threads=std::max(1u,std::thread::hardware_concurrency());
+      {double load=0;if(getloadavg(&load,1)==1)ibp_threads=static_cast<unsigned>(std::max(1,static_cast<int>(ibp_threads)-static_cast<int>(load+0.5)));}
       for(int i=3;i<argc;++i) {
         const std::string option=argv[i];
         if(option=="--json")continue;
@@ -90,6 +95,10 @@ int main(int argc, char** argv) {
           const std::string value=option_value;unsigned n=0;auto parsed=std::from_chars(value.data(),value.data()+value.size(),n);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
           (option=="--ibp-dots"?ibp_dots:ibp_numerators)=n;
+        }
+        else if(option=="--ibp-threads"){
+          const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_threads);
+          if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||!ibp_threads||ibp_threads>256)throw std::invalid_argument("IBP threads must be 1..256");
         }
         else if(option=="--fire-prime"){fire_prime=option_value;fire_prime_given=true;}
         else if(option=="--cache")cache=option_value;
@@ -193,7 +202,7 @@ int main(int argc, char** argv) {
           // solver as it bounds one FIRE call.
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,
             options.reduction.provider.timeout_seconds,ibp_validation=="strict");
-          native.dots=ibp_dots;native.numerators=ibp_numerators;
+          native.dots=ibp_dots;native.numerators=ibp_numerators;native.threads=ibp_threads;
           native.progress=[](const std::string& message){std::cerr<<"IBP solver: "<<message<<'\n';};
           fallback=[&,native](const auto& batch,const auto& limits){if(!native_session)native_session=std::make_shared<diffexp::ibp_solver::Session>(basis,dimension,field,native);return (*native_session)(batch,limits);};
         }else if(ibp_provider=="fire-modular") {
@@ -204,7 +213,8 @@ int main(int argc, char** argv) {
         }
         auto result=diffexp::cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
         if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;
-          ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;}
+          ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;
+          ibp_statistics.batched_replays+=stats.batched_replays;ibp_statistics.early_solves+=stats.early_solves;ibp_statistics.early_solves_used+=stats.early_solves_used;}
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
@@ -273,7 +283,8 @@ int main(int argc, char** argv) {
       if(reused)std::cerr<<"diffexp: note: "<<reused<<" level system"<<(reused==1?" was":"s were")<<" reused from the verified cache; the IBP provider options (--ibp-provider "
         <<ibp_provider<<", --ibp-dots, --ibp-numerators) did not apply to "<<(reused==1?"it":"them")<<". Use a fresh --cache to rebuild.\n";
       report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds},
-        {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled}};
+        {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled},
+        {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
@@ -522,6 +533,10 @@ IBP preparation (prepare/ft)
                                   auto selects the built-in ibp-solver unless --fire names a FIRE
                                   executable
   --ibp-dots N --ibp-numerators N seed controls of the built-in solver
+  --ibp-threads N                 threads of the built-in solver (default: the hardware threads
+                                  idle at start-up). Trace replays of announced sample points run
+                                  in batches, and complete eliminations at points fixed in advance
+                                  start early on free threads. Results do not depend on N.
   --ibp-validation anchored|strict
                                   anchored (default): held-out points eliminate the pilot's
                                   dependency subset of original equations, with one complete

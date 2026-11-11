@@ -144,6 +144,48 @@ int main(int argc,char** argv){try{
   require(skipped_again.success&&skipped_again.reductions==result.reductions&&skip_record()==first_record,"resumed reconstruction chose a different sample point set");
   auto bounded_skip=skip_options;bounded_skip.max_skipped_samples=1;bounded_skip.provider_identity="exceptional-point-budget";auto exhausted=skip_run(bounded_skip);
   require(!exhausted.success&&exhausted.reason.find("exceptional-sample budget")!=std::string::npos,"unbounded exceptional-sample skipping");
+  // Threads work ahead: announced points are replayed in batches and complete
+  // eliminations start early. Every reduction, record and count must be that
+  // of one thread, also when a result computed ahead has gone stale.
+  {std::vector<std::vector<modular::Word>> points;for(std::size_t k=0;k<24;++k)points.push_back(modular::point(2,1,k));
+    auto serial_options=options,threaded_options=options;serial_options.threads=1;threaded_options.threads=4;
+    ibp_solver::Sampler serial(basis,d,serial_options),threaded(basis,d,threaded_options);
+    const std::vector<diffexp::ibp::Integral> other{{3,1}};const auto first=ibp_solver::prime(1);
+    auto same=[&](const auto& batch,const auto& point,bool fresh=false){auto a=serial(batch,point,first,limits,fresh),b=threaded(batch,point,first,limits,fresh);
+      require(a.success&&b.success&&a.reductions==b.reductions,"a sample computed ahead differs from the serial one");};
+    threaded.announce(points,first);
+    for(std::size_t k=0;k<points.size();++k){
+      // Another batch replaces the plan and its trace under the announced points.
+      if(k==9)same(other,std::vector<modular::Word>{11,13});
+      // A point that was not announced, and one announced point left out.
+      if(k==15){same(requests,std::vector<modular::Word>{5,7});continue;}
+      same(requests,points[k]);
+    }
+    // A complete elimination at an anticipated point is adopted; the plan of
+    // other targets over the same equations adopts the next one as well.
+    threaded.anticipate({{first,points[20]},{first,points[21]},{first,{11,13}}},60);
+    same(requests,points[19],true);same(requests,points[20],true);same(other,points[21],true);same(other,std::vector<modular::Word>{11,13},true);
+    const auto& one=serial.statistics();const auto& four=threaded.statistics();
+    require(four.batched_replays>=12&&four.early_solves==3&&four.early_solves_used==3&&!one.batched_replays&&!one.early_solves,"threads did not work ahead");
+    require(four.probes==one.probes&&four.templates==one.templates&&four.equations==one.equations&&four.full_solves==one.full_solves&&four.trace_replays==one.trace_replays&&
+      four.trace_fallbacks==one.trace_fallbacks&&four.trace_disabled==one.trace_disabled&&four.selected_solves==one.selected_solves,"working ahead changed the sampling counts");
+    auto tree=[](const std::filesystem::path& root){std::map<std::string,std::string> files;
+      for(const auto& entry:std::filesystem::recursive_directory_iterator(root))if(entry.is_regular_file())files.emplace(std::filesystem::relative(entry.path(),root).string(),fire::read_text(entry.path()));
+      return files;};
+    for(bool strict:{false,true}){level::Result stage[2];ibp_solver::Statistics counts[2];std::filesystem::path roots[2];
+      for(unsigned run=0;run<2;++run){roots[run]=options.cache_directory/("threads-"+std::to_string(strict)+"-"+std::to_string(run));
+        auto native=ibp_solver::recursion_options(roots[run],0,60,strict);native.threads=run?4:1;
+        ibp_solver::Session session(basis,d,field,native);level::Options stage_options;stage_options.total_timeout_seconds=90;stage_options.provider=limits;
+        stage[run]=level::prepare(basis,d,field,0,requests,stage_options,[&](const auto& r,const auto& l){return session(r,l);});
+        require(stage[run].success,stage[run].reason.c_str());counts[run]=session.statistics();}
+      require(stage[0].ordered_basis==stage[1].ordered_basis&&stage[0].matrix==stage[1].matrix&&stage[0].target_rows==stage[1].target_rows,"thread count changed the level closure");
+      // completed.json, the closure plan, progress and the retained samples.
+      const auto records=tree(roots[0]);require(records.size()>8&&records==tree(roots[1]),"thread count changed a reconstruction record or the retained sample points");
+      require(counts[1].probes==counts[0].probes&&counts[1].templates==counts[0].templates&&counts[1].full_solves==counts[0].full_solves&&counts[1].selected_solves==counts[0].selected_solves&&
+        counts[1].trace_replays==counts[0].trace_replays&&counts[1].trace_fallbacks==counts[0].trace_fallbacks&&counts[1].selection_fallbacks==counts[0].selection_fallbacks,"thread count changed the reconstruction counts");
+      require(counts[1].batched_replays>0&&counts[1].early_solves_used>0&&!counts[0].batched_replays&&!counts[0].early_solves,"the threaded reconstruction did not work ahead");
+    }
+  }
   // A sample-specific massless cancellation must trigger guarded relearning.
   ibp_solver::Sampler guarded(basis,d,options),independent(basis,d,options);
   auto special=guarded(requests,{0,12345},ibp_solver::prime(1),limits);require(special.success,special.reason.c_str());

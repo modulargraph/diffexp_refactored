@@ -1,6 +1,10 @@
 #pragma once
 #include "diffexp/fire_modular.hpp"
 #include <ibp/trace.hpp>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace diffexp::ibp_solver {
 // The pinned upstream core works in the exact denominator coordinates owned by
@@ -23,6 +27,10 @@ struct Options {
   bool selected_source_rows=false,complete_validation_anchor=false;
   // Zero derives the arithmetic-trace node budget from the memory budget.
   std::size_t max_trace_nodes=0;
+  // Threads for eliminations whose points are known before their results are
+  // needed (see Sampler::announce and Sampler::anticipate); 0 uses one per
+  // hardware thread. Reductions, sample points and counts do not depend on it.
+  unsigned threads=0;
   std::optional<std::size_t> closure_parameter;
   unsigned max_planning_passes=6;
   std::function<void(const std::string&)> progress;
@@ -32,6 +40,10 @@ struct Statistics {
   std::size_t selected_solves=0,selected_equations=0,selection_fallbacks=0;
   double generation_seconds=0,elimination_seconds=0,full_solve_seconds=0,trace_learning_seconds=0,trace_replay_seconds=0;
   double selected_solve_seconds=0;
+  // Work done on other threads: replays served from a batch, and complete
+  // eliminations started ahead and those of them that were used. Seconds of
+  // such work are summed over threads.
+  std::size_t batched_replays=0,early_solves=0,early_solves_used=0;
 };
 // Descending primes below 2^61; two beyond the reconstruction primes validate.
 inline constexpr unsigned prime_count=64;
@@ -44,11 +56,13 @@ inline modular::Word prime(unsigned index) {
 class Sampler {
  public:
   Sampler(ibp::PropagatorBasis basis,Exact dimension,Options options)
-    :basis_(std::move(basis)),dimension_(std::move(dimension)),options_(std::move(options)) {
+    :basis_(std::move(basis)),dimension_(std::move(dimension)),options_(std::move(options)),
+     threads_(options_.threads?options_.threads:std::max(1u,std::thread::hardware_concurrency())) {
     if(!basis_.space.loops||basis_.space.loops>4||basis_.space.size()>16||basis_.physical_count>12||!basis_.physical_count||
        basis_.denominators.size()!=basis_.space.size()||basis_.physical_count>basis_.denominators.size())
       throw std::invalid_argument("IBP solver supports at most 4 loops, 16 scalar products and 12 physical denominators; select FIRE for larger systems");
     if(options_.dots>8||options_.numerators>8)throw std::invalid_argument("IBP solver seed powers must be 0..8");
+    if(threads_>256)throw std::invalid_argument("IBP solver threads must be 0..256");
     contractions_=ibp::contractions(basis_);
     for(unsigned i=0;i<basis_.space.loops;++i)for(unsigned v=0;v<basis_.space.loops+basis_.space.externals();++v)trace_.push_back(i==v);
     zero_sectors_.resize(std::size_t(1)<<basis_.physical_count);
@@ -65,6 +79,36 @@ class Sampler {
     input_geometry_.inputs=inputs_.size();
   }
   const Statistics& statistics()const{return stats_;}
+  // Whether announcements have any effect: with one thread they are ignored.
+  bool works_ahead()const{return threads_>1;}
+  struct Point {modular::Word modulus=0;std::vector<modular::Word> coordinates;bool operator==(const Point&)const=default;};
+  // Working ahead. Neither announcement changes a result, a statistic other
+  // than the three above, or the state a later call sees: what another thread
+  // computed is used only where this thread would have computed exactly the
+  // same, and is dropped otherwise. Each replaces the previous one of its kind.
+  //
+  // announce: the points of the next ordinary samples of one prime, in order.
+  // Once the trace of that prime is learned and checked, a replay depends on
+  // the trace and the point alone, so the announced points are replayed
+  // together when the first of them is requested.
+  void announce(std::vector<std::vector<modular::Word>> points,modular::Word modulus) {
+    ahead_.clear();ahead_modulus_=modulus;if(threads_<2)return;
+    for(auto& point:points)ahead_.push_back({std::move(point),std::nullopt,0,0,0});
+  }
+  // anticipate: points at which a complete elimination is likely to be
+  // requested, in order of likelihood, within the given seconds. It depends on
+  // the generated equations and the point, not on the targets, the pilot or a
+  // trace, so it starts on a free thread as soon as the equations exist and
+  // is adopted if they are still the same. One already started for a point
+  // that is announced again is kept.
+  void anticipate(std::vector<Point> points,double seconds=0) {
+    std::vector<Expected> next;const auto until=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(std::clamp(seconds,0.0,1e6)));
+    if(threads_>1)for(auto& point:points){
+      auto old=std::find_if(expected_.begin(),expected_.end(),[&](const Expected& expected){return expected.at==point;});
+      next.push_back({std::move(point),old==expected_.end()?nullptr:std::move(old->task),until});
+    }
+    expected_=std::move(next);
+  }
   // `independent` solves by fresh primal elimination of original rows, without
   // the arithmetic trace. `complete` forces that elimination to use every
   // generated equation even when a dependency subset is available.
@@ -104,55 +148,87 @@ class Sampler {
       }
       seeds.max_terms=std::min<std::size_t>(10000000,limits.memory_bytes/64);seeds.seconds=remaining();
       if(!seeds.max_terms)throw std::invalid_argument("IBP solver memory budget too small");
-      if(!plan_||plan_->program.program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms){
-        plan_=std::make_unique<Plan>();plan_->program=::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds);
-        plan_->zero_sectors=geometry.zero_sectors;plan_->dots=seeds.dots;plan_->numerators=seeds.numerators;plan_->max_terms=seeds.max_terms;++stats_.templates;stats_.equations+=plan_->program.program.equations.size();
+      if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms){
+        auto fresh=std::make_unique<Plan>();fresh->program=std::make_shared<::ibp::ParametricProgram>(::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds));
+        fresh->zero_sectors=geometry.zero_sectors;fresh->dots=seeds.dots;fresh->numerators=seeds.numerators;fresh->max_terms=seeds.max_terms;
+        // New targets usually leave the generated equations as they were, and
+        // with them every complete elimination started ahead.
+        fresh->system=plan_&&same_equations(*plan_->program,*fresh->program)?plan_->system:++systems_;
+        plan_=std::move(fresh);++state_;++stats_.templates;stats_.equations+=plan_->program->program.equations.size();
       }
-      auto& parametric=plan_->program;auto& program=parametric.program;
+      auto& parametric=*plan_->program;auto& program=parametric.program;
       const auto generated=std::chrono::steady_clock::now();
       ::ibp::SolveOptions solve;solve.seconds=remaining();solve.max_fill=std::min<std::size_t>(12000000,limits.memory_bytes/64);
+      start_anticipated(solve,{modulus,point});double elsewhere=0;
       // Reconstruction visits primes in order and never returns to one, so a
       // trace is dropped once ordinary sampling has moved to another prime.
-      if(!independent&&plan_->sampling_modulus!=modulus){for(auto& [other,state]:plan_->primes)if(other!=modulus){state.trace.reset();state.workspace={};}plan_->sampling_modulus=modulus;}
+      if(!independent&&plan_->sampling_modulus!=modulus){for(auto& [other,state]:plan_->primes)if(other!=modulus){state.trace.reset();state.workspace={};}plan_->sampling_modulus=modulus;++state_;}
       std::vector<::ibp::Row> rows;auto& learned=plan_->primes[modulus];bool replayed=false,learning_overran=false;
+      // A replay that neither relearns nor is checked leaves no state behind:
+      // an announced point is replayed with the announced points after it.
+      if(!independent&&learned.trace&&learned.checked)if(auto* slot=announced(point,modulus)){
+        if(!slot->result||slot->state!=state_)replay_announced(requested,modulus,field,*learned.trace,program,limits);
+        if(slot->result&&slot->state==state_){
+          out=std::move(*slot->result);++stats_.trace_replays;++stats_.batched_replays;stats_.trace_replay_seconds+=slot->replay_seconds;
+          ++stats_.probes;stats_.generation_seconds+=std::chrono::duration<double>(generated-begin).count();stats_.elimination_seconds+=slot->seconds;
+          ahead_.erase(ahead_.begin());return out;
+        }
+      }
       if(!independent&&learned.trace){const auto replay_begin=std::chrono::steady_clock::now();try{rows=learned.trace->evaluate_inputs(values,field,learned.workspace);++stats_.trace_replays;replayed=true;}
-        catch(const std::domain_error&){learned.trace.reset();++stats_.trace_fallbacks;}stats_.trace_replay_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-replay_begin).count();}
+        catch(const std::domain_error&){learned.trace.reset();++state_;++stats_.trace_fallbacks;}stats_.trace_replay_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-replay_begin).count();}
       // Held-out samples use fresh primal elimination of original IBP rows,
       // independent of the arithmetic trace. A dependency subset proves the
       // same rowspace identities, but does not certify full-system minimality.
       // Check the first changed point too, before using a learned trace alone.
       if(independent||!replayed||!learned.checked){
-        std::unique_ptr<::ibp::Solver> solver;std::vector<::ibp::Row> full;
+        std::unique_ptr<::ibp::Solver> owned;std::shared_ptr<Elimination> early;::ibp::Solver* solver=nullptr;
+        std::vector<::ibp::Row> full;std::optional<std::vector<std::uint32_t>> dependencies;
         auto terminals=[](const auto& reduced){std::set<::ibp::Column> out;for(const auto& row:reduced)for(const auto& entry:row)out.insert(entry.column);return out;};
         auto primal=[&](bool selected){
-          const auto started=std::chrono::steady_clock::now();
-          const auto* sources=selected?&*plan_->selection:nullptr;
-          // Rebind ALL original rows on fallback, including those left at an
-          // earlier point or prime by the preceding subset solve.
-          parametric.bind(values,field,sources);solve.seconds=remaining();
-          solver=std::make_unique<::ibp::Solver>(program,field,solve);solver->solve(0,sources);full=solver->targets();
-          auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+          auto started=std::chrono::steady_clock::now();double seconds=0;
+          const auto* sources=selected?&*plan_->selection:nullptr;dependencies.reset();early.reset();
+          if(!selected&&(early=adopt({modulus,point},solve.max_fill,remaining()))){
+            // Its seconds count once: not those this thread spent waiting for it.
+            elsewhere+=std::max(0.0,early->seconds-std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count());
+            started=std::chrono::steady_clock::now();
+            if(early->target_columns==program.target_columns){full=std::move(early->rows);dependencies=std::move(early->selection);}
+            // Other targets are reduced here. The solver's clock has run since
+            // its elimination began on the other thread: if it expires only
+            // now, the elimination is repeated with a budget of its own.
+            else try{early->program.target_columns=program.target_columns;full=early->solver->targets();dependencies=early->solver->selection();}
+              catch(const std::runtime_error&){early.reset();}
+            if(early){solver=&*early->solver;seconds=early->seconds;++stats_.early_solves_used;}
+          }
+          if(!early){
+            // Rebind ALL original rows on fallback, including those left at an
+            // earlier point or prime by the preceding subset solve.
+            started=std::chrono::steady_clock::now();parametric.bind(values,field,sources);solve.seconds=remaining();
+            owned=std::make_unique<::ibp::Solver>(program,field,solve);owned->solve(0,sources);solver=owned.get();full=solver->targets();
+          }
+          seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
           if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
+        auto selection=[&]()->const std::vector<std::uint32_t>&{if(!dependencies)dependencies=solver->selection();return *dependencies;};
         bool selected=options_.selected_source_rows&&plan_->selection.has_value()&&!complete;primal(selected);
         if(selected&&terminals(full)!=plan_->terminal_columns){++stats_.selection_fallbacks;selected=false;primal(false);}
         // A complete anchor compares against the pilot; it does not replace the
         // pilot's subset, which the reconstruction samples were drawn from.
         if(options_.selected_source_rows&&!selected&&!(complete&&plan_->selection)){
-          plan_->selection=solver->selection();plan_->terminal_columns=terminals(full);
+          plan_->selection=selection();plan_->terminal_columns=terminals(full);
           if(options_.progress)options_.progress("full IBP pilot: "+std::to_string(program.equations.size())+" equations, "+std::to_string(plan_->selection->size())+" original rows needed for target identities");
         }
         if(replayed&&rows!=full){learned.trace.reset();++stats_.trace_fallbacks;replayed=false;}
         rows=std::move(full);
         if(!independent){
+          ++state_;
           if(replayed)learned.checked=true;
           else if(!learned.disabled){const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.seconds=remaining();tracing.max_fill=solve.max_fill;
             tracing.max_nodes=options_.max_trace_nodes?options_.max_trace_nodes:std::min<std::size_t>(std::numeric_limits<std::uint32_t>::max(),limits.memory_bytes/128);
             // The primal rows above are already a valid reduction. A trace that
             // does not fit its node, fill or time budget only costs the replay
             // shortcut: this prime continues with primal elimination alone.
-            try{learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,solver->selection(),tracing);}
+            try{learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,selection(),tracing);}
             catch(const std::length_error&){learned.disabled=true;}
             catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
             if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;if(options_.progress)options_.progress("arithmetic trace exceeds its budget at this prime; continuing with primal elimination");}
@@ -162,14 +238,9 @@ class Sampler {
       }
       // Time spent on an abandoned trace is not charged to the valid reduction.
       if(!learning_overran)remaining();
-      auto indices=[&](const ::ibp::Integral& a){ibp::Integral r;for(unsigned i=0;i<geometry.n;++i)r.push_back(a.powers[i]);return r;};
-      std::set<ibp::Integral> terminal;
-      for(unsigned i=0;i<rows.size();++i){ibp::Relation row;for(const auto& term:rows[i]){auto a=indices(program.integrals[term.column]);terminal.insert(a);ibp::add(row,a,dimension_.parse(std::to_string(term.value)));}out.reductions.emplace(requested[i],std::move(row));}
-      for(const auto& a:terminal){auto [it,inserted]=out.reductions.emplace(a,ibp::Relation{{a,dimension_.constant(1)}});
-        if(!inserted&&it->second!=ibp::Relation{{a,dimension_.constant(1)}})throw std::runtime_error("IBP solver returned a nonterminal output basis");}
-      out.success=true;fire_batch::validate(out,basis_,dimension_,requested);
+      emit(out,rows,program,requested);
       ++stats_.probes;stats_.generation_seconds+=std::chrono::duration<double>(generated-begin).count();
-      stats_.elimination_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-generated).count();
+      stats_.elimination_seconds+=elsewhere+std::chrono::duration<double>(std::chrono::steady_clock::now()-generated).count();
     }catch(const std::domain_error& e){
       // Raised only while evaluating the input coefficients: a pole at this
       // point (or modulo this prime). Elimination itself never inverts zero.
@@ -179,12 +250,122 @@ class Sampler {
   }
  private:
   std::size_t sector(const ibp::Integral& a)const {std::size_t mask=0;for(unsigned i=0;i<basis_.physical_count;++i)if(a[i]>0)mask|=std::size_t(1)<<i;return mask;}
+  // The reduction a probe returns for the rows of its targets.
+  void emit(fire::Result& out,const std::vector<::ibp::Row>& rows,const ::ibp::Program& program,const std::vector<ibp::Integral>& requested)const {
+    auto indices=[&](const ::ibp::Integral& a){ibp::Integral r;for(unsigned i=0;i<input_geometry_.n;++i)r.push_back(a.powers[i]);return r;};
+    std::set<ibp::Integral> terminal;
+    for(unsigned i=0;i<rows.size();++i){ibp::Relation row;for(const auto& term:rows[i]){auto a=indices(program.integrals[term.column]);terminal.insert(a);ibp::add(row,a,dimension_.parse(std::to_string(term.value)));}out.reductions.emplace(requested[i],std::move(row));}
+    for(const auto& a:terminal){auto [it,inserted]=out.reductions.emplace(a,ibp::Relation{{a,dimension_.constant(1)}});
+      if(!inserted&&it->second!=ibp::Relation{{a,dimension_.constant(1)}})throw std::runtime_error("IBP solver returned a nonterminal output basis");}
+    out.success=true;fire_batch::validate(out,basis_,dimension_,requested);
+  }
   struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
-  struct Plan {::ibp::ParametricProgram program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
+  // `system` names the generated equations: plans that differ in targets alone share it.
+  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
     std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;};
+  static bool same_equations(const ::ibp::ParametricProgram& a,const ::ibp::ParametricProgram& b) {
+    if(a.input_count!=b.input_count||a.constant_inputs!=b.constant_inputs||a.program.integrals!=b.program.integrals||a.program.equations.size()!=b.program.equations.size())return false;
+    for(std::size_t i=0;i<a.program.equations.size();++i){const auto& x=a.program.equations[i];const auto& y=b.program.equations[i];if(x.size()!=y.size())return false;
+      for(std::size_t j=0;j<x.size();++j)if(x[j].column!=y[j].column||a.coefficients[i][j].constant!=b.coefficients[i][j].constant||a.coefficients[i][j].terms!=b.coefficients[i][j].terms)return false;}
+    return true;
+  }
+  // An announced ordinary sample. A result is current while state_, which
+  // counts every change of plan or trace, is the one it was computed under.
+  struct Ahead {std::vector<modular::Word> point;std::optional<fire::Result> result;std::uint64_t state=0;double replay_seconds=0,seconds=0;};
+  // The slot of a requested point; announced points before it were not used.
+  Ahead* announced(const std::vector<modular::Word>& point,modular::Word modulus) {
+    if(modulus!=ahead_modulus_)return nullptr;
+    auto it=std::find_if(ahead_.begin(),ahead_.end(),[&](const Ahead& slot){return slot.point==point;});
+    if(it==ahead_.end())return nullptr;ahead_.erase(ahead_.begin(),it);return &ahead_.front();
+  }
+  // Replays a bounded stretch of announced points, the requested one first,
+  // each worker in its own workspace. A point that fails in any way keeps no
+  // result: its own request then takes the serial path and reports the failure
+  // exactly as before. The requesting probe's budget bounds the whole batch.
+  void replay_announced(const std::vector<ibp::Integral>& requested,modular::Word modulus,const ::ibp::Field& field,const ::ibp::ArithmeticTrace& trace,
+      const ::ibp::Program& program,const fire::Options& limits) {
+    using clock=std::chrono::steady_clock;auto since=[](clock::time_point t){return std::chrono::duration<double>(clock::now()-t).count();};
+    std::vector<Ahead*> batch;const std::size_t stretch=std::max<std::size_t>(32,8*threads_);
+    for(auto& slot:ahead_){if(batch.size()==stretch)break;if(!slot.result||slot.state!=state_){slot.result.reset();batch.push_back(&slot);}}
+    const auto began=clock::now();std::atomic<std::size_t> next{0};
+    auto work=[&]{::ibp::ArithmeticTrace::Workspace workspace;
+      for(;;){const auto i=next.fetch_add(1);if(i>=batch.size()||since(began)>=limits.timeout_seconds)break;auto& slot=*batch[i];const auto start=clock::now();
+        try{std::vector<::ibp::Word> values;for(const auto& input:inputs_)values.push_back(modular::evaluate(input,slot.point,modulus));
+          auto rows=trace.evaluate_inputs(values,field,workspace);slot.replay_seconds=since(start);if(slot.replay_seconds>=limits.timeout_seconds)continue;
+          fire::Result reduced;emit(reduced,rows,program,requested);slot.seconds=since(start);slot.state=state_;slot.result=std::move(reduced);
+        }catch(...){}
+      }};
+    const auto busy=std::min<std::size_t>(running(),threads_-1);
+    std::vector<std::jthread> pool;
+    try{for(std::size_t i=1;i<std::min<std::size_t>(batch.size(),threads_-busy);++i)pool.emplace_back([&]{work();flint_cleanup();});}catch(const std::system_error&){}
+    work();
+  }
+  // A complete elimination on another thread. It owns everything it reads
+  // while it runs except the immutable equation structure it was started with.
+  struct Elimination {
+    std::size_t system=0,max_fill=0;::ibp::Field field;::ibp::Program program;std::optional<::ibp::Solver> solver;
+    // Reduced for the targets known when it started, on its own clock.
+    std::vector<::ibp::Column> target_columns;std::vector<::ibp::Row> rows;std::vector<std::uint32_t> selection;double seconds=0;
+    std::mutex mutex;std::condition_variable ready;bool finished=false,solved=false;
+    explicit Elimination(modular::Word modulus):field(modulus){}
+  };
+  struct Expected {Point at;std::shared_ptr<Elimination> task;std::chrono::steady_clock::time_point until;};
+  std::size_t running() {
+    std::erase_if(tasks_,[](auto& task){const std::lock_guard lock(task.second->mutex);return task.second->finished;});return tasks_.size();
+  }
+  // Starts anticipated eliminations of the present equations, in the order
+  // announced, while a thread is free; the point being requested now is left
+  // to this thread. At most `lookahead` wait to be asked for, since the later
+  // an announced point the less likely its use. An elimination that fails is
+  // repeated by the request it was meant for, which then reports the failure.
+  // The solver's clock covers the time a result may wait, so that reducing
+  // other targets later does not overrun it; adopt() applies the requesting
+  // probe's own budget to the elimination.
+  static constexpr std::size_t lookahead=3;
+  void start_anticipated(const ::ibp::SolveOptions& probe,const Point& present) {
+    std::size_t waiting=0;running();
+    for(auto& expected:expected_){
+      if(expected.task&&expected.task->system==plan_->system){++waiting;continue;}
+      if(expected.at==present)continue;
+      if(waiting>=lookahead||running()+1>=threads_)break;
+      std::vector<::ibp::Word> values;
+      try{for(const auto& input:inputs_)values.push_back(modular::evaluate(input,expected.at.coordinates,expected.at.modulus));}catch(const std::exception&){continue;}
+      auto solve=probe;solve.seconds=std::max(solve.seconds,std::chrono::duration<double>(expected.until-std::chrono::steady_clock::now()).count());
+      auto task=std::make_shared<Elimination>(expected.at.modulus);task->system=plan_->system;task->max_fill=solve.max_fill;task->target_columns=plan_->program->program.target_columns;
+      try{tasks_.emplace_back(std::jthread([task,source=std::shared_ptr<const ::ibp::ParametricProgram>(plan_->program),values=std::move(values),solve]{
+          const auto started=std::chrono::steady_clock::now();bool solved=false;
+          try{const auto& equations=source->program.equations;task->program.integrals.resize(source->program.integrals.size());task->program.equations.resize(equations.size());
+            for(std::size_t i=0;i<equations.size();++i){auto& row=task->program.equations[i];row.reserve(equations[i].size());
+              for(std::size_t j=0;j<equations[i].size();++j)row.push_back({equations[i][j].column,source->coefficients[i][j].evaluate(values,task->field),0});}
+            task->program.target_columns=task->target_columns;task->solver.emplace(task->program,task->field,solve);task->solver->solve(0);
+            std::vector<std::vector<::ibp::LinearEntry>>().swap(task->program.equations);
+            task->rows=task->solver->targets();task->selection=task->solver->selection();solved=true;
+          }catch(...){}
+          task->seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();flint_cleanup();
+          {const std::lock_guard lock(task->mutex);task->solved=solved;task->finished=true;}task->ready.notify_all();
+        }),task);}catch(const std::system_error&){break;}
+      expected.task=std::move(task);++stats_.early_solves;++waiting;
+    }
+  }
+  // The anticipated elimination at a requested point, if it used the present
+  // equations and fill budget and fits the time the request has left. It
+  // started before the request: if the request's own budget passes before it
+  // finishes, that budget is spent.
+  std::shared_ptr<Elimination> adopt(const Point& at,std::size_t max_fill,double seconds) {
+    auto it=std::find_if(expected_.begin(),expected_.end(),[&](const Expected& expected){return expected.at==at;});
+    if(it==expected_.end())return nullptr;auto task=std::move(it->task);expected_.erase(it);
+    if(!task||task->system!=plan_->system||task->max_fill!=max_fill)return nullptr;
+    std::unique_lock lock(task->mutex);
+    if(!task->ready.wait_for(lock,std::chrono::duration<double>(seconds),[&]{return task->finished;}))throw std::runtime_error("elimination time budget exceeded");
+    return task->solved&&task->seconds<=seconds?task:nullptr;
+  }
   ::ibp::InputGeometry input_geometry_;std::vector<Exact> inputs_;std::unique_ptr<Plan> plan_;
   ibp::PropagatorBasis basis_;Exact dimension_;Options options_;Statistics stats_;
   std::vector<std::vector<ibp::Affine>> contractions_;std::vector<bool> trace_,zero_sectors_;
+  unsigned threads_=1;std::uint64_t state_=0;std::size_t systems_=0;
+  std::vector<Ahead> ahead_;modular::Word ahead_modulus_=0;std::vector<Expected> expected_;
+  // Declared last: joined before anything else of the sampler goes away.
+  std::vector<std::pair<std::jthread,std::shared_ptr<Elimination>>> tasks_;
 };
 struct ClosurePlanningStatistics {std::size_t passes=0,probes=0,demands=0,cache_hits=0;double seconds=0;};
 class Session {
@@ -226,7 +407,26 @@ class Session {
       return {planned.begin(),planned.end()};
     }
     ibp::Generator generator(basis_,dimension_);
+    // Every pass begins with a complete elimination at a point fixed in
+    // advance and, while the demands leave the seed bounds alone, of the same
+    // equations; so does the validation of the reconstruction that follows.
+    // A pass therefore announces the eliminations of the pass after it, of
+    // that validation and of one pass more, in this order of likelihood: a
+    // plan that settles in three passes waits for one elimination, not four.
+    // Without selected rows the check at the second point is complete too.
+    // Once planning ends only the validation's remain expected.
+    std::vector<Sampler::Point> held;
+    if(sampler_->works_ahead())try{held=complete(options_.selected_source_rows,options_.complete_validation_anchor,session_.held_out(limits,2));}catch(const std::exception&){}
+    auto left=[&]{return limits.timeout_seconds-duration<double>(steady_clock::now()-started).count();};
+    struct Forget{Sampler& sampler;const std::vector<Sampler::Point>& held;double seconds;~Forget(){sampler.anticipate(held,seconds);}}forget{*sampler_,held,double(limits.timeout_seconds)};
+    auto expect=[&](unsigned pass){std::vector<Sampler::Point> points;const auto next=std::max(pass,1u);if(!sampler_->works_ahead())return;
+      for(auto p=pass;p<=next+1&&p<options_.max_planning_passes;++p){
+        for(unsigned check=0;check<(options_.selected_source_rows?1u:2u);++check)points.push_back({prime(1),modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*p+check)});
+        if(p==next)points.insert(points.end(),held.begin(),held.end());
+      }
+      sampler_->anticipate(std::move(points),left());};
     for(unsigned pass=0;pass<options_.max_planning_passes;++pass){
+      expect(pass);
       if(demanded.size()>2000)throw std::length_error("IBP closure planning demand budget");
       std::vector<ibp::Integral> batch(demanded.begin(),demanded.end());std::set<ibp::Integral> terminal;
       for(unsigned check=0;check<2;++check){
@@ -256,6 +456,12 @@ class Session {
     if(options_.progress)options_.progress("finite-field closure plan did not stabilize within "+std::to_string(options_.max_planning_passes)+" passes; reconstructing the "+std::to_string(demanded.size())+" demands found so far");
     return {demanded.begin(),demanded.end()};
   }
+  // Of the held-out points, those eliminated completely can start early.
+  static std::vector<Sampler::Point> complete(bool selected_rows,bool anchored,const std::vector<fire_modular::Options::HeldOut>& points) {
+    std::vector<Sampler::Point> out;
+    for(const auto& held:points)if(!selected_rows||(anchored&&held.anchor))out.push_back({prime(held.prime_index),held.point});
+    return out;
+  }
   static fire_modular::Options configuration(const Options& o,const std::shared_ptr<Sampler>& sampler){
     fire_modular::Options out;out.cache_directory=o.cache_directory;out.max_degree=o.max_degree;out.max_variable_degree=o.max_variable_degree;out.max_primes=o.max_primes;
     out.max_samples_per_prime=o.max_samples_per_prime;out.probe_timeout_seconds=o.probe_timeout_seconds;out.progress=o.progress;out.modulus=prime;
@@ -269,6 +475,10 @@ class Session {
     out.sample_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits);};
     out.validation_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true);};
     if(anchored)out.anchor_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true,true);};
+    if(sampler->works_ahead()){
+      out.upcoming_samples=[sampler](const auto& points,auto m){sampler->announce(points,m);};
+      out.upcoming_validation=[sampler,selected=o.selected_source_rows,anchor=o.complete_validation_anchor](const auto& points,double seconds){sampler->anticipate(complete(selected,anchor,points),seconds);};
+    }
     return out;
   }
   std::shared_ptr<Sampler> sampler_;fire_modular::Session session_;

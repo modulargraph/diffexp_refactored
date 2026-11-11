@@ -39,13 +39,25 @@ A relation proved using a subset of original IBP equations also belongs to the f
 
 ### Defaults of the command-line provider
 
-`prepare` and `ft` set five things on top of the library defaults:
+`prepare` and `ft` set six things on top of the library defaults:
 
 - **Coordinate degree slices.** Coefficients are fitted in a per-variable degree box (cap `max_variable_degree`, 64) found from univariate slices, rather than in the dense total-degree hull (cap `max_degree`, 16). The sample count follows the box.
 - **Closure planning** (`closure_parameter`): one reconstruction per level instead of one per closure pass. A plan that does not stabilize is used as an unsaved hint.
 - **Anchored validation** (`selected_source_rows` with `complete_validation_anchor`). Per reconstruction two eliminations are complete: the pilot and the first held-out point of each validation attempt, at a fresh prime and point. All other points eliminate the pilot's dependency subset of original equations. At all six held-out points the reconstruction is still compared with a fresh primal elimination of original IBP rows, so every reconstructed row is certified as an IBP identity exactly as before. What is checked at two independent points instead of ten is that the terminal integrals are free columns of the complete system (basis minimality); a miss there leaves valid identities over a non-minimal basis. `--ibp-validation strict` eliminates every generated equation at every point.
 - **Batched sample records** (`sample_checkpoint_interval` 32); held-out samples are always retained.
+- **Threads.** `--ibp-threads` defaults to the hardware threads idle at start-up; see below.
 - **Budgets.** `--fire-seconds` (default 60) bounds one finite-field elimination, `--level-seconds` (180) one recursion level and `--total-seconds` (600) the whole preparation; a family file can set them as `preparation.fire_seconds`, `level_seconds` and `total_seconds`. Rational coefficients are reconstructed from up to 32 of the 64 available primes.
+
+### Threads
+
+`--ibp-threads N` (`ibp_solver::Options::threads`; 0 in the library means one per hardware thread, the CLI default is the number of hardware threads idle at start-up) lets the provider work ahead wherever the point of an elimination is known before its result is needed.
+
+- **Replays in batches.** The reconstruction announces the points of the samples it is about to request at a prime, leaving out those with a record on disk. Once the trace of that prime is learned and checked, a replay depends on the trace and the point alone. The announced points are then replayed together, each worker in its own workspace, and consumed in ordinal order by the unchanged sequential logic: exceptional points, skips, terminal-set votes and sample records.
+- **Complete eliminations ahead.** A complete elimination depends on the generated equations and the point, not on the targets, the pilot or a trace. Closure planning makes one per pass at a point fixed in advance, and validation makes one at the first held-out point (at every held-out point with `--ibp-validation strict`). While one pass eliminates, the eliminations of the next pass, of the validation and of one pass more run on free threads; later attempts' validation points follow as the reconstruction reaches them. A request adopts such an elimination only if it used the same equations (planning passes usually differ in targets alone, a change of seed bounds discards it), the same fill budget, and no more time than the request has left.
+
+Whatever was computed ahead is used only where the requesting thread would have computed exactly the same. A stale trace, changed equations or any failure on a worker sends the request down the serial path, so errors, skipped points, sample records and reductions are those of one thread, and the cache is byte-identical for every thread count. `ibp_statistics` reports `threads`, `batched_replays`, `early_solves` and `early_solves_used`; all other counts are independent of the thread count, and seconds are summed over threads.
+
+At most three eliminations started ahead wait to be asked for. One that is not used (the planner settled a pass earlier, or a candidate failed before validation) costs processor time and, for its duration, memory, not wall time while threads are free; on a machine whose cores are busy it competes with the useful ones, which is why the CLI leaves busy cores alone by default. `--fire-seconds` bounds every probe as before. An elimination started ahead may run until the deadline of the provider call that announced it, but its result is adopted only if it took no longer than the requesting probe may. Trace learning, subset eliminations and the rational-function fits stay on the requesting thread.
 
 An exceptional sample point (a pole of an input coefficient, or a point whose terminal set differs from the reference set) is skipped, at most `max_skipped_samples` (4) times per reconstruction, and recorded as `skipped_samples` so a resumed run uses the same points. A trace that exceeds its node, fill or time budget is disabled for that prime (`traces_disabled` in `ibp_statistics`) and sampling continues by primal elimination. `ibp_statistics` reports complete (`full_solves`) and subset (`subset_solves`) eliminations separately.
 

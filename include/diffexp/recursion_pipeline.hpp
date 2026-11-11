@@ -40,7 +40,8 @@ struct NumericalOptions {
   slong working_bits=384;
   // The exact endpoint series is summed at the overlap point, at most
   // 1/overlap_ratio of the way to the nearest other singular point, where the
-  // transport takes over: its tail is overlap_ratio^-endpoint_order. A wider
+  // transport takes over: its tail is overlap_ratio^-endpoint_order. Each
+  // endpoint has its own overlap point (EndpointGeometry). A wider
   // ratio buys a shorter series (whose exact cost grows faster than its
   // order) for a few more charts next to the endpoint. Zero selects the pair
   // for a 2^-128 tail: 64 and 22, or 16 and 32 for a recursion specialised
@@ -87,9 +88,18 @@ struct NumericalOptions {
   gaussian::Budget gaussian;
 };
 struct EndpointGeometry {
-  Rational overlap;
+  // Each endpoint has its own overlap, the distance from it of the point
+  // where its exact series is summed: it follows from the distance of that
+  // endpoint to the nearest other singular point (lower_/upper_nearest_pole,
+  // a lower bound; zero if its coefficients have no such point). A singular
+  // point next to one end does not shorten the series' reach at the other.
+  Rational lower_overlap,upper_overlap;
+  // Of both endpoints, each in the coordinate that has its endpoint at zero.
   std::vector<kernel::ComplexBall> nonzero_poles;
+  // The smaller of the two distances.
   NativeTailMagnitude nearest_pole_lower;
+  NativeTailMagnitude lower_nearest_pole,upper_nearest_pole;
+  const Rational& overlap(bool upper)const {return upper?upper_overlap:lower_overlap;}
 };
 struct NumericalStatistics {
   std::size_t component_transports=0,component_slots=0,component_rectangular_slots=0;
@@ -598,8 +608,8 @@ class Evaluator {
   // boundary, where its exact series is summed.
   Rational matching_point(std::size_t depth,const Plan& prepared)const {
     const auto& node=graph_.nodes[depth];
-    return node.boundary==BoundarySite::lower?prepared.geometry.overlap:
-      node.boundary==BoundarySite::upper?Rational(1)-prepared.geometry.overlap:node.anchor;
+    return node.boundary==BoundarySite::lower?prepared.geometry.lower_overlap:
+      node.boundary==BoundarySite::upper?Rational(1)-prepared.geometry.upper_overlap:node.anchor;
   }
   // Lowest epsilon order of the boundary map, at most zero.
   int boundary_map_low(const Plan& prepared)const {
@@ -944,7 +954,7 @@ class Evaluator {
   // the cut decides how far the base operator must be known, and the base
   // operator's low how far V must be expanded.
   LaurentRows pulled_back_operator(Plan& base,const Matrix& map,bool upper,int high) {
-    const auto h=graph_.dimension.constant(base.geometry.overlap);
+    const auto h=graph_.dimension.constant(base.geometry.overlap(upper));
     const auto at=upper?graph_.dimension.constant(1)-h:h;
     const auto& known=upper?base.upper_operator:base.lower_operator;
     // An operator's low is structural, so a retained one predicts the V window.
@@ -1167,7 +1177,8 @@ class Evaluator {
       if(node.analytic_solutions && determination.analytic_dimension!=node.analytic_solutions)
         throw std::domain_error("level "+std::to_string(depth+1)+": "+std::to_string(determination.analytic_dimension)+
           " local solutions are analytic at the endpoint in this dimension, "+std::to_string(node.analytic_solutions)+" in general");
-      result->boundary_map=endpoint_boundary::taylor_map(*carrier.physical_frame,determination,result->geometry.overlap);
+      result->boundary_map=endpoint_boundary::taylor_map(*carrier.physical_frame,determination,
+        result->geometry.overlap(node.boundary==BoundarySite::upper));
       report(depth,std::string(node.boundary==BoundarySite::upper?"upper":"lower")+" endpoint boundary: "+
         std::to_string(determination.analytic_dimension)+" analytic local solutions of "+std::to_string(d)+
         " fixed by the masters at the endpoint; epsilon order of the map from "+std::to_string(boundary_map_low(*result)),desired_top);
@@ -1179,11 +1190,12 @@ class Evaluator {
       namespace fr=ft_functional_reduction;
       Matrix weight(result->lower.functionals.size(),std::vector<Exact>(d,graph_.dimension.constant(0)));
       for(std::size_t i=0;i<result->beta_indices.size();++i)weight[result->beta_indices[i]]=result->beta_rows[i];
-      const auto h=graph_.dimension.constant(result->geometry.overlap);
+      const auto h=graph_.dimension.constant(result->geometry.lower_overlap);
+      const auto upper_h=graph_.dimension.constant(result->geometry.upper_overlap);
       fr::Functional functional{result->gauge.matrix,
         fr::detail::at(*result->lower.direct_operator,xi_,h),weight,
-        fr::detail::at(*result->upper.direct_operator,xi_,h),
-        h,graph_.dimension.constant(1)-h,xi_,ei_};
+        fr::detail::at(*result->upper.direct_operator,xi_,upper_h),
+        h,graph_.dimension.constant(1)-upper_h,xi_,ei_};
       if(!fr::epsilon_regular(functional)) {
         ++statistics_.functional_reduction_attempts;
         fr::SearchOptions limits;limits.seconds=1;limits.pole_order=1;limits.spatial_degree=2;
@@ -1208,16 +1220,19 @@ class Evaluator {
       }
     }
     if(constraints)report(depth,"physical endpoint zero constraints "+std::to_string(constraints),desired_top);
-    report(depth,"endpoint overlap="+result->geometry.overlap.str(),desired_top);
+    report(depth,"endpoint overlap="+result->geometry.lower_overlap.str()+" (lower), "+result->geometry.upper_overlap.str()+" (upper)",desired_top);
     return result;
   }
   EndpointGeometry endpoint_clearance(const Endpoint& lower,const Endpoint& upper)const {
     using M=NativeTailMagnitude;
-    EndpointGeometry result{Rational("1/2"),{},M::zero()};
+    EndpointGeometry result{Rational("1/2"),Rational("1/2"),{},M::zero(),M::zero(),M::zero()};
+    bool found[2]={false,false};
     const auto& sample=graph_.dimension;auto epsilon=sample.variable(ei_),x=sample.variable(xi_);
     const auto& names=sample.variables();auto ii=std::find(names.begin(),names.end(),"I");
-    std::set<std::string> seen;
+    // A polynomial may occur at both endpoints, in their two coordinates.
+    std::set<std::pair<bool,std::string>> seen;
     for(const auto* endpoint:{&lower,&upper})for(const auto& coefficient:endpoint->clearance_coefficients) {
+      const bool above=endpoint==&upper;
       // Keep the denominator before specializing: a numerator cancellation at
       // epsilon=0 must not hide poles present in higher epsilon coefficients.
       auto p=coefficient.denominator();
@@ -1230,25 +1245,35 @@ class Evaluator {
       auto origin=fuchsify::detail::valuation(p,xi_);if(origin)p=p/x.pow(origin);
       if(p.is_rational())continue;
       p=p/p.constant(p.numerator_terms()[0].coefficient);
-      if(!seen.insert(p.str()).second)continue;
+      if(!seen.insert({above,p.str()}).second)continue;
       auto roots=polynomial_roots(p,xi_,128);
       for(auto& root:roots) {
         auto bound=M::lower_abs(root);
         if(bound.is_zero() || !bound.is_finite())throw std::domain_error("nonzero endpoint pole cannot be separated from zero at the root-isolation precision");
         if(result.nonzero_poles.empty() || result.nearest_pole_lower>bound)result.nearest_pole_lower=bound;
+        auto& nearest=above?result.upper_nearest_pole:result.lower_nearest_pole;
+        if(!found[above] || nearest>bound)nearest=bound;
+        found[above]=true;
         result.nonzero_poles.push_back(std::move(root));
       }
     }
     // This proves a geometric convergence margin for the formal epsilon
     // coefficients. It does not certify the omitted affine Taylor tail.
+    // Each end separately, from the distance to its own nearest singular point.
     const unsigned long ratio=options_.overlap_ratio;
-    for(unsigned halvings=0;halvings<options_.max_overlap_halvings;++halvings) {
-      const auto upper=M::upper_abs(B::from_strings(result.overlap.str()));
-      if(result.overlap<=options_.overlap && result.overlap<=Rational(1)/Rational(static_cast<long>(ratio)) &&
-          (result.nonzero_poles.empty() || upper*M::from_ui(ratio)<=result.nearest_pole_lower))return result;
-      result.overlap=result.overlap/Rational(2);
+    for(const bool above:{false,true}) {
+      auto& overlap=above?result.upper_overlap:result.lower_overlap;
+      const auto& nearest=above?result.upper_nearest_pole:result.lower_nearest_pole;
+      bool settled=false;
+      for(unsigned halvings=0;halvings<options_.max_overlap_halvings && !settled;++halvings) {
+        const auto size=M::upper_abs(B::from_strings(overlap.str()));
+        if(overlap<=options_.overlap && overlap<=Rational(1)/Rational(static_cast<long>(ratio)) &&
+            (!found[above] || size*M::from_ui(ratio)<=nearest))settled=true;
+        else overlap=overlap/Rational(2);
+      }
+      if(!settled)throw std::runtime_error("recursive geometric endpoint-overlap budget exhausted");
     }
-    throw std::runtime_error("recursive geometric endpoint-overlap budget exhausted");
+    return result;
   }
   void check_endpoint_constraint(const LaurentBoundary& value,unsigned row,const std::string& label) {
     const auto tolerance=NativeTailMagnitude::lower_abs(B::from_strings(options_.endpoint_constraint_tolerance.str()));
@@ -1375,8 +1400,8 @@ class Evaluator {
       const auto& rewritten=upper?prepared.rewritten_upper:prepared.rewritten_lower;
       if(prepared.pullback_base)saved=pulled_back_operator(*prepared.pullback_base,prepared.pullback_map,upper,high);
       else if(!prepared.pullback_map.empty())throw std::logic_error("a screening plan cannot extend its endpoint operators");
-      else if(rewritten)saved=exact_laurent_rows(*rewritten,graph_.dimension.constant(prepared.geometry.overlap),high);
-      else saved=endpoint_operator(upper?prepared.upper:prepared.lower,prepared.geometry.overlap,high);
+      else if(rewritten)saved=exact_laurent_rows(*rewritten,graph_.dimension.constant(prepared.geometry.overlap(upper)),high);
+      else saved=endpoint_operator(upper?prepared.upper:prepared.lower,prepared.geometry.overlap(upper),high);
     }
     return *saved;
   }
@@ -1484,8 +1509,8 @@ class Evaluator {
     for(unsigned i=0;i<prepared.beta_indices.size();++i)forcing[prepared.beta_indices[i]]=prepared.beta_rows[i];
     auto upper_forcing=forcing;for(auto& row:upper_forcing)for(auto& entry:row)entry=-entry;
     (void)node;
-    const auto anchor=sample.constant(matching_point(depth,prepared)),h=sample.constant(prepared.geometry.overlap),
-      end=sample.constant(Rational(1)-prepared.geometry.overlap);
+    const auto anchor=sample.constant(matching_point(depth,prepared)),h=sample.constant(prepared.geometry.lower_overlap),
+      end=sample.constant(Rational(1)-prepared.geometry.upper_overlap);
     return {prepared.gauge.matrix,std::move(forcing),std::move(upper_forcing),
       std::move(left),std::move(right),path(h,anchor,depth,prepared),path(end,anchor,depth,prepared),prepared.gauge.shifts};
   }
@@ -1567,7 +1592,7 @@ class Evaluator {
   }
   LaurentBoundary evaluate_factored(std::size_t depth,unsigned desired_top,Plan& prepared) {
     const auto& node=graph_.nodes[depth];const auto sample=graph_.dimension;
-    const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.overlap),end=sample.constant(Rational(1)-prepared.geometry.overlap);
+    const auto anchor=sample.constant(node.anchor),h=sample.constant(prepared.geometry.lower_overlap),end=sample.constant(Rational(1)-prepared.geometry.upper_overlap);
     Matrix beta(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
     for(unsigned i=0;i<prepared.beta_indices.size();++i)beta[prepared.beta_indices[i]]=prepared.beta_rows[i];
     int beta_low=0;

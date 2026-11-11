@@ -79,7 +79,7 @@ int main(){try {
   fails([&]{near_solver.evaluate(0);},"geometry ready");
   require(near_solver.statistics().endpoint_series_built==2,"both endpoint series are built exactly once per plan");
   const auto& clearance=near_solver.endpoint_geometry(0);
-  require(clearance.overlap<=Rational("1/1600") && clearance.nearest_pole_lower.approximate_upper()>0.009999 && clearance.nearest_pole_lower.approximate_upper()<0.010001,"endpoint overlap must resolve poles hidden at epsilon zero");
+  require(clearance.lower_overlap<=Rational("1/1600") && clearance.lower_overlap<clearance.upper_overlap && clearance.nearest_pole_lower.approximate_upper()>0.009999 && clearance.nearest_pole_lower.approximate_upper()<0.010001,"endpoint overlap must resolve poles hidden at epsilon zero");
   // Compare the new endpoint route in original transport coordinates, including
   // the epsilon gauge, coupled modes, and automatic fallback on the other end.
   auto functional_graph=near;
@@ -124,7 +124,10 @@ int main(){try {
   }
   recursion::Evaluator solver(graph,observed);auto result=solver.evaluate(0);
   const auto& geometry=solver.endpoint_geometry(0);
-  require(geometry.overlap<=observed.overlap && NativeTailMagnitude::upper_abs(B::from_strings(geometry.overlap.str()))*NativeTailMagnitude::from_ui(16)<=geometry.nearest_pole_lower,"geometric endpoint margin must be proven from all nonzero pole enclosures");
+  for(const bool above:{false,true}) {
+    const auto& overlap=geometry.overlap(above);const auto& nearest=above?geometry.upper_nearest_pole:geometry.lower_nearest_pole;
+    require(overlap<=observed.overlap && (nearest.is_zero() || NativeTailMagnitude::upper_abs(B::from_strings(overlap.str()))*NativeTailMagnitude::from_ui(16)<=nearest),"geometric endpoint margin must be proven from all nonzero pole enclosures of each endpoint");
+  }
   require(!result.taylor_tail_certified && result.values.size()==3,"nonleaf finite endpoint/ordinary series must remain explicitly uncertified");
   auto reference=oracle::equal_banana_bessel(2).value;
   require(upper(result.values[0][-result.low]-reference)<1e-20,"generic sunrise FT recursion disagrees with independent Bessel oracle");

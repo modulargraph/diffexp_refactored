@@ -35,7 +35,7 @@ int main(){try{
  check(selected.connection[0][0].is_zero(),"full-validation candidate differs from screened exact coordinate");
  // The upper operator is expressed at physical x=1-h, not reversed x=h.
  // V=1+x, so Enew=Eold*(2-h)=2. Compare complete retained jets, including zeros.
- auto h=graph.dimension.constant(original.endpoint_geometry(0).overlap);
+ auto h=graph.dimension.constant(original.endpoint_geometry(0).upper_overlap);
  auto v=exact_laurent_rows({{one+x}},one-h,3);
  auto composed=linear_boundary::compose(old.right,v,3);
  for(int k=0;k<=3;++k){const auto& lhs=selected.right.coefficients[0][0][k-selected.right.low];

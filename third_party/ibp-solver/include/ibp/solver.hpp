@@ -60,7 +60,11 @@ class Solver {
  }
  public:
  Solver(const Program& program,const Field& field,SolveOptions options={}):program_(program),field_(field),options_(options),lookup_(program.integrals.size(),-1){}
- void solve(Word dimension,const std::vector<std::uint32_t>* selected=nullptr){started_=std::chrono::steady_clock::now();pivots_.clear();std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};
+ // `kept` continues an elimination: pivots of a subsystem of this program,
+ // in this program's columns and equation indices. With them, `selected`
+ // names the equations that subsystem did not contain.
+ void solve(Word dimension,const std::vector<std::uint32_t>* selected=nullptr,std::vector<Pivot> kept={}){started_=std::chrono::steady_clock::now();pivots_=std::move(kept);std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};
+  for(std::size_t i=0;i<pivots_.size();++i){const auto& row=pivots_[i].row;if(row.empty()||row.front().column>=lookup_.size()||lookup_[row.front().column]>=0)throw std::invalid_argument("kept pivots are not an echelon basis of this program");lookup_[row.front().column]=i;stats_.fill+=row.size();++stats_.rank;}
   auto insert=[&](std::uint32_t source){if((stats_.equations++&127)==0)budget();Row row;for(const auto& a:program_.equations[source]){auto value=field_.add(a.constant,field_.mul(dimension,a.dimension));if(value)row.push_back({a.column,value});}std::vector<Column> dependencies;
    while(!row.empty()&&lookup_[row.front().column]>=0){auto column=row.front().column;dependencies.push_back(column);row=subtract(row,pivots_[lookup_[column]].row,row.front().value);++stats_.eliminations;if((stats_.eliminations&2047)==0)budget();}
    if(row.empty())return;auto inverse=field_.inv(row.front().value);for(auto& entry:row)entry.value=field_.mul(entry.value,inverse);auto column=row.front().column;stats_.fill+=row.size();lookup_[column]=pivots_.size();pivots_.push_back({std::move(row),source,std::move(dependencies)});++stats_.rank;budget();
@@ -69,8 +73,15 @@ class Solver {
   stats_.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started_).count();
  }
  Row reduce(Row row,std::vector<Column>* touched=nullptr){std::size_t i=0,steps=0;while(i<row.size()){if((steps++&255)==0)budget();if(row[i].column>=lookup_.size())throw std::invalid_argument("reduction column out of range");auto column=row[i].column;if(lookup_[column]<0){++i;continue;}if(touched)touched->push_back(column);auto factor=row[i].value;row=subtract(row,pivots_[lookup_[column]].row,factor);}return row;}
- std::vector<Row> targets(std::vector<Column>* touched=nullptr){std::vector<Row> out;for(auto column:program_.target_columns)out.push_back(reduce({{column,1}},touched));return out;}
- std::vector<std::uint32_t> selection(){std::vector<Column> roots;targets(&roots);std::vector<bool> needed(pivots_.size());auto visit=[&](auto&& self,Column column)->void{auto p=lookup_[column];if(p<0||needed[p])return;needed[p]=true;for(auto dependency:pivots_[p].dependencies)self(self,dependency);};for(auto root:roots)visit(visit,root);std::vector<std::uint32_t> result;for(unsigned p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);std::sort(result.begin(),result.end());return result;}
+ std::vector<Row> targets(std::vector<Column>* touched=nullptr){return targets(program_.target_columns,touched);}
+ std::vector<std::uint32_t> selection(){return selection(program_.target_columns);}
+ // The same for columns other than the program's targets, and what an
+ // elimination that is kept for later needs: a clock of its own for each use
+ // and its pivots.
+ std::vector<Row> targets(const std::vector<Column>& columns,std::vector<Column>* touched=nullptr){std::vector<Row> out;for(auto column:columns)out.push_back(reduce({{column,1}},touched));return out;}
+ void restart(double seconds){options_.seconds=seconds;started_=std::chrono::steady_clock::now();}
+ std::vector<Pivot> release(){std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};return std::move(pivots_);}
+ std::vector<std::uint32_t> selection(const std::vector<Column>& columns){std::vector<Column> roots;targets(columns,&roots);std::vector<bool> needed(pivots_.size());auto visit=[&](auto&& self,Column column)->void{auto p=lookup_[column];if(p<0||needed[p])return;needed[p]=true;for(auto dependency:pivots_[p].dependencies)self(self,dependency);};for(auto root:roots)visit(visit,root);std::vector<std::uint32_t> result;for(unsigned p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);std::sort(result.begin(),result.end());return result;}
  const Statistics& statistics()const{return stats_;}
  std::vector<Column> free_columns()const {std::vector<Column> result;for(unsigned i=0;i<lookup_.size();++i)if(lookup_[i]<0)result.push_back(i);return result;}
 };

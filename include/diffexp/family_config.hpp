@@ -10,7 +10,7 @@ struct Configuration {
   std::vector<ibp::Integral> integrals;
   recursion::Options preparation;
   recursion::NumericalOptions numerical;
-  unsigned epsilon_order=0,ibp_dots=1,ibp_numerators=2;
+  unsigned epsilon_order=0,ibp_dots=1,ibp_numerators=1;
   // The document itself named epsilon_order. A bare example name carries the
   // template's value, which is a default and not a request.
   bool epsilon_order_given=false;

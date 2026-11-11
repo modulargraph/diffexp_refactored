@@ -12,13 +12,25 @@ namespace diffexp::ibp_solver {
 // DiffExp. No momentum reconstruction, renamed family, or new ISP completion.
 struct Options {
   std::filesystem::path cache_directory;
-  unsigned dots=1,numerators=2,max_degree=16,max_variable_degree=64,max_primes=32,probe_timeout_seconds=20;
+  // The seeds every sector starts from. They are the least a reduction is
+  // tried with, not what it is confined to: a requested integral asks for the
+  // seeds that generate it and an integral left unreduced at the edge of the
+  // seeds widens them (see target_seeds and max_seed_widenings).
+  unsigned dots=1,numerators=1,max_degree=16,max_variable_degree=64,max_primes=32,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   // Ordinary samples are recomputed from their deterministic points in a few
   // milliseconds, so only every n-th is made durable; held-out validation
   // samples, which the completion record replays, are always retained.
   std::size_t sample_checkpoint_interval=32;
-  bool degree_slices=false,dots_first=false,target_sector_seeds=false;
+  bool degree_slices=false,dots_first=false;
+  // The sectors that receive, in advance, the seeds that generate a requested
+  // integral (as many numerators, one dot fewer): `none`; `sector`, its own;
+  // `subsectors`, its own and every subsector; `all`, every sector. With
+  // `none` a requested integral is treated as any other: the smaller seeds
+  // often reduce it already, and where they do not it is left unreduced
+  // outside the seeds of its sector, which widens that sector alone.
+  enum class TargetSeeds {none,sector,subsectors,all};
+  TargetSeeds target_seeds=TargetSeeds::none;
   // Sectors proved scaleless from the Symanzik polynomials are zero sectors
   // (scaleless_sectors.hpp); otherwise only those with a free loop momentum.
   bool scaleless_sectors=true;
@@ -26,10 +38,10 @@ struct Options {
   // dots or a higher numerator degree than any seed there) was never the seed
   // of an equation: it is not a master integral but the edge of the system.
   // The seeds of its sector alone are then widened to contain it and the
-  // elimination is repeated, at most this many times for one batch: what the
-  // new equations leave unreduced outside the seeds of a subsector widens
-  // that subsector in the next repetition.
-  unsigned max_seed_widenings=4;
+  // elimination is continued with the new equations, at most this many times
+  // for one batch: what they leave unreduced outside the seeds of a subsector
+  // widens that subsector in the next repetition.
+  unsigned max_seed_widenings=8;
   // Fresh primal eliminations certify a reconstruction (see Sampler). By
   // default each eliminates ALL generated equations. With selected_source_rows
   // only the complete pilot does; later ones eliminate the pilot's dependency
@@ -58,6 +70,11 @@ struct Statistics {
   std::size_t batched_replays=0,early_solves=0,early_solves_used=0;
   // Eliminations repeated with wider seeds (Options::max_seed_widenings).
   std::size_t seed_widenings=0;
+  // Complete eliminations that did not start from nothing (they are not among
+  // full_solves): continued from the pivots of an earlier one at the same
+  // point, with the equations it had not seen, and those needing no new
+  // equation at all. continued_equations counts the equations inserted.
+  std::size_t continued_solves=0,continued_equations=0,reused_solves=0;double continued_solve_seconds=0;
 };
 // Descending primes below 2^61; two beyond the reconstruction primes validate.
 inline constexpr unsigned prime_count=64;
@@ -125,6 +142,22 @@ class Sampler {
     }
     expected_=std::move(next);
   }
+  // The seed bounds widened for the present batch, as (sector, dots,
+  // numerators), and their restoration for a batch whose closure plan recorded
+  // them: a later run then reduces the batch with the equations the plan was
+  // made with, instead of finding the widening again.
+  std::vector<std::array<unsigned,3>> widened()const {
+    std::vector<std::array<unsigned,3>> out;
+    for(std::size_t mask=0;mask<widened_.size();++mask)if(widened_[mask].first||widened_[mask].second)out.push_back({unsigned(mask),widened_[mask].first,widened_[mask].second});
+    return out;
+  }
+  void widen(const std::vector<ibp::Integral>& batch,const std::vector<std::array<unsigned,3>>& bounds) {
+    std::vector<::ibp::Integral> targets;
+    for(const auto& a:batch){fire_batch::validate_index(a,basis_);::ibp::Integral target;for(unsigned i=0;i<a.size();++i)target.powers[i]=a[i];targets.push_back(target);}
+    std::vector<std::pair<unsigned,unsigned>> wider;if(!bounds.empty())wider.resize(std::size_t(1)<<basis_.physical_count);
+    for(const auto& [mask,dots,nums]:bounds){if(mask>=wider.size()||dots>8||nums>8)throw std::invalid_argument("IBP solver widened seed bounds");wider[mask]={dots,nums};}
+    widened_=std::move(wider);widened_for_=targets;std::sort(targets.begin(),targets.end());widened_sorted_=std::move(targets);widenings_=0;
+  }
   // `independent` solves by fresh primal elimination of original rows, without
   // the arithmetic trace. `complete` forces that elimination to use every
   // generated equation even when a dependency subset is available.
@@ -152,25 +185,30 @@ class Sampler {
       for(const auto& a:requested){fire_batch::validate_index(a,basis_);::ibp::Integral target;unsigned dots=0,nums=0;
         for(unsigned i=0;i<a.size();++i){target.powers[i]=a[i];if(a[i]>0)dots+=a[i]-1;else nums-=a[i];}
         // A seed with one fewer dot can produce the requested raised integral.
-        seeds.dots=std::max(seeds.dots,dots?dots-1:0);seeds.numerators=std::max(seeds.numerators,nums);targets.push_back(target);
+        if(options_.target_seeds==Options::TargetSeeds::all){seeds.dots=std::max(seeds.dots,dots?dots-1:0);seeds.numerators=std::max(seeds.numerators,nums);}
+        targets.push_back(target);
       }
       std::vector<std::pair<unsigned,unsigned>> sector_bounds;
-      if(options_.target_sector_seeds){
+      if(options_.target_seeds!=Options::TargetSeeds::all){
         sector_bounds.resize(std::size_t(1)<<basis_.physical_count,{options_.dots,options_.numerators});
-        for(const auto& target:requested){unsigned dots=0,nums=0;for(int power:target){if(power>0)dots+=power-1;else nums-=power;}
+        if(options_.target_seeds!=Options::TargetSeeds::none)for(const auto& target:requested){unsigned dots=0,nums=0;for(int power:target){if(power>0)dots+=power-1;else nums-=power;}
           const auto mask=sector(target);for(std::size_t sub=mask;;sub=(sub-1)&mask){
-            auto& bound=sector_bounds[sub];bound.first=std::max(bound.first,dots?dots-1:0);bound.second=std::max(bound.second,nums);if(!sub)break;}
-}
+            auto& bound=sector_bounds[sub];bound.first=std::max(bound.first,dots?dots-1:0);bound.second=std::max(bound.second,nums);
+            if(!sub||options_.target_seeds==Options::TargetSeeds::sector)break;}
+        }
       }
-      // Widened seeds belong to the batch they were found for, so that the
-      // equations of a batch do not depend on what was reduced before it.
-      if(targets!=widened_for_){widened_.clear();widened_for_=targets;widenings_=0;}
-      if(!widened_.empty()){
-        if(sector_bounds.empty())sector_bounds.assign(std::size_t(1)<<basis_.physical_count,{seeds.dots,seeds.numerators});
-        for(std::size_t mask=0;mask<sector_bounds.size();++mask){auto& bound=sector_bounds[mask];
-          bound.first=std::max(bound.first,widened_[mask].first);bound.second=std::max(bound.second,widened_[mask].second);
-          seeds.dots=std::max(seeds.dots,bound.first);seeds.numerators=std::max(seeds.numerators,bound.second);}
-      }
+      // Widened seeds belong to the batch they were found for and to every
+      // batch that contains it: the batches of a closure plan only grow, and
+      // so do their equations, which lets an elimination continue from the
+      // one before it. Any other batch starts from its own seeds.
+      if(targets!=widened_for_){
+        auto sorted=targets;std::sort(sorted.begin(),sorted.end());
+        if(!std::includes(sorted.begin(),sorted.end(),widened_sorted_.begin(),widened_sorted_.end()))widened_.clear();
+        widened_for_=targets;widened_sorted_=std::move(sorted);widenings_=0;}
+      if(!widened_.empty()&&sector_bounds.empty())sector_bounds.assign(std::size_t(1)<<basis_.physical_count,{seeds.dots,seeds.numerators});
+      for(std::size_t mask=0;mask<sector_bounds.size();++mask){auto& bound=sector_bounds[mask];
+        if(!widened_.empty()){bound.first=std::max(bound.first,widened_[mask].first);bound.second=std::max(bound.second,widened_[mask].second);}
+        seeds.dots=std::max(seeds.dots,bound.first);seeds.numerators=std::max(seeds.numerators,bound.second);}
       seeds.max_terms=limits.memory_bytes/64;seeds.max_seeds=std::size_t(1)<<30;seeds.max_states=std::size_t(1)<<34;seeds.seconds=remaining();
       if(!seeds.max_terms)throw std::invalid_argument("IBP solver memory budget too small");
       if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms||plan_->bounds!=sector_bounds){
@@ -206,12 +244,22 @@ class Sampler {
       // same rowspace identities, but does not certify full-system minimality.
       // Check the first changed point too, before using a learned trace alone.
       if(independent||!replayed||!learned.checked){
-        std::unique_ptr<::ibp::Solver> owned;std::shared_ptr<Elimination> early;::ibp::Solver* solver=nullptr;
+        std::shared_ptr<Owned> owned;std::shared_ptr<Elimination> early;std::shared_ptr<void> held;::ibp::Solver* solver=nullptr;
         std::vector<::ibp::Row> full;std::optional<std::vector<std::uint32_t>> dependencies;
         auto terminals=[](const auto& reduced){std::set<::ibp::Column> out;for(const auto& row:reduced)for(const auto& entry:row)out.insert(entry.column);return out;};
+        // A point is revisited by a wider batch or wider seeds; a held-out
+        // point is not, once the seeds of its batch are known to suffice.
+        const bool revisited=!independent||!plan_->contained;
         auto primal=[&](bool selected){
           auto started=std::chrono::steady_clock::now();double seconds=0;
-          const auto* sources=selected?&*plan_->selection:nullptr;dependencies.reset();early.reset();
+          const auto* sources=selected?&*plan_->selection:nullptr;dependencies.reset();early.reset();owned.reset();
+          // A complete elimination of these equations at this point is kept:
+          // only the targets are reduced.
+          Kept* kept=selected?nullptr:find_kept({modulus,point},solve.max_fill);
+          if(kept&&kept->system==plan_->system){
+            held=kept->owner;solver=kept->solver;solver->restart(remaining());full=solver->targets(program.target_columns);
+            ++stats_.reused_solves;stats_.continued_solve_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();return;
+          }
           if(!selected&&(early=adopt({modulus,point},solve.max_fill,remaining()))){
             // Its seconds count once: not those this thread spent waiting for it.
             elsewhere+=std::max(0.0,early->seconds-std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count());
@@ -222,19 +270,30 @@ class Sampler {
             // now, the elimination is repeated with a budget of its own.
             else try{early->program.target_columns=program.target_columns;full=early->solver->targets();dependencies=early->solver->selection();}
               catch(const std::runtime_error&){early.reset();}
-            if(early){solver=&*early->solver;seconds=early->seconds;++stats_.early_solves_used;}
+            if(early){solver=&*early->solver;seconds=early->seconds;++stats_.early_solves_used;
+              if(revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,early});}
           }
+          std::optional<Continued> continued;
           if(!early){
+            // A kept elimination of fewer equations at this point continues
+            // with the equations it has not seen.
+            started=std::chrono::steady_clock::now();
+            if(kept)continued=continue_from(*kept,parametric);
+            if(kept)drop_kept({modulus,point});
+            if(continued)sources=&continued->rows;
             // Rebind ALL original rows on fallback, including those left at an
             // earlier point or prime by the preceding subset solve.
-            started=std::chrono::steady_clock::now();parametric.bind(values,field,sources);solve.seconds=remaining();
-            owned=std::make_unique<::ibp::Solver>(program,field,solve);owned->solve(0,sources);solver=owned.get();full=solver->targets();
+            parametric.bind(values,field,sources);solve.seconds=remaining();
+            owned=std::make_shared<Owned>(modulus,plan_->program,solve);solver=&owned->solver;
+            solver->solve(0,sources,continued?std::move(continued->pivots):std::vector<::ibp::Pivot>{});full=solver->targets();
+            if(!selected&&revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,owned});
           }
           seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
           if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;}
+          else if(continued){++stats_.continued_solves;stats_.continued_equations+=continued->rows.size();stats_.continued_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
-        auto selection=[&]()->const std::vector<std::uint32_t>&{if(!dependencies)dependencies=solver->selection();return *dependencies;};
+        auto selection=[&]()->const std::vector<std::uint32_t>&{if(!dependencies)dependencies=solver->selection(program.target_columns);return *dependencies;};
         bool selected=options_.selected_source_rows&&plan_->selection.has_value()&&!complete;primal(selected);
         // The first complete elimination of a batch shows whether its seeds
         // contain every integral it leaves unreduced.
@@ -251,7 +310,7 @@ class Sampler {
           }
           if(!wider.empty()){
             widened_=std::move(wider);++widenings_;++stats_.seed_widenings;
-            if(options_.progress)options_.progress("integral "+example+" is left unreduced outside the seeds of its sector; widening the seeds of that sector");
+            if(options_.progress)options_.progress("integral "+example+" is left unreduced outside the seeds of its sector; widening the seeds of "+std::to_string(std::count_if(widened_.begin(),widened_.end(),[](const auto& w){return w.first||w.second;}))+" sectors");
             auto again=limits;again.timeout_seconds=std::max(1u,static_cast<unsigned>(remaining()));
             return (*this)(requested,point,modulus,again,independent,complete);
           }
@@ -358,6 +417,56 @@ class Sampler {
     explicit Elimination(modular::Word modulus):field(modulus){}
   };
   struct Expected {Point at;std::shared_ptr<Elimination> task;std::chrono::steady_clock::time_point until;};
+  // A complete elimination this thread made, with what its solver refers to.
+  struct Owned {
+    ::ibp::Field field;std::shared_ptr<const ::ibp::ParametricProgram> source;::ibp::Solver solver;
+    Owned(modular::Word modulus,std::shared_ptr<const ::ibp::ParametricProgram> program,const ::ibp::SolveOptions& options)
+      :field(modulus),source(std::move(program)),solver(source->program,field,options){}
+  };
+  // The last complete eliminations, by point. The batches of a closure plan
+  // are reduced at the same two points, each a superset of the one before:
+  // the same equations then need no elimination, and more equations only the
+  // elimination of the new ones (continue_from).
+  struct Kept {Point at;std::size_t system=0,max_fill=0;std::vector<bool> zero_sectors;std::shared_ptr<const ::ibp::ParametricProgram> program;::ibp::Solver* solver=nullptr;std::shared_ptr<void> owner;};
+  static constexpr std::size_t kept_points=2;
+  Kept* find_kept(const Point& at,std::size_t max_fill) {
+    for(auto& kept:kept_)if(kept.at==at&&kept.max_fill==max_fill&&kept.zero_sectors==plan_->zero_sectors)return &kept;
+    return nullptr;
+  }
+  void drop_kept(const Point& at){std::erase_if(kept_,[&](const Kept& kept){return kept.at==at;});}
+  void keep(Kept kept){drop_kept(kept.at);if(kept_.size()==kept_points)kept_.erase(kept_.begin());kept_.push_back(std::move(kept));}
+  // What continues a kept elimination under the present equations: its pivots
+  // in the present columns and equation indices, and the equations it has not
+  // seen. Nothing unless every equation it eliminated is, term for term, one
+  // of the present equations and the columns keep their order: the pivots are
+  // then an echelon basis of a subspace of the present row space, inserting
+  // the remaining equations completes it, and the reduced targets, which are
+  // normal forms modulo that row space, are those of an elimination from
+  // nothing. The kept elimination gives up its pivots.
+  struct Continued {std::vector<::ibp::Pivot> pivots;std::vector<std::uint32_t> rows;};
+  struct OriginHash {std::size_t operator()(const ::ibp::ParametricProgram::Origin& o)const{return ::ibp::IntegralHash{}(o.seed)*1099511628211ULL^o.op;}};
+  static std::optional<Continued> continue_from(Kept& kept,const ::ibp::ParametricProgram& now) {
+    const auto& old=*kept.program;constexpr auto absent=std::numeric_limits<::ibp::Column>::max();
+    if(old.input_count!=now.input_count||old.constant_inputs!=now.constant_inputs||old.origins.size()!=old.program.equations.size()||now.origins.size()!=now.program.equations.size())return std::nullopt;
+    std::unordered_map<::ibp::Integral,::ibp::Column,::ibp::IntegralHash> ids;ids.reserve(now.program.integrals.size());
+    for(::ibp::Column i=0;i<now.program.integrals.size();++i)ids.emplace(now.program.integrals[i],i);
+    std::vector<::ibp::Column> column(old.program.integrals.size(),absent);::ibp::Column last=absent;
+    for(std::size_t i=0;i<column.size();++i)if(auto it=ids.find(old.program.integrals[i]);it!=ids.end()){
+      if(last!=absent&&it->second<=last)return std::nullopt;column[i]=last=it->second;}
+    std::unordered_map<::ibp::ParametricProgram::Origin,std::uint32_t,OriginHash> origins;origins.reserve(now.origins.size());
+    for(std::uint32_t i=0;i<now.origins.size();++i)if(!origins.emplace(now.origins[i],i).second)return std::nullopt;
+    std::vector<std::uint32_t> equation(old.origins.size());std::vector<bool> seen(now.origins.size());
+    for(std::size_t i=0;i<old.origins.size();++i){
+      auto it=origins.find(old.origins[i]);if(it==origins.end())return std::nullopt;
+      const auto j=it->second;const auto& a=old.program.equations[i];const auto& b=now.program.equations[j];if(a.size()!=b.size()||seen[j])return std::nullopt;
+      for(std::size_t t=0;t<a.size();++t)if(column[a[t].column]!=b[t].column||old.coefficients[i][t].constant!=now.coefficients[j][t].constant||old.coefficients[i][t].terms!=now.coefficients[j][t].terms)return std::nullopt;
+      equation[i]=j;seen[j]=true;
+    }
+    Continued out;for(std::uint32_t j=0;j<seen.size();++j)if(!seen[j])out.rows.push_back(j);
+    out.pivots=kept.solver->release();
+    for(auto& pivot:out.pivots){pivot.source=equation.at(pivot.source);for(auto& entry:pivot.row)entry.column=column.at(entry.column);for(auto& c:pivot.dependencies)c=column.at(c);}
+    return out;
+  }
   std::size_t running() {
     std::erase_if(tasks_,[](auto& task){const std::lock_guard lock(task.second->mutex);return task.second->finished;});return tasks_.size();
   }
@@ -409,7 +518,8 @@ class Sampler {
   }
   ::ibp::InputGeometry input_geometry_;std::vector<Exact> inputs_;std::unique_ptr<Plan> plan_;
   // Seed bounds per sector widened for the present batch of targets.
-  std::vector<std::pair<unsigned,unsigned>> widened_;std::vector<::ibp::Integral> widened_for_;unsigned widenings_=0;
+  std::vector<std::pair<unsigned,unsigned>> widened_;std::vector<::ibp::Integral> widened_for_,widened_sorted_;unsigned widenings_=0;
+  std::vector<Kept> kept_;
   ibp::PropagatorBasis basis_;Exact dimension_;Options options_;Statistics stats_;
   std::vector<std::vector<ibp::Affine>> contractions_;std::vector<bool> trace_,zero_sectors_;
   unsigned threads_=1;std::uint64_t state_=0;std::size_t systems_=0;
@@ -444,7 +554,7 @@ class Session {
     if(!options_.closure_parameter)throw std::invalid_argument("IBP master count needs a closure parameter");
     const auto parameter=*options_.closure_parameter;
     auto science=fire_batch::identity(basis_,dimension_,field_,requested,limits).json_value();
-    boost::json::object identity{{"science",science},{"parameter",parameter},{"counter","one-point-derivative-closure-v2"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_sector_seeds",options_.target_sector_seeds},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+    boost::json::object identity{{"science",science},{"parameter",parameter},{"counter","one-point-derivative-closure-v3"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
     const auto key=artifacts::detail::sha256(artifacts::detail::canonical(identity));
     const auto path=options_.cache_directory/"master-counts"/(key+".json");
     if(std::filesystem::exists(path)){
@@ -460,7 +570,7 @@ class Session {
       const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
       if(elapsed>=limits.timeout_seconds||demanded.size()>50000)throw std::runtime_error("IBP master count budget");
       auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
-      auto reduced=(*sampler_)({demanded.begin(),demanded.end()},modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass),prime(1),receiving);
+      auto reduced=(*sampler_)({demanded.begin(),demanded.end()},modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base),prime(1),receiving);
       if(!reduced.success)throw std::runtime_error("IBP master count failed: "+reduced.reason);
       std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.residues.value())for(const auto& [master,c]:row)found.insert(master);
       const auto before=demanded.size();
@@ -471,13 +581,13 @@ class Session {
     // The stable demands are what closure planning would find: leave them as
     // its hint, so that preparing the chosen level does not plan again.
     {
-      boost::json::object plan_identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v3"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_sector_seeds",options_.target_sector_seeds},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+      boost::json::object plan_identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v4"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
       const auto plan_key=artifacts::detail::sha256(artifacts::detail::canonical(plan_identity));
       const auto plan_path=options_.cache_directory/"closure-plans"/(plan_key+".json");
       if(!std::filesystem::exists(plan_path)){
         boost::json::array rows;for(const auto& a:demanded){boost::json::array row;for(int power:a)row.push_back(power);rows.push_back(row);}
         std::filesystem::create_directories(plan_path.parent_path());
-        fire_modular::detail::save(plan_path,{{"schema","DiffExp.IBPClosurePlan/v1"},{"identity",plan_key},{"planning_hint_only",true},{"demands",rows}});
+        fire_modular::detail::save(plan_path,{{"schema","DiffExp.IBPClosurePlan/v1"},{"identity",plan_key},{"planning_hint_only",true},{"demands",rows},{"widened_seeds",widened_json()}});
       }
     }
     std::filesystem::create_directories(path.parent_path());
@@ -491,7 +601,7 @@ class Session {
     const auto parameter=*options_.closure_parameter;
     if(parameter>=dimension_.variable_count()||!options_.max_planning_passes||options_.max_planning_passes>16)throw std::invalid_argument("invalid finite-field closure planning bounds");
     auto science=fire_batch::identity(basis_,dimension_,field_,requested,limits).json_value();
-    boost::json::object identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v3"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_sector_seeds",options_.target_sector_seeds},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+    boost::json::object identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v4"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
     const auto key=artifacts::detail::sha256(artifacts::detail::canonical(identity));
     const auto path=options_.cache_directory/"closure-plans"/(key+".json");
     std::set<ibp::Integral,ibp::IntegralOrder> demanded(requested.begin(),requested.end());
@@ -505,36 +615,28 @@ class Session {
         if(!planned.insert(a).second)throw std::runtime_error("duplicate closure plan demand");
       }
       for(const auto& a:requested)if(!planned.contains(a))throw std::runtime_error("closure plan omitted an original request");
+      if(auto bounds=cached.if_contains("widened_seeds")){std::vector<std::array<unsigned,3>> wider;
+        for(const auto& entry:bounds->as_array()){const auto& b=entry.as_array();if(b.size()!=3)throw std::runtime_error("closure plan seed bounds");wider.push_back({b[0].to_number<unsigned>(),b[1].to_number<unsigned>(),b[2].to_number<unsigned>()});}
+        sampler_->widen({planned.begin(),planned.end()},wider);}
       ++planning_.cache_hits;planning_.demands=planned.size();if(options_.progress)options_.progress("reused derivative-closure planning hint; exact reconstruction and closure checks remain required");
       return {planned.begin(),planned.end()};
     }
     ibp::Generator generator(basis_,dimension_);
-    // Every pass begins with a complete elimination at a point fixed in
-    // advance and, while the demands leave the seed bounds alone, of the same
-    // equations; so does the validation of the reconstruction that follows.
-    // A pass therefore announces the eliminations of the pass after it, of
-    // that validation and of one pass more, in this order of likelihood: a
-    // plan that settles in three passes waits for one elimination, not four.
-    // Without selected rows the check at the second point is complete too.
-    // Once planning ends only the validation's remain expected.
+    // Every pass reduces its batch at the same two points, and the batches
+    // only grow: the complete elimination of a pass continues from that of
+    // the pass before it with the equations that are new, and needs none
+    // while the seeds stay as they are (Sampler::continue_from). What can be
+    // started ahead is the validation of the reconstruction that follows.
     std::vector<Sampler::Point> held;
     if(sampler_->works_ahead())try{held=complete(options_.selected_source_rows,options_.complete_validation_anchor,session_.held_out(limits,2));}catch(const std::exception&){}
-    auto left=[&]{return limits.timeout_seconds-duration<double>(steady_clock::now()-started).count();};
-    struct Forget{Sampler& sampler;const std::vector<Sampler::Point>& held;double seconds;~Forget(){sampler.anticipate(held,seconds);}}forget{*sampler_,held,double(limits.timeout_seconds)};
-    auto expect=[&](unsigned pass){std::vector<Sampler::Point> points;const auto next=std::max(pass,1u);if(!sampler_->works_ahead())return;
-      for(auto p=pass;p<=next+1&&p<options_.max_planning_passes;++p){
-        for(unsigned check=0;check<(options_.selected_source_rows?1u:2u);++check)points.push_back({prime(1),modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*p+check)});
-        if(p==next)points.insert(points.end(),held.begin(),held.end());
-      }
-      sampler_->anticipate(std::move(points),left());};
+    sampler_->anticipate(held,limits.timeout_seconds);
     for(unsigned pass=0;pass<options_.max_planning_passes;++pass){
-      expect(pass);
       if(demanded.size()>50000)throw std::length_error("IBP closure planning demand budget");
       std::vector<ibp::Integral> batch(demanded.begin(),demanded.end());std::set<ibp::Integral> terminal;
       for(unsigned check=0;check<2;++check){
         auto elapsed=duration<double>(steady_clock::now()-started).count();if(elapsed>=limits.timeout_seconds)throw std::runtime_error("IBP closure planning time budget");
         auto receiving=limits;receiving.timeout_seconds=std::min(options_.probe_timeout_seconds,std::max(1u,static_cast<unsigned>(limits.timeout_seconds-elapsed)));
-        auto point=modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+2*pass+check);
+        auto point=modular::point(dimension_.variable_count(),1,fire_modular::ordinals::planning_base+check);
         auto reduced=(*sampler_)(batch,point,prime(1),receiving);++planning_.probes;
         if(!reduced.success)throw std::runtime_error("IBP closure planning probe failed: "+reduced.reason);
         std::set<ibp::Integral> found;for(const auto& [a,row]:reduced.residues.value())for(const auto& [master,c]:row)found.insert(master);
@@ -548,7 +650,7 @@ class Session {
       if(demanded.size()==before){
         boost::json::array rows;for(const auto& a:demanded){boost::json::array row;for(int power:a)row.push_back(power);rows.push_back(row);}
         std::filesystem::create_directories(path.parent_path());
-        fire_modular::detail::save(path,{{"schema","DiffExp.IBPClosurePlan/v1"},{"identity",key},{"planning_hint_only",true},{"demands",rows}});
+        fire_modular::detail::save(path,{{"schema","DiffExp.IBPClosurePlan/v1"},{"identity",key},{"planning_hint_only",true},{"demands",rows},{"widened_seeds",widened_json()}});
         return {demanded.begin(),demanded.end()};
       }
     }
@@ -558,6 +660,8 @@ class Session {
     if(options_.progress)options_.progress("finite-field closure plan did not stabilize within "+std::to_string(options_.max_planning_passes)+" passes; reconstructing the "+std::to_string(demanded.size())+" demands found so far");
     return {demanded.begin(),demanded.end()};
   }
+  static const char* target_seeds_name(Options::TargetSeeds seeds){return seeds==Options::TargetSeeds::none?"none":seeds==Options::TargetSeeds::sector?"sector":seeds==Options::TargetSeeds::subsectors?"subsectors":"all";}
+  boost::json::array widened_json()const {boost::json::array out;for(const auto& [mask,dots,nums]:sampler_->widened())out.push_back(boost::json::array{mask,dots,nums});return out;}
   // Of the held-out points, those eliminated completely can start early.
   static std::vector<Sampler::Point> complete(bool selected_rows,bool anchored,const std::vector<fire_modular::Options::HeldOut>& points) {
     std::vector<Sampler::Point> out;
@@ -571,7 +675,9 @@ class Session {
     out.provider_identity=std::string("ibp-solver-parametric-")+(o.dots_first?"dots-first":"total-degree")+"-v2-dots-"+std::to_string(o.dots)+"-numerators-"+std::to_string(o.numerators);
     if(!o.scaleless_sectors)out.provider_identity+="-free-loop-zero-sectors-only";
     if(o.max_seed_widenings!=4)out.provider_identity+="-seed-widenings-"+std::to_string(o.max_seed_widenings);
-    if(o.target_sector_seeds)out.provider_identity+="-subsector-seeds-v1";
+    if(o.target_seeds==Options::TargetSeeds::subsectors)out.provider_identity+="-subsector-seeds-v1";
+    if(o.target_seeds==Options::TargetSeeds::sector)out.provider_identity+="-sector-seeds-v1";
+    if(o.target_seeds==Options::TargetSeeds::none)out.provider_identity+="-widened-seeds-v1";
     if(o.selected_source_rows)out.provider_identity+="-fresh-original-row-subset-validation-v1";
     const bool anchored=o.selected_source_rows&&o.complete_validation_anchor;
     if(anchored)out.provider_identity+="-complete-anchor-v1";

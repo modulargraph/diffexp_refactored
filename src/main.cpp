@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
       std::vector<std::string> sample_arguments;
       std::filesystem::path fire_prime;
       auto ibp_provider=configuration.ibp_provider;std::string ibp_validation="anchored";auto ibp_dots=configuration.ibp_dots,ibp_numerators=configuration.ibp_numerators;
+      std::string ibp_seeds="demand";
       // As for the chart expansion, the built-in solver leaves the cores that
       // other work occupies at start-up; --ibp-threads overrides this.
       unsigned ibp_threads=std::max(1u,std::thread::hardware_concurrency());
@@ -112,6 +113,7 @@ int main(int argc, char** argv) {
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||n>8)throw std::invalid_argument("IBP seed powers must be 0..8");
           (option=="--ibp-dots"?ibp_dots:ibp_numerators)=n;
         }
+        else if(option=="--ibp-seeds"){ibp_seeds=option_value;if(ibp_seeds!="demand"&&ibp_seeds!="sector"&&ibp_seeds!="subsectors"&&ibp_seeds!="all")throw std::invalid_argument("IBP seeds must be demand, sector, subsectors or all");}
         else if(option=="--ibp-max-degree"){
           const std::string value=option_value;auto parsed=std::from_chars(value.data(),value.data()+value.size(),ibp_max_degree);
           if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||ibp_max_degree<4||ibp_max_degree>256)throw std::invalid_argument("IBP maximal degree must be 4..256");
@@ -241,6 +243,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("--henn-basis at epsilon order "+std::to_string(epsilon_order)+" needs scalar order "+std::to_string(needed)+", beyond the epsilon budget "+std::to_string(numerical.max_epsilon));
         }
       }
+      const auto target_seeds=ibp_seeds=="all"?diffexp::ibp_solver::Options::TargetSeeds::all:ibp_seeds=="subsectors"?diffexp::ibp_solver::Options::TargetSeeds::subsectors:ibp_seeds=="sector"?diffexp::ibp_solver::Options::TargetSeeds::sector:diffexp::ibp_solver::Options::TargetSeeds::none;
       diffexp::artifacts::Store store(cache);unsigned reused=0,built=0;
       diffexp::ibp_solver::Statistics ibp_statistics;
       auto provider=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget) {
@@ -251,7 +254,7 @@ int main(int argc, char** argv) {
           // solver as it bounds one FIRE call.
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,
             options.reduction.provider.timeout_seconds,ibp_validation=="strict");
-          native.dots=ibp_dots;native.numerators=ibp_numerators;native.threads=ibp_threads;
+          native.dots=ibp_dots;native.numerators=ibp_numerators;native.target_seeds=target_seeds;native.threads=ibp_threads;
           // A larger total degree comes with larger degrees per variable and
           // the samples to see them.
           if(ibp_max_degree) {
@@ -284,7 +287,8 @@ int main(int argc, char** argv) {
         auto result=diffexp::cached_level::prepare(store,basis,dimension,field,parameter,sources,budget,fallback);
         if(native_session){const auto& stats=native_session->statistics();ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;
           ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;
-          ibp_statistics.batched_replays+=stats.batched_replays;ibp_statistics.early_solves+=stats.early_solves;ibp_statistics.early_solves_used+=stats.early_solves_used;ibp_statistics.seed_widenings+=stats.seed_widenings;}
+          ibp_statistics.batched_replays+=stats.batched_replays;ibp_statistics.early_solves+=stats.early_solves;ibp_statistics.early_solves_used+=stats.early_solves_used;ibp_statistics.seed_widenings+=stats.seed_widenings;
+          ibp_statistics.continued_solves+=stats.continued_solves;ibp_statistics.continued_equations+=stats.continued_equations;ibp_statistics.reused_solves+=stats.reused_solves;ibp_statistics.continued_solve_seconds+=stats.continued_solve_seconds;}
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
@@ -333,7 +337,7 @@ int main(int argc, char** argv) {
         options.count_masters=[&](const auto& basis,const auto& dimension,const auto& field,auto parameter,const auto& sources,const auto& budget)
             ->std::optional<std::size_t> {
           auto native=diffexp::ibp_solver::recursion_options(cache/"ibp-solver",parameter,options.reduction.provider.timeout_seconds,false);
-          native.dots=ibp_dots;native.numerators=ibp_numerators;native.threads=1;
+          native.dots=ibp_dots;native.numerators=ibp_numerators;native.target_seeds=target_seeds;native.threads=1;
           try{return diffexp::ibp_solver::Session(basis,dimension,field,native).count_masters(sources,budget.provider);}
           catch(const std::exception&){return std::nullopt;}
         };
@@ -408,7 +412,8 @@ int main(int argc, char** argv) {
         <<ibp_provider<<", --ibp-dots, --ibp-numerators) did not apply to "<<(reused==1?"it":"them")<<". Use a fresh --cache to rebuild.\n";
       report["ibp_statistics"]=boost::json::object{{"full_solve_seconds",ibp_statistics.full_solve_seconds},{"trace_learning_seconds",ibp_statistics.trace_learning_seconds},{"trace_replay_seconds",ibp_statistics.trace_replay_seconds},{"compiled_templates",ibp_statistics.templates},{"full_solves",ibp_statistics.full_solves},{"trace_replays",ibp_statistics.trace_replays},{"trace_fallbacks",ibp_statistics.trace_fallbacks},{"fresh_probes",ibp_statistics.probes},{"generated_equations",ibp_statistics.equations},{"probe_generation_seconds",ibp_statistics.generation_seconds},{"probe_elimination_seconds",ibp_statistics.elimination_seconds},
         {"validation",ibp_validation},{"subset_solves",ibp_statistics.selected_solves},{"subset_solve_seconds",ibp_statistics.selected_solve_seconds},{"subset_fallbacks",ibp_statistics.selection_fallbacks},{"traces_disabled",ibp_statistics.trace_disabled},
-        {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings}};
+        {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings},
+        {"continued_solves",ibp_statistics.continued_solves},{"continued_equations",ibp_statistics.continued_equations},{"reused_solves",ibp_statistics.reused_solves},{"continued_solve_seconds",ibp_statistics.continued_solve_seconds},{"seeds",ibp_seeds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
@@ -791,7 +796,14 @@ IBP preparation (prepare/ft)
   --ibp-provider auto|ibp-solver|fire|fire-modular
                                   auto selects the built-in ibp-solver unless --fire names a FIRE
                                   executable
-  --ibp-dots N --ibp-numerators N seed controls of the built-in solver
+  --ibp-dots N --ibp-numerators N the seeds every sector of the built-in solver starts from
+                                  (0..8, default 1 and 1). They are grown where needed: a requested
+                                  integral asks for the seeds that generate it, and an integral
+                                  left unreduced outside the seeds of its sector widens that sector
+  --ibp-seeds demand|sector|subsectors|all
+                                  the sectors that receive in advance the seeds that generate a
+                                  requested integral: none, widening alone decides (demand, the
+                                  default); its own; its own and its subsectors; or all
   --merge-selection auto|first    which two propagators each level merges, unless the family file
                                   lists preparation.merges or anchors: auto (default) takes the
                                   pair whose merged graph has the fewest master integrals,

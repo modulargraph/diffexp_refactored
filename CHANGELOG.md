@@ -2,6 +2,25 @@
 
 ## 2.2.1
 
+- Built-in IBP solver, preparation. Seeds start small and grow on demand:
+  the default numerator degree is 1 (was 2; `--ibp-numerators`,
+  `preparation.ibp_numerators`), and a requested integral no longer raises
+  the seeds of every sector in advance (`--ibp-seeds demand|sector|
+  subsectors|all`, `ibp_solver::Options::target_seeds`; `all` with
+  `--ibp-numerators 2` is the previous behaviour). An integral left
+  unreduced outside the seeds of its sector widens that sector alone, as
+  before, now up to 8 times per batch. A complete elimination continues
+  from the pivots of the previous one at the same point instead of being
+  repeated: closure-planning passes share their two points, the same
+  equations are not eliminated again and wider seeds insert only the new
+  equations (`continued_solves`, `continued_equations`, `reused_solves` in
+  `ibp_statistics`). Samples pass from the solver to the reconstruction as
+  machine words and reconstructed coefficients are built from integer
+  terms; nothing is written to text and parsed back inside one process.
+  The level closures of kite, banana, banana4, double box, family F and
+  the double pentagon are unchanged (same content identifiers). Caches
+  written by earlier versions are not reused for the solver's samples and
+  closure plans; verified level closures are.
 - Transport: the endpoint overlap is chosen per endpoint (a singular point
   next to one end no longer costs charts at the other); in probe mode a
   chart's radii are its own rounding (defect radii of the midpoint

@@ -35,6 +35,12 @@ class ParametricProgram {
  std::vector<std::vector<InputCoefficient>> coefficients;
  std::vector<bool> constant_inputs;
  std::size_t input_count=0;
+ // Where each equation comes from: its seed and operator, or a target of a
+ // zero sector (operator `target`). It names the equation in any program
+ // compiled from the same geometry, whatever the seed bounds.
+ struct Origin {Integral seed;std::uint32_t op=0;bool operator==(const Origin&)const=default;};
+ static constexpr std::uint32_t target=std::numeric_limits<std::uint32_t>::max();
+ std::vector<Origin> origins;
  void bind(const std::vector<Word>& inputs,const Field& f,const std::vector<std::uint32_t>* selection=nullptr){
   if(inputs.size()!=input_count)throw std::invalid_argument("parametric input arity");
   for(auto v:inputs)if(v>=f.prime())throw std::invalid_argument("noncanonical parametric input");
@@ -55,11 +61,11 @@ class ParametricProgram {
   ParametricProgram out;out.input_count=g.inputs;out.constant_inputs=g.constant_inputs;if(out.constant_inputs.empty())out.constant_inputs.resize(g.inputs);
   auto& p=out.program;std::unordered_map<Integral,Column,IntegralHash> ids;
   auto intern=[&](const Integral& a){auto [it,inserted]=ids.try_emplace(a,p.integrals.size());if(inserted)p.integrals.push_back(a);return it->second;};
-  struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Equation> equations;
+  struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Equation> equations;std::vector<Origin> origins;
   if(targets.empty()){Integral top;for(unsigned k=0;k<g.physical;++k)top.powers[k]=1;targets.push_back(top);for(unsigned k=0;k<g.n;++k){auto a=top;a.powers[k]+=k<g.physical?1:-1;targets.push_back(a);}}
   p.targets=targets;
   for(const auto& target:targets){for(unsigned k=g.physical;k<16;++k)if(target.powers[k]>0||(k>=g.n&&target.powers[k]))throw std::invalid_argument("invalid target auxiliary slots");p.target_columns.push_back(intern(target));
-   if(g.zero_sectors[sector(target,g.physical)])equations.push_back({{intern(target),{1,{}}}});}
+   if(g.zero_sectors[sector(target,g.physical)]){equations.push_back({{intern(target),{1,{}}}});origins.push_back({target,ParametricProgram::target});}}
   Integral seed;
   auto consume=[&]{const auto mask=sector(seed,g.physical);if(g.zero_sectors[mask])return;
    if(!sector_bounds.empty()){unsigned dots=0,nums=0;for(unsigned k=0;k<g.n;++k){if(seed.powers[k]>0)dots+=seed.powers[k]-1;else nums-=seed.powers[k];}if(dots>sector_bounds[mask].first||nums>sector_bounds[mask].second)return;}
@@ -72,7 +78,7 @@ if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget")
     std::sort(raw.begin(),raw.end(),[](const auto& a,const auto& b){return a.column<b.column;});Equation row;
     for(auto& term:raw){if(!row.empty()&&row.back().column==term.column){auto& terms=row.back().value.terms;terms.insert(terms.end(),term.value.terms.begin(),term.value.terms.end());}else row.push_back(std::move(term));}
     for(auto& term:row)term.value.normalize();std::erase_if(row,[](const auto& t){return t.value.empty();});
-    if(!row.empty()){total_terms+=row.size();if(total_terms>options.max_terms)throw std::length_error("parametric term budget");equations.push_back(std::move(row));}
+    if(!row.empty()){total_terms+=row.size();if(total_terms>options.max_terms)throw std::length_error("parametric term budget");equations.push_back(std::move(row));origins.push_back({seed,op});}
    }
   };
   auto visit=[&](auto&& self,unsigned k,unsigned dots,unsigned nums)->void {
@@ -87,8 +93,9 @@ if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget")
   for(unsigned i=0;i<permutation.size();++i){p.integrals[i]=old[permutation[i]];inverse[permutation[i]]=i;}
   for(auto& row:equations){for(auto& t:row)t.column=inverse[t.column];std::sort(row.begin(),row.end(),[](const auto& a,const auto& b){return a.column<b.column;});}
   for(auto& c:p.target_columns)c=inverse[c];
-  std::stable_sort(equations.begin(),equations.end(),[](const auto& a,const auto& b){return a.front().column==b.front().column?a.size()<b.size():a.front().column>b.front().column;});
-  for(auto& row:equations){p.equations.emplace_back();out.coefficients.emplace_back();for(auto& t:row){p.equations.back().push_back({t.column,0,0});out.coefficients.back().push_back(std::move(t.value));}}
+  std::vector<std::uint32_t> order(equations.size());std::iota(order.begin(),order.end(),0);
+  std::stable_sort(order.begin(),order.end(),[&](auto i,auto j){const auto& a=equations[i];const auto& b=equations[j];return a.front().column==b.front().column?a.size()<b.size():a.front().column>b.front().column;});
+  for(auto i:order){auto& row=equations[i];p.equations.emplace_back();out.coefficients.emplace_back();out.origins.push_back(origins[i]);for(auto& t:row){p.equations.back().push_back({t.column,0,0});out.coefficients.back().push_back(std::move(t.value));}}
   return out;
  }
 };

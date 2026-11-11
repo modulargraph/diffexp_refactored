@@ -91,10 +91,13 @@ int main(int argc,char** argv){try{
   // Plan derivatives with finite-field probes, then reconstruct one combined
   // batch. Exact closure and a fresh-process completion replay remain required.
   for(bool sector_limited:{false,true}){
-    auto planned_options=sliced_options;planned_options.cache_directory=options.cache_directory/(sector_limited?"planned-sectors":"planned-global");planned_options.closure_parameter=0;planned_options.target_sector_seeds=sector_limited;planned_options.selected_source_rows=sector_limited;
+    auto planned_options=sliced_options;planned_options.cache_directory=options.cache_directory/(sector_limited?"planned-sectors":"planned-global");planned_options.closure_parameter=0;planned_options.target_seeds=sector_limited?ibp_solver::Options::TargetSeeds::subsectors:ibp_solver::Options::TargetSeeds::all;planned_options.selected_source_rows=sector_limited;
     ibp_solver::Session planned(basis,d,field,planned_options);level::Options stage_options;stage_options.total_timeout_seconds=90;stage_options.provider=limits;
     auto stage=level::prepare(basis,d,field,0,requests,stage_options,[&](const auto& r,const auto& l){return planned(r,l);});
     require(stage.success,stage.reason.c_str());require(stage.passes==1&&planned.planning_statistics().probes>=2,"planned derivative closure reconstructed more than one batch");
+    // The passes of a plan reduce growing batches at the same two points:
+    // after the first pass no complete elimination starts from nothing.
+    if(planned.planning_statistics().passes>1)require(planned.statistics().reused_solves+planned.statistics().continued_solves>=planned.planning_statistics().passes-1,"closure planning repeated a complete elimination");
     ibp_solver::Session reopened(basis,d,field,planned_options);
     auto recovered_stage=level::prepare(basis,d,field,0,requests,stage_options,[&](const auto& r,const auto& l){return reopened(r,l);});
     require(recovered_stage.success&&recovered_stage.matrix==stage.matrix&&recovered_stage.target_rows==stage.target_rows&&reopened.statistics().probes==0&&reopened.planning_statistics().cache_hits==1,"planned closure did not recover without fresh probes");
@@ -243,6 +246,27 @@ int main(int argc,char** argv){try{
     // Widening belongs to the batch: a second point reuses the widened plan.
     auto second=contained(dotted,{7654321,123457},ibp_solver::prime(1),limits);
     require(second.success&&contained.statistics().seed_widenings==1&&contained.statistics().templates==2,"widened seeds were not kept for the batch");
+    // The widened equations contain the ones eliminated before: that
+    // elimination continues with the new equations only. `second` above
+    // eliminated the widened equations from nothing at its point; a sampler
+    // that widens at that point continues, and must return the same rows.
+    const std::vector<modular::Word> elsewhere{7654321,123457};
+    require(contained.statistics().full_solves==2&&contained.statistics().continued_solves==1&&contained.statistics().continued_equations>0,"the widened elimination did not continue the one before it");
+    ibp_solver::Sampler direct(level,d,widening);auto continued=direct(dotted,elsewhere,ibp_solver::prime(1),limits);
+    require(continued.success&&direct.statistics().full_solves==1&&direct.statistics().continued_solves==1&&direct.statistics().seed_widenings==1,"widening at another point");
+    require(continued.residues&&continued.residues==second.residues,"a continued elimination differs from one from nothing");
+    // A larger batch at the same point: the same equations need no
+    // elimination, and what is kept reduces the new target as well.
+    auto larger=dotted;larger.push_back({1,1,1,2,0,0,0,0,0});
+    auto grown=direct(larger,elsewhere,ibp_solver::prime(1),limits);ibp_solver::Sampler fresh(level,d,widening);auto expected_rows=fresh(larger,elsewhere,ibp_solver::prime(1),limits);
+    require(grown.success&&expected_rows.success&&grown.residues==expected_rows.residues,"a kept elimination reduced a larger batch differently");
+    require(direct.statistics().full_solves==1&&direct.statistics().reused_solves+direct.statistics().continued_solves>=2,"a larger batch at the same point was eliminated from nothing");
+    // Seeds given to every sector in advance, as many as the requested
+    // integrals have, lead to the same reduction as widening on demand.
+    ibp_solver::Options generous;generous.threads=1;generous.numerators=2;generous.target_seeds=ibp_solver::Options::TargetSeeds::all;
+    for(auto policy:{ibp_solver::Options::TargetSeeds::all,ibp_solver::Options::TargetSeeds::subsectors,ibp_solver::Options::TargetSeeds::sector}){
+      generous.target_seeds=policy;ibp_solver::Sampler wide(level,d,generous);auto all=wide(larger,elsewhere,ibp_solver::prime(1),limits);
+      require(all.success&&all.residues.value().at(larger[0])==grown.residues.value().at(larger[0])&&all.residues.value().at(larger[1])==grown.residues.value().at(larger[1]),"seeds on demand changed a reduction");}
   }
   std::filesystem::remove_all(options.cache_directory);
   if(argc>1){

@@ -27,7 +27,9 @@
 // depends on the two parameters through their sum only, F(x)-F(0) is bounded
 // by a multiple of |x|*b*U (b the parameter of the merged line) and F(0) by
 // m^2*b*U from below, so the parametric integrand is analytic in x uniformly
-// over the simplex. With a massless kept line the endpoint has collinear
+// over the simplex. The lower bound is checked on F of the pinched family
+// itself: external momenta on the mass shell of the kept line cancel
+// monomials of m^2*b*U, and the endpoint then does not qualify. With a massless kept line the endpoint has collinear
 // regions with exponents -eps, -2*eps whose coefficients the pinched family
 // does not provide: such an endpoint never qualifies.
 namespace diffexp::endpoint_boundary {

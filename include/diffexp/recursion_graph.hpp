@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <thread>
+#include "diffexp/scaleless_sectors.hpp"
 #include "diffexp/families.hpp"
 #include "diffexp/level_preparation.hpp"
 #include "diffexp/merge_pullback.hpp"
@@ -261,6 +262,29 @@ inline ibp::QuadraticFamily at_anchor(const ibp::PropagatorBasis& basis,
 // k^2 next to a line 1-k^2). Such a slot is replaced by a scalar product that
 // completes the basis, which changes nothing if no master carries a power in
 // it; a slot some master uses must stay independent, or there is no family.
+// Whether F of `family` contains every monomial of (parameter of `line`)*U with
+// a coefficient of the sign all of F has: F >= c*b*U on the simplex for some
+// c>0. A massive line gives m^2*b*U, but on-shell external momenta can cancel
+// monomials of it (a massive line next to a leg of the same mass); the
+// integrals are then not analytic where the other merged line is pinched.
+inline bool endpoint_mass_bound(const ibp::QuadraticFamily& family,std::size_t line) {
+  const auto polynomials=scaleless::symanzik(ibp::PropagatorBasis(family));
+  if(polynomials.U.empty() || polynomials.F.empty())return false;
+  int sign=0;
+  for(const auto& [exponent,coefficient]:polynomials.F) {
+    if(!coefficient.is_rational())return false;
+    const int here=coefficient.rational().sign();
+    if(!sign)sign=here;
+    if(here!=sign)return false;
+  }
+  for(const auto& [exponent,coefficient]:polynomials.U) {
+    auto shifted=exponent;
+    if(line>=shifted.size())return false;
+    ++shifted[line];
+    if(!polynomials.F.count(shifted))return false;
+  }
+  return true;
+}
 inline std::optional<ibp::QuadraticFamily> endpoint_family(const ibp::PropagatorBasis& merged,
     std::size_t parameter,const Rational& endpoint,const std::vector<ibp::Integral>& masters) {
   auto family=at_anchor(merged,parameter,endpoint);
@@ -477,6 +501,8 @@ inline Graph prepare(const feynman::ExampleFamily& family,
           std::string refusal;
           auto pinched=endpoint_family(node.merged,0,Rational(upper?1:0),node.closure.ordered_basis);
           if(!pinched)refusal="a numerator of the level's masters depends on the propagators at the endpoint";
+          else if(left>=right || !endpoint_mass_bound(*pinched,left))
+            refusal="F of the pinched family is not bounded below by the kept line's parameter times U (its mass is cancelled by on-shell external momenta)";
           else {
             const auto verdict=endpoint_boundary::examine(node.closure.matrix,0,1,upper,options.endpoint);
             if(verdict.qualifies) {

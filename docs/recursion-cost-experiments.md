@@ -245,6 +245,13 @@ connection shrinks: level 2 of the double box from 8002 to 3321 characters,
 and the run from 16.3 s to 12.3 s. `diffexp ft` now does this by default;
 the kite and the bananas have no such factor and are unchanged.
 
+**Preparation.** The exact preparation was single-threaded. The built-in
+IBP solver now replays announced sample points in batches and starts the
+complete eliminations of closure planning and validation ahead on free
+threads ([ibp-solver.md](ibp-solver.md)): the double pentagon prepares in
+158 s on four threads instead of 298 s, the four-loop banana in 15.3 s
+instead of 33.7 s, with byte-identical caches.
+
 **What is left.** With the pair above the transport is again three quarters
 of an expanded run. A run with the overlap moved out to a quarter of the
 distance and a short exact series (inaccurate, for timing only) takes 28 s

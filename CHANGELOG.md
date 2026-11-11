@@ -30,7 +30,10 @@
   advance, start early on free threads. Reductions, sample points, counts and
   cached records are identical for every thread count; `ibp_statistics`
   reports `threads`, `batched_replays`, `early_solves` and
-  `early_solves_used`. See `docs/ibp-solver.md`.
+  `early_solves_used`. Cold preparation on four threads against one: planar
+  double box 3.4 s against 5.2, four-loop banana 15.3 s against 33.7, double
+  pentagon 158 s against 298 (peak memory 1.24 GB against 0.85). See
+  `docs/ibp-solver.md`.
 - `diffexp --help` is sectioned and lists every default; `diffexp_ft_examples`
   uses the built-in IBP solver when no FIRE path is given.
 - The Taylor recurrence of a chart runs on compact numbers (contiguous

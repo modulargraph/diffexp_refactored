@@ -52,6 +52,15 @@ A relation proved using a subset of original IBP equations also belongs to the f
 
 `--ibp-threads N` (`ibp_solver::Options::threads`; 0 in the library means one per hardware thread, the CLI default is the number of hardware threads idle at start-up) lets the provider work ahead wherever the point of an elimination is known before its result is needed.
 
+Cold preparation, wall seconds and peak memory, on a four-core machine; the caches written are byte-identical:
+
+| Family | One thread | Four threads |
+| --- | ---: | ---: |
+| `kite` | 0.9 s | 1.0 s |
+| `double_box_planar` | 5.2 s | 3.4 s |
+| `banana4` | 33.7 s, 0.19 GB | 15.3 s, 0.25 GB |
+| `henn_double_pentagon_x0` | 298 s, 0.85 GB | 158 s, 1.24 GB |
+
 - **Replays in batches.** The reconstruction announces the points of the samples it is about to request at a prime, leaving out those with a record on disk. Once the trace of that prime is learned and checked, a replay depends on the trace and the point alone. The announced points are then replayed together, each worker in its own workspace, and consumed in ordinal order by the unchanged sequential logic: exceptional points, skips, terminal-set votes and sample records.
 - **Complete eliminations ahead.** A complete elimination depends on the generated equations and the point, not on the targets, the pilot or a trace. Closure planning makes one per pass at a point fixed in advance, and validation makes one at the first held-out point (at every held-out point with `--ibp-validation strict`). While one pass eliminates, the eliminations of the next pass, of the validation and of one pass more run on free threads; later attempts' validation points follow as the reconstruction reaches them. A request adopts such an elimination only if it used the same equations (planning passes usually differ in targets alone, a change of seed bounds discards it), the same fill budget, and no more time than the request has left.
 

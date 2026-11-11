@@ -3,13 +3,11 @@
 The C++ mathematical backend, command-line interface and Mathematica wrapper
 are validated separately, with numerical accuracy and runtime recorded explicitly.
 
-Version 2.2.0 passes its 80 native regressions on Linux (GCC 13, FLINT
-3.4.0); see [timings](timings.md) for the ten Feynman-trick examples run with
-the built-in IBP solver. The inherited prepared-input compatibility runtime
-and its 52 tests were removed; nothing in the native core or the Mathematica
-wrapper used it. The statements below record the 2.1.1 release checks, made
-on macOS before that rework and including the Mathematica smoke and
-compatibility tests, which have not been repeated since.
+Version 2.2.0 passes its 82 native regressions and the eleven Feynman-trick
+acceptance families on Linux (GCC 13, FLINT 3.4.0) with the built-in IBP
+solver; see [timings](timings.md). The Mathematica smoke and compatibility
+tests were last run for 2.1.1 on macOS and have not been repeated for 2.2.0;
+the statements below are those 2.1.1 checks.
 
 Version 2.1.1 passed **88/88 native and external-reduction regressions**. Focused transport, configuration and CLI checks also pass
 after the final recurrence refinements. All nine standard original example

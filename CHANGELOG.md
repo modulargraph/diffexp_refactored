@@ -78,7 +78,7 @@
   coefficients from such samples (complex values, `--jobs` samples in
   parallel). It reproduces the expanded recursion; it is slower for small
   families and the practical route for the double pentagon; see
-  `docs/recursion-cost-experiments.md`, which also records the
+  `docs/performance.md`, which also records the
   precision experiments and the cost model of a transport leg.
 - A requested recursive anchor (`preparation.anchors`) that is singular in the
   master basis the reduction selected moves to the simplest regular rational

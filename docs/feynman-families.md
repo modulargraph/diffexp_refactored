@@ -59,8 +59,8 @@ recursion without reporting an integral value. Cold IBP preparation defaults to 
 FIRE executable is supplied. It reconstructs the full parameter-dependent
 coefficients; no family-name special case is used. `--fire /path/to/FIRE7` and
 `--fire-prime /path/to/FIRE7p` select the existing providers. The native provider
-has bounded seed and reconstruction budgets; see [scope and controls](ibp-solver.md). Previously
-verified preparation can be reused from the selected cache.
+has bounded seed and reconstruction budgets; see [scope and controls](ibp-solver.md). Verified
+preparation is reused from the selected cache.
 
 For runs that do not need numerical restart files, add `--no-numerical-cache`.
 This avoids writing the internal-basis choice and ordinary-transport
@@ -68,7 +68,7 @@ checkpoints while retaining the exact reductions under `--cache`. Endpoint
 series are never cached. In-memory sharing remains active.
 The response reports `persistent_numerical_cache: false`; numerical stages are
 recomputed on a later invocation. This is useful when disk space is limited.
-See [the laptop examples](ft-laptop-examples.md) for cold runs with this option.
+See [timings](timings.md) for cold runs with this option.
 
 Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 `level_seconds`, `fire_seconds`, `max_sources_per_level`, `ibp_provider`,
@@ -125,8 +125,5 @@ result["timings"]
 A JSON filename can be passed in place of the Association. Editing a label
 alone does not change the integral; editing the geometry does.
 
-Ordinary transport inside the FT recursion uses Taylor charts. The former
-`numerical.transport` values `"spectral"` and `"ultraspherical"`, the key
-`numerical.transport_digits` and `numerical.method: "values"` were removed and
-are rejected with that message; `"transport": "taylor"` (or the old default
-`"auto"`) is still accepted.
+Ordinary transport inside the FT recursion uses Taylor charts
+(`"transport": "taylor"` or `"auto"`).

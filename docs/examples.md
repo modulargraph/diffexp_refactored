@@ -32,7 +32,7 @@ tools/experiments/epsilon_sampling.py examples/feynman/henn_double_pentagon_x0.j
 ```
 
 which takes about 50 minutes on four cores
-([details](recursion-cost-experiments.md)).
+([details](performance.md)).
 
 ## Original DiffExp examples
 

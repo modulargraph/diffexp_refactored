@@ -4,7 +4,7 @@
 Each sample runs `diffexp ft CONFIG --epsilon-order 0 --epsilon-shift Q`, which
 evaluates the integral in d0-2Q dimensions; the samples at Q=+-step, +-2 step,
 ... are fitted by the polynomial through eps^poles * I(eps). This is the
-experiment recorded in docs/recursion-cost-experiments.md: it reproduces the
+experiment recorded in docs/performance.md: it reproduces the
 expanded recursion and needs about one sample per 1.4 digits. Samples are
 independent (--jobs). Only the standard library is used.
 

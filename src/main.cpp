@@ -514,7 +514,7 @@ Feynman-trick recursion
   --henn-basis FILE               project onto a published canonical basis (Henn X0 geometry only)
   --epsilon-shift Q               experimental: expand around epsilon=Q (a rational); coefficient k
                                   then multiplies (epsilon-Q)^k, and order 0 is the integral in
-                                  d0-2Q dimensions (docs/recursion-cost-experiments.md)
+                                  d0-2Q dimensions (docs/performance.md)
   --moving-poles keep|remove|exchange
                                   per level, the denominator factors of the connection that mix
                                   x with epsilon (docs/moving-poles.md; default remove for ft,

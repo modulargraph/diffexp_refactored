@@ -88,8 +88,6 @@ Apple M4, native release build, separate cold caches and no persistent numerical
 | Box | 0.35 s | 0.67 s | 1.95× | 0.047 / 0.420 s |
 | Box-triangle | 9.27 s | 17.95 s | 1.94× | 4.260 / 12.943 s |
 
-The first adapter rebuilt and fully eliminated a system at every point. Its box-triangle run took 37.13 seconds, including 32.09 seconds of IBP preparation; the [earlier measurements](benchmarks/ibp-solver/integration-before-parametric.json) are retained. Parametric equation reuse and guarded replay remove that repeated work. Full independent verification remains a substantial part of the improved box-triangle preparation cost.
-
 The standalone package's 10.7× result measures fixed-kinematics rational reconstruction in the dimension for ten double-box targets. It is a different workload and is not an end-to-end FT speedup claim. The FT adapter currently uses CPU parametric replay; standalone Metal batch timings do not apply to these runs.
 
 The provider tests also check ten ordinary double-box targets against exact FIRE reductions after basis conversion at two dimensions and two 61-bit primes. Complete native FT, cache reuse, Mathematica and installed C++ consumer tests pass.

@@ -1,24 +1,107 @@
 # DiffExp 2.2
 
-DiffExp 2.2 computes dimensionally regulated Feynman integrals with series
-recurrences and recursive Feynman-parameter integration. The mathematical
-backend is a standalone C++20 package built on FLINT/Arb.
+DiffExp computes dimensionally regulated Feynman integrals numerically, to
+tens of digits, in two ways:
 
-**Mathematica users can use the familiar DiffExp1 workflow:** load a
-configuration, prepare boundary conditions, transport the integrals and plot
-the results. The Mathematica interface calls the C++ backend through
-`RunProcess`; you can work with Wolfram expressions and the original function
-names directly.
+- **Feynman-trick recursion.** From a list of propagators and kinematics it
+  derives the integrals itself: IBP reduction with a built-in solver,
+  differential equations in Feynman parameters, boundary values and
+  transport. No boundary conditions or external programs are needed.
+- **Differential-equation transport.** Given a system of differential
+  equations and boundary values it transports the integrals along a path,
+  with the DiffExp 1 workflow in Mathematica.
 
-[Mathematica quick start](#mathematica-diffexp1-style-workflow) ·
-[Build and install](#build) · [Feynman-trick recursion](#feynman-trick-recursion) ·
-[Examples and timings](#examples-and-validation) ·
-[AMFlow 2.0 comparison](docs/amflow-comparison.md) ·
-[Built-in IBP Solver](docs/ibp-solver.md) ·
-[Transport backend design](docs/backend-review-implementation.md) ·
-[Epsilon scheduling and basis search](docs/epsilon-demand-design.md)
+The backend is a standalone C++20 package on FLINT/Arb with a command-line
+tool and a Mathematica wrapper.
 
-## Mathematica: DiffExp1-style workflow
+## How fast
+
+Complete Feynman-trick calculations from a propagator list (cold cache,
+IBP reduction included, 28 requested digits) on a 4-core Linux machine:
+
+| Integral family | Time |
+| --- | ---: |
+| One-loop box, pentagon | 0.1 s, 0.7 s |
+| Two-loop sunrise, box-bubble | 0.2 s, 0.5 s |
+| One-loop pentagon with masses | 1.4 s |
+| Two-loop box-triangle | 2.1 s |
+| Three-loop banana, equal / unequal masses | 1.8 s / 2.5 s |
+| Two-loop kite | 4.6 s |
+| Two-loop planar double box | 14 s |
+| Four-loop banana, equal / four masses | 48 s / 87 s |
+
+Transport of a supplied system: 13 one-loop canonical integrals through
+epsilon^4 in 3.9 s; the equal-mass banana system at 60 digits in 4.0 s.
+Details and conditions are in [timings](docs/timings.md); comparisons with
+[AMFlow 2.0](docs/amflow-comparison.md) and with
+[published benchmarks](docs/literature-benchmarks.md) are separate.
+
+## Build
+
+Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and
+pkg-config. OpenMP is used when available (`-DDIFFEXP_OPENMP=OFF` disables
+it); results do not depend on the thread count. Mathematica is optional.
+
+```sh
+brew install cmake pkgconf flint boost        # macOS; use your package manager elsewhere
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build -j2
+build/diffexp --version
+build/diffexp ft examples/feynman/sunrise.json --json
+```
+
+Install the executable, C++ headers and Mathematica wrapper with
+`cmake --install build --prefix /your/prefix`. CMake consumers use
+`find_package(DiffExp 2.2 CONFIG REQUIRED)` and link `DiffExp::core`; see
+[the consumer example](tests/consumer) and [architecture](docs/architecture.md).
+To build and run the tests, see
+[validation](docs/validation.md#reproduce-the-release-checks).
+
+## Feynman-trick recursion
+
+A [family file](docs/feynman-families.md) lists propagators, kinematics and
+the requested powers. Edit one of the [examples](docs/examples.md) to compute
+a different integral; nothing has to be registered.
+
+```sh
+build/diffexp ft examples/feynman/banana4.json --cache /path/to/cache --json
+```
+
+From Mathematica:
+
+```wl
+family = DiffExpFamilyTemplate["sunrise"];
+(* Edit the propagators, masses, scalar products and requested powers. *)
+DiffExpFeynmanTrick[family, {"--cache", "/path/to/cache", "--epsilon-order", "0"}]
+```
+
+`--json` prints one JSON object on stdout, with progress on stderr.
+Coefficients are ordered by component, then epsilon power, beginning at
+`epsilon_low`; each has `real` and `imaginary` Arb interval strings.
+
+- **Accuracy.** The reported radii are estimates of the numerical error, not
+  certified bounds for the integral (`omitted_tails_certified` is `false`
+  for general recursions). `--uncertainty map` propagates uncertainty
+  rigorously through the transports at several times the cost.
+- **IBP reduction.** The built-in [IBP solver](docs/ibp-solver.md) is the
+  default and runs on several threads. `--fire PATH` (FIRE7) and
+  `--fire-prime PATH` (FIRE7p) select external reducers for larger systems.
+  `--fire-seconds`, `--level-seconds` and `--total-seconds` bound the
+  preparation.
+- **Cache.** `--cache` stores the exact reductions (verified on reuse), the
+  chosen master bases and transport checkpoints, so an interrupted run
+  resumes. `--no-numerical-cache` keeps the exact part only. `prepare`
+  instead of `ft` stops after the exact preparation.
+- **Defaults.** 384 working bits, 28 leaf digits, Taylor order 80.
+  `build/diffexp --help` lists every option;
+  [performance](docs/performance.md) explains the ones that matter for speed.
+- **Large families.** The two-loop double pentagon
+  (`henn_double_pentagon_x0`, experimental) is computed by
+  [epsilon sampling](docs/performance.md#epsilon-sampling): preparation in
+  under three minutes, then independent samples of about 150 s each. Its
+  result has the expected leading poles but no independent reference.
+
+## Mathematica
 
 [Build the executable once](#build), then load `DiffExp.m` in Mathematica.
 The wrapper finds `build/diffexp` automatically. For an installed executable,
@@ -62,171 +145,41 @@ The familiar `UpdateConfiguration`, `CurrentConfiguration` and
 `dVARIABLE_ORDER.m` and canonical `d_1.m` matrices, `SparseArray`, epsilon
 expansions, partial asymptotic boundaries and causal prescriptions.
 
-**All nine original numerical example groups have been checked through this
-Mathematica interface.** Some API differences remain: symbolic general
-solutions are not provided, and algebraic bases defined with principal
-endpoint roots can require explicit `BasisPrefactors`. See the
-[Mathematica guide](docs/mathematica.md) for the complete compatibility scope,
-the [runnable example](examples/Mathematica.wl), and
-[measured timings](docs/timings.md).
+`TransportTo` returns `{point, values, estimatedErrors}` and its result can
+be the boundary of another transport. `UpdateConfiguration`,
+`CurrentConfiguration` and `IntegrateSystem` are available, as are
+`dVARIABLE_ORDER.m` and canonical `d_1.m` matrices, `SparseArray`, epsilon
+expansions, partial asymptotic boundaries and causal prescriptions.
 
-**Adaptive spectral transport is available through the same Mathematica interface.**
-`Recurrence -> "auto"` selects it for suitable larger epsilon-linear systems,
-with local series as a fallback. Use `UpdateConfiguration[Recurrence -> "spectral"]`
-to request it explicitly with a positive `AccuracyGoal`; `"taylor"` selects
-local finite-lag/Taylor transport. See [adaptive transport](docs/adaptive-spectral.md)
-for accuracy checks, timings and applicability. In the complete RL1/RL2
-40-digit examples, Mathematica `TransportTo` now takes 0.65 s / 1.20 s on the
-test laptop, versus 2.88 s / 3.62 s previously (single observations).
+- All nine original DiffExp example groups run through this interface.
+  Symbolic general solutions are not provided, and algebraic bases defined
+  with principal endpoint roots can require explicit `BasisPrefactors`.
+- `Recurrence -> "auto"` chooses between local series (a finite-lag O(N)
+  recurrence where the system allows it) and
+  [adaptive spectral transport](docs/adaptive-spectral.md) for suitable
+  larger epsilon-linear systems; `"taylor"` and `"spectral"` force one.
+- The wrapper talks to `build/diffexp` through `RunProcess` and JSON, with
+  no LibraryLink or WSTP setup. Set `$DiffExpExecutable` for an installed
+  executable.
 
-**Feynman-trick recursion uses Taylor charts for its ordinary transport.**
-`DiffExpFeynmanTrick` takes the same generic family configuration. The
-experimental spectral and ultraspherical FT backends were removed: on every
-measured leg of the examples the Taylor charts were as fast or faster. The
-generic transport above keeps its spectral mode.
+See the [Mathematica guide](docs/mathematica.md) and the
+[runnable example](examples/Mathematica.wl). The same requests can be sent
+from the command line: [transport protocol](docs/transport-protocol.md).
 
-**The built-in IBP Solver also works through Mathematica.**
-Use `DiffExpFeynmanTrick[family, {"--ibp-provider", "ibp-solver",
-"--cache", "/path/to/cache"}]` with a JSON filename or family Association.
-It prepares coefficients depending on both the merge parameter and dimension,
-without launching FIRE. See [provider selection and validation](docs/ibp-solver.md).
+## Documentation
 
-The installed wrapper is `share/diffexp/Mathematica/DiffExp.wl`. Communication
-uses ordinary processes and JSON, with no LibraryLink or WSTP setup.
-The [direct native operations](docs/mathematica.md#direct-native-operations),
-including `DiffExpSeries` and `DiffExpFeynmanTrick`, are available from the
-same package.
-
-## Build
-
-Requires a C++20 compiler, CMake 3.24+, FLINT 3.4+, Boost.JSON 1.80+ and pkg-config.
-OpenMP is used when the compiler provides it (`-DDIFFEXP_OPENMP=OFF` disables it): large
-Taylor charts and endpoint series then run on several threads, with identical results.
-The tested platform is macOS; the recursive FIRE process provider uses POSIX
-facilities. Mathematica is optional. A pinned core of the separate
-[IBP Solver](https://github.com/modulargraph/ibp-solver) package is included for
-cold finite-field reductions and reconstruction. It reuses parameterized IBP
-equations and guarded arithmetic traces as the Feynman parameter and dimension
-change, with independent full reductions for verification. The Mathematica
-wrapper uses the same optimized path. See the [complete FT timings](docs/ibp-solver.md#measured-complete-runs).
-FIRE7 and FIRE7p remain selectable providers for larger or unsupported reductions.
-
-On macOS, dependencies can be installed with Homebrew:
-
-```sh
-brew install cmake pkgconf flint boost
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build build -j2
-build/diffexp --version
-build/diffexp series examples/logarithm.json
-build/diffexp bubble
-```
-
-`bubble` uses the specialized certified recurrence. General recursion uses `ft`.
-Large Feynman-trick examples are opt-in and are never started by the default
-test suite. To build and run tests, use the commands in
-[validation](docs/validation.md#reproduce-the-release-checks).
-
-Install the executable, C++ headers and Mathematica wrapper with:
-
-```sh
-cmake --install build --prefix /your/prefix
-```
-
-CMake consumers use `find_package(DiffExp 2.2 CONFIG REQUIRED)` and link
-`DiffExp::core`. Public headers are under `diffexp/`, with namespace `diffexp`.
-See [the consumer example](tests/consumer) and [architecture](docs/architecture.md).
-
-## Feynman-trick recursion
-
-Editable [family configurations](docs/feynman-families.md) define propagators,
-kinematics and requested powers for both CLI and Mathematica. The name is a
-label; changing the geometry changes the integral without registering a family.
-
-```sh
-build/diffexp ft examples/feynman/sunrise.json --fire /path/to/FIRE7 --cache /path/to/cache --json
-build/diffexp ft examples/feynman/banana4.json --fire /path/to/FIRE7 --cache /path/to/cache --json
-build/diffexp ft examples/feynman/banana4_unequal.json --fire /path/to/FIRE7 --cache /path/to/cache --json
-```
-
-The same command from Mathematica:
-
-```wl
-family = DiffExpFamilyTemplate["sunrise"];
-(* Edit the propagators, masses, scalar products and requested powers. *)
-DiffExpFeynmanTrick[family, {
-  "--fire", "/path/to/FIRE7", "--cache", "/path/to/cache",
-  "--epsilon-order", "0"
-}]
-```
-
-`--json` returns one JSON object on stdout, with progress on stderr. Coefficients
-are ordered by component, then epsilon power, beginning at `epsilon_low`.
-Each complex coefficient has `real` and `imaginary` Arb interval strings.
-`omitted_tails_certified` reports whether omitted series tails are enclosed.
-General recursive results currently return `false`: their arithmetic intervals
-alone are not certified bounds for the full integral.
-
-Use `prepare family.json` to prepare the exact recursion without numerical evaluation.
-Use `--fire-prime /path/to/FIRE7p` for native modular reconstruction. Completed
-exact reductions are stored under `--cache` and verified on reuse. The same
-directory holds the chosen internal master basis of each level and the
-ordinary-transport checkpoints, so an interrupted run resumes its completed
-arms; `--no-numerical-cache` disables these two. Endpoint series are never
-cached: recomputing them is faster than verifying a stored copy.
-
-`--method adjoint|factored|auto` selects the linear method; the default is
-`adjoint`. `--basis-scan-seconds N` bounds the per-level search for an internal
-master basis with a smaller exact connection (0 disables it).
-`--moving-poles keep|remove|exchange` (default `remove`; `keep` with `--epsilon-shift`)
-controls the removal of the denominator factors that mix the merge parameter with epsilon
-([docs/moving-poles.md](docs/moving-poles.md)). The options
-`--method values`, `--ft-transport` and `--ft-transport-digits` were removed and
-are rejected with that message. Numerical defaults are ordinary order 80,
-384 working bits, 28 leaf digits, and an exact endpoint series of order 22 summed
-within 1/64 of the distance to the nearest other singular point (`--endpoint-order`,
-`--overlap-ratio`). Preparation has finite budgets, adjustable
-with `--fire-seconds`, `--level-seconds` and `--total-seconds`. These bound exact
-preparation, not the duration of the full numerical calculation.
-Run `build/diffexp --help` for the remaining options.
-
-Compatible algebraic differential equations now automatically use a finite-lag
-O(N) recurrence, with the existing series solver retained for unsuitable charts.
-This also applies through Mathematica. The [production comparison](docs/finite-lag-default.md)
-records a complete smaller-family test and high-precision chart timings.
-
-## Examples and validation
-
-Four [cold FT laptop examples](docs/ft-laptop-examples.md) pass independent
-checks: massive pentagon (3.2 s), box-triangle (3.2 s), unequal three-loop
-banana (6.3 s), and planar double-box (30 s), measured on a 4-core Linux
-container with the built-in IBP solver. They use generic family JSON and
-`--no-numerical-cache` to avoid large checkpoint files.
-
-The numerical checks include both four-loop banana examples and all nine
-original DiffExp example groups. The two-loop double-pentagon family
-(`henn_double_pentagon_x0`) is **experimental**: its exact recursion (seven
-levels, 69 masters at the top) prepares in about five minutes with the
-built-in IBP solver, and its scalar integral has been computed through
-epsilon^0 by [epsilon sampling](docs/recursion-cost-experiments.md) in 48
-minutes on four cores, with the expected leading-pole structure but no
-independent reference. Transport from the published Henn boundary and
-reconstruction of its first canonical component have passed separately.
-
-See [timings](docs/timings.md) for measured runtimes and
-[validation and limitations](docs/validation.md) for the tested families,
-precision scope and Banana4 reference comparisons. The [example guide](docs/examples.md)
-describes the original-data downloads and the opt-in FT acceptance runner.
-
-DiffExp 2 replaces the previous application at the repository root. Earlier
-versions remain available in Git history.
+- [Timings](docs/timings.md) and [performance](docs/performance.md)
+- [Family files](docs/feynman-families.md) and [examples](docs/examples.md)
+- [Mathematica interface](docs/mathematica.md)
+- [IBP solver](docs/ibp-solver.md)
+- [Validation and limitations](docs/validation.md)
+- [Architecture](docs/architecture.md),
+  [transport backend](docs/backend-review-implementation.md),
+  [epsilon scheduling and basis search](docs/epsilon-demand-design.md),
+  [moving poles](docs/moving-poles.md)
+- [Changelog](CHANGELOG.md)
 
 ## License and citation
 
-GPL-3.0-or-later. See [LICENSE](LICENSE), [CITATION.cff](CITATION.cff), and the
+GPL-3.0-or-later. See [LICENSE](LICENSE), [CITATION.cff](CITATION.cff) and the
 [method references](docs/citation.md).
-
-Recent [literature benchmarks](docs/literature-benchmarks.md) cover the complete
-Canko–Pozzoli RL1/RL2 systems through epsilon^6, Mathematica-wrapper timings, a
-controlled epsilon-sampling study, and the original fixed-resolution
-[CHESS-style C++ spectral comparison](tools/performance/literature/chess/README.md).

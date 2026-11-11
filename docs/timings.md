@@ -1,142 +1,52 @@
 # Timings
 
-## Current code
+Wall times on a 4-core x86-64 Linux container (GCC 13, FLINT 3.4.0, Release
+build), single observations.
 
-Wall times of the current code on a 4-core x86-64 Linux container (GCC 13,
-FLINT 3.4.0, Release build), single observations. Feynman-trick runs use the
-built-in IBP solver, a cold cache and `--no-numerical-cache`; "before" is the
-same machine at the start of the transport and recursion rework (commit
-`d68d2dd`).
+## Feynman-trick recursion
 
-| Feynman-trick example | Before | Now | Preparation / numerical now |
-| --- | ---: | ---: | --- |
-| `sunrise` | 1.46 s | 0.16 s | 0.05 / 0.10 s |
-| `box` | 0.52 s | 0.11 s | 0.06 / 0.05 s |
-| `pentagon` | 3.71 s | 0.70 s | 0.17 / 0.52 s |
-| `box_bubble` | 3.02 s | 0.49 s | 0.46 / 0.03 s |
-| `pentagon_massive` | 25.1 s | 1.43 s | 0.56 / 0.84 s |
-| `box_triangle` | 17.2 s | 2.12 s | 1.43 / 0.67 s |
-| `banana` | 30.1 s | 1.76 s | 0.46 / 1.27 s |
-| `banana_unequal` | 50.7 s | 2.54 s | 0.54 / 1.97 s |
-| `kite` | failed | 4.6 s | 1.0 / 3.5 s |
-| `double_box_planar` | not run | 14.2 s | 3.7 / 10.3 s |
-| `banana4` (four loops, equal masses) | not run | 47.6 s | 19.4 / 27.9 s |
-| `banana4_unequal` (four loops, four masses) | not run | 87.1 s | 27.4 / 59.5 s |
+Complete runs from a family file: exact preparation with the built-in IBP
+solver on a cold cache, then the numerical recursion, on four threads with
+default options and `--no-numerical-cache`.
 
-All rows are one sequential series on four threads with the defaults of
-version 2.2.0 (threaded IBP solver and chart expansion, probe propagation
-of uncertainty, moving poles removed). The finite parts of the four-loop
-bananas reproduce the stored acceptance references
-(28.647167500233570163... and 39.655526834297652529...).
-
-`henn_double_pentagon_x0` (two loops, eight propagators, experimental): the
-exact preparation of all seven levels takes 158 s cold on four threads with
-the settings in its family file (298 s on one; before, it did not get past
-level 1). The epsilon-expanded numerical recursion completed levels 7 to 3 in
-24 minutes on four threads; levels 2 and 1 run for hours. By epsilon sampling
-the family completes: one sample now takes about 150 s on four threads (227 s
-when the following was run), and twelve
-samples (four at a time) gave its Laurent coefficients through epsilon^0 in
-48 minutes. [What limits the recursion](recursion-cost-experiments.md) has
-the method, the measurements and the coefficients.
-
-Nonzero coefficients of the nine examples that ran before agree between the
-two versions to 1e-33 relative or better. The JSON report splits the
-numerical time into `endpoint_series_seconds`, `endpoint_operator_seconds`,
-`basis_selection_seconds`, `leaf_seconds` and `ordinary_seconds`; for `kite`
-the ordinary transport is now about three quarters of it.
-
-| Generic transport request | Before | Now | Check |
-| --- | ---: | ---: | --- |
-| `tools/performance/planar-one-loop-request.json.gz` (13 canonical integrals, epsilon 0-4, order 40, AccuracyGoal 15) | 24.3 s | 3.9 s | versions agree to 7e-26 |
-| Original equal-mass banana system, t=-1 to 20 on a complex path, order 50, 384 bits, AccuracyGoal 30 | 13.4 s | 1.8 s | published reference to 6e-28 |
-| Same, order 120, 768 bits, AccuracyGoal 60 | 82.5 s | 4.0 s | published reference to 6e-28 |
-
-The remaining sections record earlier measurements on other hardware and
-earlier code; they are kept for reference and are not comparable with the
-table above.
-
-## Earlier measurements
-
-These are observed wall times on an Apple M4, macOS ARM64, with a Release
-build and FLINT 3.4.0. Other compilation and numerical checks sometimes ran
-concurrently. These are development measurements, not isolated hardware
-benchmarks. Wrapper times below exclude Wolfram kernel startup.
-
-| Calculation | Observed time | Scope |
+| Example | Total | Preparation / numerical |
 | --- | ---: | --- |
-| New one-loop configured family | 0.0105 s | Masses squared 2, momentum squared -3; independent elementary formula |
-| New two-loop configured family, empty cache | 3.15 s | Three distinct masses, changed momentum; finite part |
-| Same two-loop family, reused cache | 2.67 s | Exact preparation reused; numerical evaluation included |
-| Original MPL examples | 0.053–1.65 s each | Includes the weight-20 example; reference differences below 1.4e-37 |
-| Original planar one-loop wrapper | 21.03 s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
-| Original planar `zmz` wrapper | 2m 45s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
-| Original planar `mzz` wrapper | 2m 1s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
-| Original planar `zzz` wrapper | 3m 13s | PH1 to PH6, epsilon 0–4, AccuracyGoal 15 |
-| Original 128-digit `zzz` demonstration | 41m 27s | PH1 to PH2, epsilon 0–4, 145 charts; endpoint basis conversion 0.71 s, reference replay 3.46 s separately |
-| Original Henn wrapper | 59.75 s | Transport of 108 supplied boundary components, AccuracyGoal 30 |
-| Original banana partial initialization | 27.69 s + 2.16 s | Mathematica gamma/epsilon preparation, then native matching and transport through the wrapper |
-| Original equal-banana transport to 32 | 6.37 s | From the derived boundary at -1, with saved metadata |
-| Full equal/unequal banana route workflow | 9m 34s | Both routes and reference comparisons; includes several separate transports |
-| Banana plot sample at 20.1 from nearby sample | 0.393 s | Versus 12.32 s from the original boundary; difference 4.35e-38 |
-| Original banana `ReImPlot` check | 1.86 s | Bounded plotting range and sample count in the regression script |
-| Equal four-loop banana FT | 20m 14s | Previously accepted full finite-part calculation and reference work |
-| Unequal four-loop banana FT | 46m 24s | Previously accepted full finite-part calculation and reference work |
+| `sunrise` | 0.16 s | 0.05 / 0.10 s |
+| `box` | 0.11 s | 0.06 / 0.05 s |
+| `pentagon` | 0.70 s | 0.17 / 0.52 s |
+| `box_bubble` | 0.49 s | 0.46 / 0.03 s |
+| `pentagon_massive` | 1.43 s | 0.56 / 0.84 s |
+| `box_triangle` | 2.12 s | 1.43 / 0.67 s |
+| `banana` (three loops) | 1.76 s | 0.46 / 1.27 s |
+| `banana_unequal` | 2.54 s | 0.54 / 1.97 s |
+| `kite` | 4.6 s | 1.0 / 3.5 s |
+| `double_box_planar` | 14.2 s | 3.7 / 10.3 s |
+| `banana4` (four loops, equal masses) | 47.6 s | 19.4 / 27.9 s |
+| `banana4_unequal` (four loops, four masses) | 87.1 s | 27.4 / 59.5 s |
 
-The five planar/Henn workflows took 9m 43s together, including five kernel
-startups and reference validation. The unequal-banana route workflow is
-particularly uneven: changing the masses first took 44.8 s and then transporting
-the momentum to 50 took 435.3 s; the reverse order took 8.56 s and 49.3 s.
-The two endpoints agree within 4.53e-38. The published unequal-banana reference
-agrees within 4.80e-28 at its supplied precision.
+The finite parts of the four-loop bananas reproduce the stored references
+(39.655526834297652529... and 28.647167500233570163...).
 
-The separate 128-digit `zzz` PH1-to-PH2 demonstration completed at Taylor order
-230 and WorkingPrecision 280. Its maximum difference from the published values
-is 5.70e-134. The computation used continuous root sheets; the published
-integrand prefactors then converted the endpoint to the principal basis in
-0.71 s using the same helper as native transport. The complete request was
-verified unchanged except for those supplied prefactors, so no ODE rerun was
-needed. The 3.46 s Wolfram replay includes startup and reference validation;
-its short wrapper timing does not include the 41-minute native computation.
-The [interface report](validation/interface-2.1.1.json) preserves the initial
-basis mismatch and the earlier incomplete trials, including a 30-minute timeout.
+Numerical phase on one thread: kite 4.1 s, planar double box 12.3 s,
+four-loop banana 44.8 s; one epsilon sample of the four-loop banana 7.6 s.
 
-The four-loop timings are preserved acceptance measurements. Those expensive
-calculations were not repeated for this interface release. The full Henn FT
-reconstruction is separate from the passing Henn boundary transport above;
-see "Current code" for how far it runs now.
+`henn_double_pentagon_x0` (two loops, eight propagators, experimental):
+preparation 158 s on four threads (298 s on one); one epsilon sample about
+150 s on four threads; twelve samples give its Laurent coefficients through
+epsilon^0. See [performance.md](performance.md).
 
-The native FT JSON reports `preparation_seconds`, `numerical_seconds` and
-`total_seconds`. Mathematica's `DiffExpLastTimings[]` additionally reports total
-wrapper time and individual native calls. Boundary preparation such as a
-Mathematica gamma-function epsilon expansion is measured separately.
+Preparation of the built-in IBP solver, four threads against one: planar
+double box 3.4 s / 5.2 s, four-loop banana 15.3 s / 33.7 s.
 
-The [performance experiments](performance-experiments.md) measured a guarded
-rational-chart speedup of 1.94–2.48 times on their tested workload. Cases that
-need the scalar fallback can be slower. Sharing identical canonical source
-convolutions reduced the observed `zmz`, `mzz`, `zzz` and Henn wrapper times by
-roughly 2.2–2.9 times in development comparisons. The one-loop measurement was
-slower in the loaded final run (21.03 s versus an earlier 11.90 s), so these
-figures should not be read as universal end-to-end speedup guarantees.
+## Generic transport
 
-See [validation](validation.md) for accuracy, compatibility and omitted-tail
-limitations, [interface results](validation/interface-2.1.1.json) for detailed
-workflow timings and errors, and [generic-family results](validation/generic-families.json)
-for the new-family configurations and separate cold/reused-cache times.
+| Request | Time | Check |
+| --- | ---: | --- |
+| `tools/performance/planar-one-loop-request.json.gz` (13 canonical integrals, epsilon 0-4, order 40, AccuracyGoal 15) | 3.9 s | |
+| Equal-mass banana system, t=-1 to 20 on a complex path, order 50, 384 bits, AccuracyGoal 30 | 1.8 s | published reference to 6e-28 |
+| Same, order 120, 768 bits, AccuracyGoal 60 | 4.0 s | published reference to 6e-28 |
 
-## Comparison with AMFlow 2.0
-
-The [small-integral comparison](amflow-comparison.md) measures bubble, sunrise
-and massless-box FT evaluations at a common independently checked 20-digit
-threshold. It reports cold and reused-preparation timings, the isolated LiteRed
-compatibility adaptation needed for sunrise, and an optimization experiment
-that was not adopted after it slowed the cached sunrise matrix.
-
-## Further cold FT laptop examples
-
-The [four-example run](ft-laptop-examples.md) measured 7.85 s for a massive
-pentagon through epsilon squared, 18.88 s for the box-triangle, 23.86 s for an
-unequal three-loop banana, and 7m 45s for the planar double-box. All passed
-independent reference checks. These runs use fresh exact caches and disable
-persistent numerical checkpoints; the report records controls, tolerances and
-separate preparation/reference times.
+Comparisons with other programs are in
+[amflow-comparison.md](amflow-comparison.md) and
+[literature-benchmarks.md](literature-benchmarks.md); they were measured on
+other hardware and are not comparable with the tables above.

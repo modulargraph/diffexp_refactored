@@ -4,7 +4,7 @@ A denominator factor of a level's connection A(x, eps) that mixes the merge
 parameter with epsilon, such as `11*x*eps-5*x-eps+7`, is a singular point
 whose position depends on the dimension. This note records how many there
 are, what removes them, and what that buys. Measurements are for 2.2.0 on the
-4-core container of [recursion-cost-experiments.md](recursion-cost-experiments.md),
+4-core container of [performance.md](performance.md),
 one thread (`OMP_NUM_THREADS=1`), built-in IBP solver with its default seeds.
 The machine was shared, so times within about 10 % of each other are equal.
 

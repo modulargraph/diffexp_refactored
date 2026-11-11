@@ -67,12 +67,8 @@ reuse an incompatible numerical continuation. The explicit checkpoint importer
 validates immutable input snapshots and records transformations between
 supported numerical policies.
 
-The default compact policy enabled `rational_circuit_recurrence`,
-`compact_centered_recovery`, `compact_centered_only` and `circuit_grouped_dot`.
-(Historical: these switches were removed when the adjoint executors were
-replaced by one circuit executor.)
-Their corresponding options allow controlled comparisons. Reference recurrences
-remain available for verification and conditioning recovery.
+Reference recurrences remain available for verification and conditioning
+recovery.
 
 Exact rational extraction, constant construction, integer coefficients and
 valuations use FLINT objects directly. Rational coefficients enter Arb through

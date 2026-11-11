@@ -6,6 +6,11 @@ Association. Change its propagators, kinematics and requested powers to evaluate
 a new family; no name registration is needed. See
 [family configurations](feynman-families.md).
 
+`bubble_timelike.json`, `bubble_above_threshold.json`, `triangle_physical.json`
+and `box_physical.json` are in physical regions: their imaginary parts come
+from the [Feynman i0](feynman-families.md#the-feynman-i0), which is derived
+from the family. `ctest -R cli.causal` compares them with closed forms.
+
 For an independent comparison, the opt-in acceptance runner reports coefficients,
 reference differences and forbidden-pole checks as JSON:
 

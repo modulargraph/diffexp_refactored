@@ -59,8 +59,10 @@ The `prepare` and `ft` commands accept complete
 [Feynman-family configurations](feynman-families.md). Propagator geometry,
 requested integer powers, merge ladders, matching anchors and causal input are
 separate configuration data. A label never chooses a calculation. Prepared
-graphs retain the actual family definition so default Euclidean prescriptions
-are checked against its Symanzik polynomials.
+graphs retain the actual family definition: the Euclidean contour is used only
+after its Symanzik polynomials are checked, and any other kinematics orient
+each real singular point from the Symanzik `F` of its own level
+([the Feynman i0](feynman-families.md#the-feynman-i0), `causal.hpp`).
 
 The Mathematica package is an input adapter: it reads the original matrix files,
 normalizes boundary expressions and launches the executable using `RunProcess`.

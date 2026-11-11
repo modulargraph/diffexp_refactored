@@ -77,15 +77,101 @@ Optional `preparation` fields are `anchors`, `merges`, `total_seconds`,
 of zero-based positions in the current physical propagator list, after earlier
 merges. Without `merges` the built-in solver chooses the pair for large levels
 ([merge selection](performance.md#what-the-defaults-do)); explicit `merges`,
-`anchors` or `causal` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
+`anchors` or `causal.level_signs` keep the ladder as written. Anchors are exact rationals. CLI resource options override JSON fields.
 Optional numerical fields also include `contour_height`, `overlap`, `overlap_ratio`
 and `endpoint_order` (the last two are chosen together when omitted), and
 `epsilon_strategy` (`"expand"` or `"sample"`), `samples` and `sample_step` for
 [epsilon sampling](performance.md#epsilon-sampling).
 
-For Euclidean families the native code verifies positivity of the actual
-Symanzik polynomials before selecting its contour prescription. Other physical
-regions require an explicit `causal` object:
+## The Feynman i0
+
+Denominators are `D = m^2 - q^2` and the propagator is `1/(D - i0)`, so the
+second Symanzik polynomial enters as `F - i0`. Nothing has to be stated for
+that: the contour of every level is derived from the family.
+
+- A family whose `U` and `F` have only positive monomials (the Euclidean
+  region) has no cut on the integration domain. This is checked on the exact
+  polynomials; every real singular point of a level is then passed on the
+  same side.
+- Otherwise each real singular point `x*` of each level is treated on its
+  own. With `F(alpha, x)` the second Symanzik polynomial of the level's merged
+  family, the contour passes on the side
+
+  ```
+  sign(Im x) = -sign(dF/dx)   at the Landau pinch of F at x*,
+  ```
+
+  the side on which `F` acquires a negative imaginary part where it
+  vanishes. A point without a pinch (a pseudo-threshold, or a pole of the
+  master basis only) is free: the physical branch is analytic there and both
+  sides give the same value. Neighbouring points share a detour only if they
+  ask for the same side; between two that ask for opposite sides the path
+  returns to the real axis (an epsilon sample, whose path is lifted off the
+  axis, crosses it there).
+- The scalar leaf integrates `F(x)^(-a + L eps)` in closed form over `[0,1]`.
+  On `F < 0` its logarithm is `log|F| - i pi`, and a simple zero of `F`
+  inside the interval is passed off the axis on the side
+  `Im x = -sign(F'(x*))`, inside a disk that holds no other singular point of
+  the integrand; the logarithm is continued along that path and compared with
+  the rim value on return to the axis.
+
+How a point is decided, in ball arithmetic on its isolating interval:
+
+1. Every monomial coefficient of `F` in the Feynman parameters is nonzero at
+   `x*` with one common sign: `F` does not vanish on the open simplex near
+   `x*`. Free.
+2. Every monomial coefficient of `dF/dx` is identically zero or nonzero at
+   `x*`, the nonzero ones with one common sign `s`: `Im F` has the sign of
+   `s Im x` on the whole real simplex. The side is `-s`. This holds for any
+   number of loops and for massless lines (it is the rule "`s -> s + i0`"
+   when `F` depends on an invariant monotonically).
+3. One-loop levels, where `F = alpha^T M(x) alpha`: a pinch on a face `S` of
+   the simplex is a positive null vector of the principal submatrix `M_SS`.
+   A face with `det M_SS(x*) != 0` has none. A face whose determinant
+   vanishes for every `x` (soft and collinear regions of massless lines) is
+   skipped when the rank at `x*` equals the generic rank: its null vectors
+   are present for every `x` and `dF/dx` vanishes on them. On a remaining
+   face, entries of `dM_SS/dx` of one sign give the side; on an edge with a
+   massless line, where `F = a_j (2 b a_k + c a_j)`, the zero of the second
+   factor enters through the massless vertex with the sign of `b'`; otherwise
+   the null vector is read from the adjugate and is either of mixed sign (no
+   pinch) or positive, with the sign of `alpha^T M' alpha`.
+
+A side is never guessed. If none of these statements decides a point that the
+path has to pass, the run stops:
+
+```
+the causal side of the real singular point x = 0.0912... of level 1 could not
+be derived from the level's Symanzik F (...); supply an explicit `causal`
+object (f_rim and one level_signs entry per level) to state the contour
+```
+
+What is not decided:
+
+- Levels with two or more loops beyond statements 1 and 2. Their faces with
+  vanishing `U` need the Symanzik polynomials of contracted subgraphs. A
+  two-loop level above a threshold in which `F` is not monotone (the equal
+  mass sunrise at `p^2 > 9 m^2`) is refused.
+- One-loop pinches that sit on the boundary of a face, which happens when a
+  massless line meets a threshold of its neighbours in a way statement 2 does
+  not cover, and points where two pinches ask for opposite sides.
+- A repeated zero of the leaf's `F` inside `(0,1)` (a family exactly at a
+  threshold): the contour is pinched and the run stops with
+  `F has a repeated zero at x = ... the contour is pinched there`.
+
+The homotopy of a finite detour to the infinitesimal one is not certified
+(complex singular points of a level are not tracked), as for every transport
+path. The JSON report has `causal.mode` (`euclidean`, `derived` or
+`supplied`) and, when derived, the oriented points of each level with their
+side.
+
+Physical-region examples: `bubble_timelike.json`, `bubble_above_threshold.json`,
+`triangle_physical.json` (its first level passes its two cuts on opposite
+sides) and `box_physical.json` (massless box at `s > 0`, `t < 0`).
+
+### Explicit contour
+
+An optional `causal` object overrides the derivation:
 
 ```json
 "causal": {
@@ -95,10 +181,17 @@ regions require an explicit `causal` object:
 }
 ```
 
-There must be one nonzero sign per merge level. A prescription is mathematical
-input; the parser does not establish that an arbitrary supplied contour is the
-correct physical continuation. Unknown fields and inconsistent dimensions are
-rejected. A requested anchor that turns out to be singular in the master basis
+With `level_signs` there must be one nonzero sign per merge level, and every
+real singular point of a level is passed on that level's side; the scalar
+leaf uses `f_rim` (and derives the side of a zero of its own `F` from it).
+`provenance` is then required. Such a prescription is mathematical input; the
+parser does not establish that a supplied contour is the correct physical
+continuation, and one side per level is not enough for every family.
+Without `level_signs` the object only sets `f_rim` (`1` is the complex
+conjugate prescription `F + i0`) and the sides are derived as above. Unknown
+fields and inconsistent dimensions are rejected.
+
+A requested anchor that turns out to be singular in the master basis
 the reduction selected is moved to the simplest regular rational within 3/20
 that no other real singular point of the level separates from it; the progress
 output names the replacement. The full Henn reconstruction remains

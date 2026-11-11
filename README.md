@@ -75,6 +75,12 @@ family = DiffExpFamilyTemplate["sunrise"];
 DiffExpFeynmanTrick[family, {"--cache", "/path/to/cache", "--epsilon-order", "0"}]
 ```
 
+Kinematics may be Euclidean or physical. Propagators are `1/(m^2 - q^2 - i0)`
+and the contour that this prescription implies is derived for every level
+from its Symanzik polynomial; above a threshold the result is complex
+([the Feynman i0](docs/feynman-families.md#the-feynman-i0): what is derived
+and what is refused).
+
 `--json` prints one JSON object on stdout, with progress on stderr.
 Coefficients are ordered by component, then epsilon power, beginning at
 `epsilon_low`; each has `real` and `imaginary` Arb interval strings.

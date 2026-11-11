@@ -37,8 +37,9 @@ Transport time is linear in the number of epsilon orders carried.
   admitted per chart is ten digits below the requested leaf digits (2^-127
   by default; `--transport-bits`).
 - **Paths.** A leg stays on the real axis and passes a real singular point
-  over a triangle on the causal side. An epsilon sample uses a path lifted
-  to the contour height instead.
+  over a triangle on the causal side, which is derived for each point. An
+  epsilon sample uses a path lifted to the contour height instead, crossing
+  the axis between points that ask for opposite sides.
 - **Uncertainty by probes** (`--uncertainty probe`). Midpoints are
   transported and the size of discarded radii is followed along two probe
   rows. This is an estimate, not an enclosure; `--uncertainty map` gives the

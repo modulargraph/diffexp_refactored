@@ -2,6 +2,24 @@
 
 ## 2.2.1
 
+- The Feynman i0 is derived (`causal.hpp`): `diffexp ft` evaluates families
+  in physical regions from their definition, with no `causal` object. Every
+  real singular point of a level is passed on the side
+  `Im x = -sign(dF/dx)` of its Landau pinch of the level's Symanzik `F`,
+  point by point (two cuts of one level may need opposite sides); points
+  without a pinch are free. The scalar leaf passes simple zeros of `F(x)`
+  inside `(0,1)` off the axis on the side `-sign(F')`. Decisions are made in
+  ball arithmetic: monotonicity of `F` in the level parameter for any number
+  of loops, the face-by-face Landau analysis for one-loop levels. A point
+  that is not decided (a multi-loop level above a threshold where `F` is not
+  monotone, a one-loop pinch on the boundary of a face) stops the run with a
+  message naming the level and the point; a repeated zero of the leaf's `F`
+  (a family exactly at threshold) stops it as a pinched contour. `causal`
+  remains as an override: with `level_signs` it states one side per level,
+  without them it only sets `f_rim`. Families with positive `U` and `F` keep
+  their contour. The report has `causal.mode` and the oriented points.
+  Examples `bubble_timelike`, `bubble_above_threshold`, `triangle_physical`
+  and `box_physical`; test `cli.causal`.
 - `diffexp ft --epsilon-strategy sample` (family key
   `numerical.epsilon_strategy`): the Laurent coefficients from samples at
   shifted dimensions. The recursion is prepared once, the samples run as

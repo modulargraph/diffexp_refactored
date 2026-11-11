@@ -89,12 +89,35 @@ inline std::optional<Image> fit(Samples samples,std::size_t coefficient,
   const auto columns=ansatz.numerator.size()+ansatz.denominator.size();
   if(samples.size()+1<columns||columns<2)return std::nullopt;
   nmod_mat_t matrix,kernel;nmod_mat_init(matrix,samples.size(),columns,p);nmod_mat_init(kernel,columns,columns,p);
+  // The powers of each coordinate are computed once per sample and shared by
+  // all monomials of the ansatz.
+  std::vector<unsigned> degree;
+  for(const auto* terms:{&ansatz.numerator,&ansatz.denominator})for(const auto& term:*terms){
+    if(term.size()>degree.size())degree.resize(term.size());for(std::size_t v=0;v<term.size();++v)degree[v]=std::max(degree[v],term[v]);}
+  std::vector<std::vector<Word>> powers(degree.size());for(std::size_t v=0;v<degree.size();++v)powers[v].resize(degree[v]+1);
+  const auto monomial=[&](const Power& term){Word value=1;for(std::size_t v=0;v<term.size();++v)if(term[v])value=nmod_mul(value,powers[v][term[v]],matrix->mod);return value;};
+  const auto n=ansatz.numerator.size();
   for(std::size_t i=0;i<samples.size();++i) {
-    auto n=values(ansatz.numerator,samples[i].point,matrix->mod),d=values(ansatz.denominator,samples[i].point,matrix->mod);
-    for(std::size_t j=0;j<n.size();++j)nmod_mat_entry(matrix,i,j)=n[j];
-    for(std::size_t j=0;j<d.size();++j)nmod_mat_entry(matrix,i,n.size()+j)=nmod_neg(nmod_mul(samples[i].coefficients.at(coefficient),d[j],matrix->mod),matrix->mod);
+    for(std::size_t v=0;v<degree.size();++v){const Word x=samples[i].point.at(v)%p;powers[v][0]=1;for(unsigned e=1;e<=degree[v];++e)powers[v][e]=nmod_mul(powers[v][e-1],x,matrix->mod);}
+    const Word negative=nmod_neg(samples[i].coefficients.at(coefficient)%p,matrix->mod);
+    for(std::size_t j=0;j<n;++j)nmod_mat_entry(matrix,i,j)=monomial(ansatz.numerator[j]);
+    for(std::size_t j=0;j<ansatz.denominator.size();++j)nmod_mat_entry(matrix,i,n+j)=nmod_mul(negative,monomial(ansatz.denominator[j]),matrix->mod);
   }
-  auto rank=nmod_mat_nullspace(kernel,matrix);nmod_mat_clear(matrix);
+  // The kernel of the leading rows decides without eliminating all of them.
+  // If it is one vector, the kernel of the complete system is that vector
+  // when the remaining rows annihilate it and empty otherwise; if it is
+  // empty, so is the complete kernel. Only a larger kernel of the leading
+  // rows needs the complete system. The result is the same in every case.
+  slong rank=-1;const slong rows=nmod_mat_nrows(matrix),lead=static_cast<slong>(columns)+2;
+  if(rows>lead+2) {
+    nmod_mat_t leading;nmod_mat_window_init(leading,matrix,0,0,lead,columns);rank=nmod_mat_nullspace(kernel,leading);nmod_mat_window_clear(leading);
+    if(rank==1)for(slong i=lead;i<rows&&rank==1;++i){Word dot=0;
+      for(std::size_t j=0;j<columns;++j)dot=nmod_add(dot,nmod_mul(nmod_mat_entry(matrix,i,j),nmod_mat_entry(kernel,j,0),matrix->mod),matrix->mod);
+      if(dot)rank=0;}
+    else if(rank>1)rank=-1;
+  }
+  if(rank<0)rank=nmod_mat_nullspace(kernel,matrix);
+  nmod_mat_clear(matrix);
   if(rank!=1){nmod_mat_clear(kernel);return std::nullopt;}
   auto pivot=ansatz.pivot;
   if(!fixed_pivot){pivot=0;while(pivot<ansatz.denominator.size()&&!nmod_mat_entry(kernel,ansatz.numerator.size()+pivot,0))++pivot;}

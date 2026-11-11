@@ -337,6 +337,16 @@ class Evaluator {
     if(!options_.adjoint.truncation_bits)options_.adjoint.truncation_bits=static_cast<unsigned>(std::min<double>(
       std::min<double>(2.0*options_.ordinary_order,static_cast<double>(options_.working_bits)-32),
       std::ceil((options_.leaf_digits+10.0)*std::log2(10.0))));
+    // The endpoint constraints are checked on transported values: with a
+    // Taylor tail admitted above 2^-87 the check cannot hold to 1e-20, and
+    // its tolerance follows the tail at half its bits: a level of 112 rows
+    // on 47 masters was seen to lose 25 bits against the tail.
+    if(options_.adjoint.truncation_bits<87) {
+      const unsigned bits=std::max(8u,options_.adjoint.truncation_bits/2);
+      std::string power="1";for(unsigned i=0;i<bits;++i){int carry=0;for(auto digit=power.rbegin();digit!=power.rend();++digit){const int v=(*digit-'0')*2+carry;*digit=static_cast<char>('0'+v%10);carry=v/10;}if(carry)power.insert(power.begin(),'1');}
+      const Rational loose("1/"+power);
+      if(options_.endpoint_constraint_tolerance<loose)options_.endpoint_constraint_tolerance=loose;
+    }
     if(graph_.specialised)options_.matching.numeric_leading_gauge=true;
     if(!options_.overlap_ratio) {
       options_.overlap_ratio=graph_.specialised?16:64;

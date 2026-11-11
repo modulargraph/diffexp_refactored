@@ -68,6 +68,9 @@ int main(int argc, char** argv) {
       bool epsilon_order_given=configuration.epsilon_order_given;
       auto options=configuration.preparation;
       auto numerical=configuration.numerical;
+      // The command line accumulates top-down wherever that is covered; the
+      // library default is one row per requested integral.
+      numerical.accumulation=diffexp::recursion::Accumulation::weighted;
       const auto preparation_start=std::chrono::steady_clock::now();
       diffexp::AdjointConditioningStats conditioning;
       numerical.adjoint.conditioning_stats=&conditioning;
@@ -166,6 +169,11 @@ int main(int argc, char** argv) {
           const std::string mode=option_value;
           if(mode!="probe" && mode!="map")throw std::invalid_argument("FT uncertainty propagation must be probe or map");
           numerical.adjoint.uncertainty=mode=="map"?diffexp::AdjointOptions::Uncertainty::map:diffexp::AdjointOptions::Uncertainty::probe;
+        }
+        else if(command=="ft" && option=="--accumulation") {
+          const std::string mode=option_value;
+          if(mode!="rows" && mode!="weighted")throw std::invalid_argument("FT accumulation must be rows or weighted");
+          numerical.accumulation=mode=="rows"?diffexp::recursion::Accumulation::rows:diffexp::recursion::Accumulation::weighted;
         }
         else if(command=="ft" && option=="--transport-bits") {
           char* end=nullptr;const auto value=std::strtoul(option_value,&end,10);
@@ -566,6 +574,8 @@ int main(int argc, char** argv) {
         const auto& stats=evaluator.statistics();
         report["ft_transport"]=boost::json::object{{"method","taylor"},{"direct_endpoints",stats.direct_endpoints},
           {"uncertainty",numerical.adjoint.uncertainty==diffexp::AdjointOptions::Uncertainty::probe?"probe":"map"}};
+        report["ft_transport"].as_object()["accumulation"]=stats.weighted_levels?"weighted":"rows";
+        report["ft_transport"].as_object()["weighted_levels"]=stats.weighted_levels;
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
         // Phases of numerical_seconds that precede transport. Disjoint from each
         // other and from ordinary_seconds.
@@ -580,6 +590,7 @@ int main(int argc, char** argv) {
           {"structural_zero_conflicts",stats.structural_zero_conflicts}};
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
+          <<"Accumulation: "<<(stats.weighted_levels?"weighted, ":"rows, ")<<stats.weighted_levels<<" levels transported as weighted rows.\n"
           <<"Ordinary continuation: "<<stats.ordinary_checkpoints.loaded<<" saved arms resumed, "<<stats.ordinary_checkpoints.completed_reused
           <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
           <<"Child-window preflights "<<stats.demand_preflights<<"; local operator reuses "<<stats.local_operator_reuses<<".\n"
@@ -716,6 +727,14 @@ Feynman-trick recursion
   --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis)
   --leaf-digits N                 1..100000 (default 28)
   --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
+  --accumulation weighted|rows    how the levels are combined (adjoint method). weighted
+                                  (default): from the top, every level transports one row per
+                                  requested integral of the family, weighted by what the level
+                                  above passes down, and the leaf values enter last. rows: from
+                                  the leaf, every level transports one row per integral its
+                                  parent needs. More than 4 requested integrals (--henn-basis)
+                                  and the other methods are always evaluated by rows
+                                  (docs/performance.md)
   --uncertainty probe|map         how a transport carries the uncertainty it inherits. probe
                                   (default): midpoints, with two probe rows (one beside a single
                                   row) following the size of the uncertainty, an estimate; steps

@@ -7,6 +7,20 @@
   chart's radii are its own rounding (defect radii of the midpoint
   recurrence), so steps are no longer halved by inflated interval bounds;
   a single transported row is followed by one probe row instead of two.
+- One weighted row per level (`diffexp ft --accumulation weighted|rows`,
+  default `weighted`; `NumericalOptions::accumulation`, whose library
+  default is `rows`). The product of the levels' local operators is formed
+  from the top: a level transports the combination of its rows weighted by
+  what the level above passes down, one row per requested integral of the
+  family, and hands the weights on its masters to its child; the leaf
+  values enter last. Counted in multiplications per Taylor order the inner
+  levels cost 4 to 6 times less (docs/performance.md); not yet timed.
+  Covered: the adjoint method with at most four requested integrals
+  (`weighted_max_targets`), including endpoint-boundary levels, internal
+  bases and endpoint constraints, which are carried as further rows and
+  checked through the requested epsilon order. Other requests are
+  evaluated by rows as before. The report has `ft_transport.accumulation`.
+
 - The Feynman i0 is derived (`causal.hpp`): `diffexp ft` evaluates families
   in physical regions from their definition, with no `causal` object. Every
   real singular point of a level is passed on the side

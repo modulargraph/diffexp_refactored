@@ -22,6 +22,15 @@
 
 namespace diffexp::recursion {
 enum class LinearMethod { adjoint, factored, automatic };
+// How the chain of local operators is evaluated. `rows`: bottom-up, every
+// level transports one row per integral its parent needs and composes the
+// result with its child's expression. `weighted`: top-down (reverse-mode
+// accumulation), every level transports one row per top-level target, the
+// combination of its rows with the weights its parent hands down, and passes
+// the weights on its masters to its child; the leaf values are contracted
+// last. Applies to the adjoint method with few top-level targets; any other
+// request is evaluated by rows.
+enum class Accumulation { rows, weighted };
 struct BasisSelection;
 struct NumericalOptions {
   bool component_epsilon_demands=true;
@@ -62,6 +71,11 @@ struct NumericalOptions {
   // Unsupported fixed sectors retain the complete Frobenius construction.
   bool direct_endpoint_functionals=false;
   LinearMethod linear_method=LinearMethod::adjoint;
+  // The library default keeps one row per requested integral; `diffexp ft`
+  // selects weighted. More top-level targets than weighted_max_targets are
+  // evaluated by rows, which then costs no more.
+  Accumulation accumulation=Accumulation::rows;
+  unsigned weighted_max_targets=4;
   // The recursion propagates inherited uncertainty by probes (see
   // AdjointOptions::Uncertainty); the transport's own default is the map.
   AdjointOptions adjoint=[]{AdjointOptions value;value.uncertainty=AdjointOptions::Uncertainty::probe;return value;}();
@@ -110,6 +124,9 @@ struct NumericalStatistics {
   std::size_t endpoint_series_built=0;
   std::size_t direct_endpoints=0;
   std::size_t adjoint_selections=0,factored_selections=0;
+  // Levels transported as weighted rows, and evaluations that asked for
+  // weighted accumulation but were evaluated by rows.
+  std::size_t weighted_levels=0,weighted_fallbacks=0;
   std::size_t demand_preflights=0,local_operator_reuses=0;
   std::size_t conditioning_method_fallbacks=0;
   std::size_t endpoint_constraint_rows=0,endpoint_constraint_coefficients=0;
@@ -509,6 +526,8 @@ class Evaluator {
       ++statistics_.cache_hits;report(depth,"cache hit",desired_top);return *cache_[depth];
     }
     PrecisionScope precision(options_.working_bits);
+    if(depth==0 && options_.accumulation==Accumulation::weighted)
+      if(auto weighted=evaluate_weighted(desired_top))return *weighted;
     const auto& node=graph_.nodes[depth];++statistics_.numeric_evaluations;
     if(node.scalar_leaf) {
       report(depth,"certified scalar leaf",desired_top);
@@ -1717,6 +1736,320 @@ class Evaluator {
       }
     }
     throw std::runtime_error("recursive factored child epsilon refinement budget exhausted");
+  }
+  // ---- Weighted accumulation: one row per top-level target at every level ----
+  //
+  // The requested integrals are w0 L0 L1 ... L(n-1) v with the local operators
+  // Lk (rows: the integrals level k is asked for, columns: its masters at the
+  // matching point, which are the integrals its child is asked for), the
+  // values v of the terminal node and w0 the identity on the top-level
+  // targets. By rows the product is formed from the right, every Lk in full.
+  // Here it is formed from the left: level k receives weights w(k) on its
+  // requested integrals and returns w(k+1)=w(k) Lk, for which it transports
+  // the single combined row w(k) E (E: its endpoint rows) with the combined
+  // forcing w(k) F instead of all rows of E.
+  //
+  // The weights of a level whose input is not exact are short of an order.
+  struct WeightedDemand {std::size_t depth;int deficit;};
+  static bool direct_only(const Node& node) {
+    return std::all_of(node.operations.begin(),node.operations.end(),
+      [](const auto& operation){return operation.operation==feynman::Operation::Direct;});
+  }
+  // The weights through `high`, with zeros above their known window (the
+  // caller accounts for what that leaves valid), followed by one row and one
+  // column per endpoint constraint of the level with unit weight: a
+  // constraint is a further target that starts at this level.
+  static LaurentRows extended_weights(const LaurentRows& weights,std::size_t constraints,int high) {
+    const auto rows=weights.coefficients.size(),columns=weights.columns();
+    const int low=constraints?std::min(weights.low,0):weights.low;
+    high=std::max(high,low);
+    LaurentRows out{low,high,std::vector(rows+constraints,std::vector(columns+constraints,std::vector<B>(high-low+1,B(0))))};
+    for(std::size_t a=0;a<rows;++a)for(std::size_t i=0;i<columns;++i)
+      for(int k=weights.low;k<=std::min(weights.high,high);++k)
+        out.coefficients[a][i][k-low]=weights.coefficients[a][i][k-weights.low];
+    if(low<=0 && high>=0)for(std::size_t c=0;c<constraints;++c)out.coefficients[rows+c][columns+c][-low]=B(1);
+    return out;
+  }
+  // One level. `weights` (rows: the top-level targets, then the endpoint
+  // constraints of the levels above; columns: the level's requested integrals)
+  // are known through weights.high, to every order if `exact`. Returns the
+  // weights on the level's masters at its matching point through `target`,
+  // with the level's own constraint rows appended, or reports by how many
+  // orders its input is short.
+  LaurentRows weighted_level(std::size_t depth,const LaurentRows& weights,bool exact,int target,
+      std::vector<std::string>& labels,unsigned desired_top) {
+    const auto& node=graph_.nodes[depth];const auto sample=graph_.dimension;
+    const auto requested=node.operations.size();
+    if(weights.columns()!=requested)throw std::logic_error("weighted accumulation: the weights do not match the level's requested integrals");
+    ++statistics_.numeric_evaluations;
+    const long known=weights.high;
+    if(direct_only(node)) {
+      // No endpoint, no transport: the exact rows at the anchor.
+      const auto local=exact_laurent_rows(node.observable_rows,sample.constant(node.anchor),
+        std::max(0,checked(static_cast<long>(target)-weights.low)));
+      if(!exact && known+local.low<target)throw WeightedDemand{depth,checked(static_cast<long>(target)-known-local.low)};
+      auto out=linear_boundary::compose(extended_weights(weights,0,checked(static_cast<long>(target)-local.low)),local,target);
+      linear_boundary::tighten(out);
+      observe_operator(depth,"weights on the child's integrals",out);
+      return out;
+    }
+    auto& prepared=plan(depth,desired_top);
+    preflight_linear_demands(depth,prepared);
+    ++statistics_.adjoint_selections;++statistics_.weighted_levels;
+    const bool at_endpoint=node.boundary!=BoundarySite::anchor;
+    const auto anchor=sample.constant(matching_point(depth,prepared));
+    const auto constraints=prepared.constraint_labels.size();
+    const auto d=prepared.gauge.matrix.size();
+    if(prepared.lower.functionals.size()!=requested+constraints)
+      throw std::logic_error("weighted accumulation: endpoint rows differ from the level's operations and constraints");
+    // As by rows: rows on the masters at the matching point through
+    // local_high (the boundary map of an endpoint level follows and its poles
+    // ask for more of them), transported through `high` before the gauge.
+    const int map_low=at_endpoint?boundary_map_low(prepared):0;
+    const int local_high=checked(static_cast<long>(target)-map_low);
+    const int high=checked(local_high+prepared.largest_shift);
+    const int weights_low=constraints?std::min(weights.low,0):weights.low;
+    const int operator_high=std::max(0,checked(static_cast<long>(high)-weights_low));
+    auto stage=adjoint_stage(depth,prepared,operator_high);
+    // Every row with a forcing becomes one constant component of the
+    // transported state, which holds its weight.
+    std::vector<std::size_t> sources;int forcing_low=0;
+    for(std::size_t i=0;i<stage.lower_forcing.size();++i) {
+      bool forced=false;
+      for(const auto& entry:stage.lower_forcing[i])if(!entry.is_zero()) {
+        forced=true;forcing_low=std::min(forcing_low,checked(*exact_epsilon_valuation(entry,ei_)));
+      }
+      if(forced)sources.push_back(i);
+    }
+    Matrix direct(requested+constraints,std::vector<Exact>(d,sample.constant(0)));
+    std::optional<LaurentRows> direct_rows;
+    {
+      bool any=false;
+      for(std::size_t i=0;i<requested;++i)if(node.operations[i].operation==feynman::Operation::Direct){direct[i]=node.observable_rows[i];any=true;}
+      if(any)direct_rows=exact_laurent_rows(direct,anchor,std::max(0,checked(static_cast<long>(local_high)-weights_low)));
+    }
+    // Lowest order of anything a weight is multiplied by before the gauge.
+    const int reach=std::min({stage.lower_endpoint.low,stage.upper_endpoint.low,forcing_low});
+    long padded=static_cast<long>(high)-reach;
+    if(direct_rows)padded=std::max(padded,static_cast<long>(local_high)-direct_rows->low);
+    const auto extended=extended_weights(weights,constraints,checked(std::max(0L,padded)));
+    const auto rows=extended.coefficients.size(),s=sources.size();
+    const Matrix no_forcing(rows,std::vector<Exact>(d+s,sample.constant(0)));
+    auto settings=options_.adjoint;settings.taylor_order=options_.ordinary_order;
+    // g'=w F-g A for the combined row g=w E is the homogeneous equation of the
+    // row (g,u), u=epsilon^q w constant, with the connection [[A,0],[-F/epsilon^q,0]]:
+    // q is the lowest epsilon order of the forcing, so that the block keeps a
+    // nonnegative epsilon valuation. Uncertainty of the weights is then
+    // carried like that of any transported row, and a checkpoint is keyed by
+    // the weights through its initial rows.
+    const auto arm=[&](const char* side,const LaurentRows& endpoint,const Matrix& forcing,const std::vector<Exact>& vertices) {
+      auto initial=linear_boundary::compose(extended,endpoint,high);
+      // The arm of the endpoint that carries the boundary starts at the
+      // matching point.
+      if(vertices.size()<2)return initial;
+      const int low=s?std::min(initial.low,checked(static_cast<long>(extended.low)+forcing_low)):initial.low;
+      LaurentRows wide{low,high,std::vector(rows,std::vector(d+s,std::vector<B>(high-low+1,B(0))))};
+      for(std::size_t a=0;a<rows;++a) {
+        for(std::size_t j=0;j<d;++j)for(int k=initial.low;k<=high;++k)
+          wide.coefficients[a][j][k-low]=initial.coefficients[a][j][k-initial.low];
+        for(std::size_t c=0;c<s;++c)for(int k=low;k<=high;++k) {
+          const long order=static_cast<long>(k)-forcing_low;
+          if(order>=extended.low && order<=extended.high)
+            wide.coefficients[a][d+c][k-low]=extended.coefficients[a][sources[c]][order-extended.low];
+        }
+      }
+      Matrix connection(d+s,std::vector<Exact>(d+s,sample.constant(0)));
+      for(std::size_t j=0;j<d;++j)for(std::size_t k=0;k<d;++k)connection[j][k]=stage.connection[j][k];
+      const auto scale=sample.variable(ei_).pow(static_cast<unsigned long>(-forcing_low));
+      for(std::size_t c=0;c<s;++c)for(std::size_t j=0;j<d;++j) {
+        const auto& entry=forcing[sources[c]][j];
+        if(!entry.is_zero())connection[d+c][j]=-(entry*scale);
+      }
+      const auto* stats=settings.conditioning_stats;
+      const AdjointConditioningStats before=stats?*stats:AdjointConditioningStats{};
+      const auto began=std::chrono::steady_clock::now();
+      auto result=ordinary_transport(connection,std::move(wide),no_forcing,vertices,settings);
+      std::ostringstream text;
+      text<<side<<" adjoint transport done: "<<rows<<" rows x "<<d<<" masters, weighted ("<<requested<<" requested integrals, "
+          <<s<<" forcing sources), epsilon "<<low<<".."<<high<<", "<<vertices.size()-1<<" path legs";
+      if(stats)text<<", "<<stats->charts-before.charts<<" charts ("<<stats->centered_charts-before.centered_charts
+          <<" centred, "<<stats->conditioning_subdivisions-before.conditioning_subdivisions<<" halved)";
+      text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
+      if(stats)text<<" (compile "<<stats->compilation_seconds-before.compilation_seconds<<", prepare "
+          <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds
+          <<"; "<<stats->circuit_terms-before.circuit_terms<<" products)";
+      report(depth,text.str(),high);
+      // The source components did their work.
+      for(auto& row:result.coefficients)row.resize(d);
+      return result;
+    };
+    report(depth,"lower adjoint transport",high);
+    const auto left=arm("lower",stage.lower_endpoint,stage.lower_forcing,stage.lower_path);
+    observe_operator(depth,"lower transported weighted rows",left);
+    report(depth,"upper adjoint transport",high);
+    const auto right=arm("upper",stage.upper_endpoint,stage.upper_forcing,stage.upper_path);
+    observe_operator(depth,"upper transported weighted rows",right);
+    const auto transported=add_laurent_rows(left,right);
+    // `valid`: the order through which the result follows from the declared
+    // windows alone, were the weights unknown above `known`.
+    long valid=known+reach;
+    LaurentRows combined;
+    if(prepared.has_physical_basis) {
+      const auto inverse=exact_laurent_rows(prepared.inverse_diagonal,anchor,
+        std::max(0,checked(static_cast<long>(local_high)-transported.low)));
+      combined=linear_boundary::compose(transported,inverse,local_high);
+      valid+=inverse.low;
+    } else {
+      combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
+      valid+=static_cast<long>(combined.high)-transported.high;
+    }
+    if(direct_rows) {
+      combined=add_laurent_rows(combined,linear_boundary::compose(extended,*direct_rows,combined.high));
+      valid=std::min(valid,known+direct_rows->low);
+    }
+    if(at_endpoint) {
+      // The child's values enter through the exact boundary map: the weights
+      // on the masters at the overlap point are multiplied by it.
+      const auto map=exact_laurent_rows(*prepared.boundary_map,anchor,
+        std::max(0,checked(static_cast<long>(target)-combined.low)));
+      combined=linear_boundary::compose(combined,map,target);
+      valid+=map.low;
+    } else if(options_.component_epsilon_demands) {
+      // Column j of the local operator vanishes identically below -needs[j]
+      // (component_child_needs), so column j of the result vanishes below
+      // weights_low-needs[j]: rounding noise there is the exact zero. For the
+      // same reason weights unknown above `known` cannot reach column j at
+      // or below known-needs[j], whatever the declared windows say.
+      const auto needs=component_child_needs(depth,prepared,operator_high);
+      for(std::size_t j=0;j<needs.size();++j)if(needs[j])
+        for(int k=combined.low;k<=combined.high && k<static_cast<long>(weights_low)-*needs[j];++k)for(auto& row:combined.coefficients) {
+          auto& value=row[j][k-combined.low];if(value.is_zero())continue;
+          if(value.contains_zero()){value=B(0);++statistics_.structural_zero_coefficients;}
+          else ++statistics_.structural_zero_conflicts;
+        }
+      valid=std::max(valid,known-epsilon_demand::maximum(needs,-1000));
+    }
+    if(!exact && valid<target)throw WeightedDemand{depth,checked(static_cast<long>(target)-valid)};
+    if(combined.high<target)throw std::logic_error("weighted accumulation: the local window is below its target");
+    linear_boundary::tighten(combined);
+    labels.insert(labels.end(),prepared.constraint_labels.begin(),prepared.constraint_labels.end());
+    observe_operator(depth,"weights on the child's integrals",combined);
+    return combined;
+  }
+  // The requested integrals of the top level through desired_top, or nothing
+  // if the request is not covered: the caller then evaluates by rows.
+  // Covered: the adjoint method, a top level that is transported or direct,
+  // at most weighted_max_targets requested integrals, and a chain in which
+  // every level's child provides exactly its masters down to a scalar leaf or
+  // an exact-zero node. Levels with an endpoint boundary, internal bases and
+  // endpoint constraints are covered. Only the top level's expression and
+  // value are published; a later request for an inner level is evaluated by
+  // rows.
+  std::optional<LaurentBoundary> evaluate_weighted(unsigned desired_top) {
+    const auto& top=graph_.nodes.front();
+    if(top.scalar_leaf || top.closure.ordered_basis.empty())return std::nullopt;
+    const auto decline=[&](const std::string& reason) -> std::optional<LaurentBoundary> {
+      ++statistics_.weighted_fallbacks;
+      report(0,"weighted accumulation not applicable ("+reason+"): one row per requested integral",static_cast<int>(desired_top));
+      return std::nullopt;
+    };
+    if(options_.linear_method!=LinearMethod::adjoint)return decline("the linear method is not adjoint");
+    const auto targets=top.requested.size();
+    if(!targets || targets>options_.weighted_max_targets)
+      return decline(std::to_string(targets)+" top-level targets, at most "+std::to_string(options_.weighted_max_targets)+" are weighted");
+    std::size_t terminal=0;
+    for(;;++terminal) {
+      const auto& node=graph_.nodes[terminal];
+      if(node.requested.size()!=node.operations.size())return decline("a level's operations differ from its requested integrals");
+      if(node.scalar_leaf || node.closure.ordered_basis.empty())break;
+      if(terminal+1>=graph_.nodes.size() || graph_.nodes[terminal+1].requested!=node.closure.ordered_basis)
+        throw std::logic_error("recursive child does not own the parent's ordered master demand");
+    }
+    // The structural losses of all levels, as by rows: the same exact plans
+    // and preflights, and the terminal node asked for the same first order.
+    std::vector<int> loss(terminal,0);long first=desired_top;
+    for(std::size_t depth=0;depth<terminal;++depth) {
+      const auto& node=graph_.nodes[depth];
+      if(direct_only(node))loss[depth]=checked(-static_cast<long>(direct_demand(depth).low));
+      else {
+        if(!plans_[depth])report(depth,"endpoint preparation",static_cast<int>(desired_top));
+        auto& prepared=plan(depth,desired_top);
+        preflight_linear_demands(depth,prepared);
+        loss[depth]=*prepared.factored_child_loss;
+      }
+      first+=loss[depth];
+      if(first>static_cast<long>(options_.max_epsilon))throw std::runtime_error("recursive adjoint child epsilon demand exceeds finite budget");
+    }
+    report(0,"weighted accumulation: "+std::to_string(targets)+(targets==1?" row":" rows")+" per level through "+
+      std::to_string(terminal)+" levels",static_cast<int>(desired_top));
+    report(terminal,"child boundary",static_cast<int>(first));
+    (void)evaluate_child(terminal,static_cast<unsigned>(std::max(0L,first)));
+    // extra[k]: orders level k lost beyond its structural loss.
+    std::vector<int> extra(terminal,0);
+    for(unsigned attempt=0;attempt<options_.max_refinements;++attempt) {
+      // The weights entering level k are needed through target[k]: those on
+      // the terminal values through desired_top minus the lowest order of the
+      // values, and every level above by its loss more.
+      const int lambda=child_window_low(terminal,*cache_[terminal]);
+      std::vector<int> target(terminal+1,0);
+      target[terminal]=checked(static_cast<long>(desired_top)-lambda);
+      for(std::size_t depth=terminal;depth-->0;)
+        target[depth]=checked(static_cast<long>(target[depth+1])+loss[depth]+extra[depth]);
+      const int unit_high=std::max(0,target[0]);
+      LaurentRows weights{0,unit_high,std::vector(targets,std::vector(targets,std::vector<B>(unit_high+1,B(0))))};
+      for(std::size_t i=0;i<targets;++i)weights.coefficients[i][i][0]=B(1);
+      std::vector<std::string> labels;
+      try {
+        for(std::size_t depth=0;depth<terminal;++depth)
+          weights=weighted_level(depth,weights,depth==0,target[depth+1],labels,desired_top);
+      } catch(const WeightedDemand& request) {
+        extra[request.depth]+=request.deficit;++statistics_.refinements;
+        report(request.depth,"weighted window refinement",request.deficit);
+        continue;
+      }
+      // The terminal values through the order the weights' poles ask for.
+      int request=std::max(0,checked(static_cast<long>(desired_top)-weights.low));
+      bool restart=false;
+      for(unsigned inner=0;inner<options_.max_refinements;++inner) {
+        if(request>static_cast<int>(options_.max_epsilon))throw std::runtime_error("recursive adjoint child epsilon demand exceeds finite budget");
+        if(cache_[terminal]->high()<request) {
+          ++statistics_.refinements;report(terminal-1,"child refinement",request);
+          (void)evaluate_child(terminal,static_cast<unsigned>(request));
+        }
+        // Deeper poles of the terminal values than the windows were sized for.
+        if(child_window_low(terminal,*cache_[terminal])<lambda){restart=true;break;}
+        if(!expressions_[terminal])throw std::logic_error("weighted accumulation: the terminal node has no linear expression");
+        const auto& child=*expressions_[terminal];
+        int next=request;
+        try {
+          report(0,"shared boundary application",static_cast<int>(desired_top));
+          auto expression=linear_boundary::compose(weights,child,checked(static_cast<long>(desired_top)-child.leaf_source->low));
+          linear_boundary::tighten(expression.transform);
+          auto result=linear_boundary::materialize(expression,static_cast<int>(desired_top));
+          result.taylor_tail_certified=false;
+          if(result.values.size()!=targets+labels.size() || expression.transform.coefficients.size()!=result.values.size())
+            throw std::logic_error("weighted constrained expression shape mismatch");
+          // A constraint row is the constraint functional of its level applied
+          // to that level's solution, contracted with the terminal values like
+          // a target; it must vanish. Checked through desired_top.
+          for(std::size_t i=0;i<labels.size();++i)check_endpoint_constraint(result,static_cast<unsigned>(targets+i),labels[i]);
+          expression.transform.coefficients.resize(targets);result.values.resize(targets);
+          observe_operator(0,"composed shared-source map",expression.transform);
+          expressions_[0]=std::move(expression);cache_[0]=std::move(result);
+          return *cache_[0];
+        } catch(const linear_boundary::CompositionDemand& demand) {
+          if(demand.required_outer_high>weights.high)throw std::logic_error("weighted accumulation: the weights are short of the terminal window");
+          next=checked(static_cast<long>(demand.required_inner_high)+child.leaf_source->low);
+        } catch(const BoundaryDemand& demand) {
+          next=checked(static_cast<long>(demand.required_high)+child.transform.low);
+        }
+        if(next<=request)throw std::runtime_error("recursive weighted epsilon refinement made no progress");
+        request=next;
+      }
+      if(!restart)throw std::runtime_error("recursive weighted terminal epsilon refinement budget exhausted");
+      ++statistics_.refinements;report(0,"weighted window refinement",lambda);
+    }
+    throw std::runtime_error("recursive weighted epsilon refinement budget exhausted");
   }
   int constant_demand(const Endpoint& endpoint,unsigned high)const {
     long result=high;for(const auto& functional:endpoint.functionals)if(functional)

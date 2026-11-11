@@ -15,9 +15,24 @@ One transport leg costs about
 
     rows x connection size x epsilon orders x charts x Taylor order.
 
-The rows are the integrals the parent level needs, so the one-row top level
-is cheap and the middle levels dominate. Each leg reports its size on
-stderr. For the planar double box (one thread):
+Evaluated by rows (`--accumulation rows`), the rows of a level are the
+integrals its parent needs, so the one-row top level is cheap and the
+middle levels dominate. The default, `--accumulation weighted`, evaluates
+the same product of local operators from the top: a level receives a weight
+for each of its requested integrals from the level above and transports the
+one weighted combination of its rows, with the weighted combination of
+their forcings, so every level has one row per requested integral of the
+family. Such a row costs the whole connection plus all forcing rows of its
+level. Counted in multiplications per Taylor order, the inner levels become
+cheaper by 6.2 (double pentagon level 2, 69 rows on 33 masters), 3.9 (its
+level 3), 4.5 (Higgs+jet family F, level 2), 5.4 (four-loop banana, level
+2) and 3.9 (kite, level 2); the top level does not change. These are
+counts, not measured times. The epsilon orders carried are the same: a
+level's weights start at the poles of the levels above it, and its window
+ends that much lower.
+
+Each leg reports its size on stderr. For the planar double box by rows (one
+thread):
 
 | Level | Rows x masters | Epsilon orders | Charts (lower / upper) | Seconds (lower / upper) |
 | ---: | --- | ---: | --- | --- |
@@ -36,6 +51,22 @@ Transport time is linear in the number of epsilon orders carried.
   recurrence (`expand_balls`) is the reference and fallback. The Taylor tail
   admitted per chart is ten digits below the requested leaf digits (2^-127
   by default; `--transport-bits`).
+- **One weighted row per level** (`--accumulation weighted`). The levels
+  are combined from the top (see above). The weights are Laurent series in
+  epsilon with ball coefficients. A row's forcing is carried by one constant
+  component of the transported state per forcing row, which holds that
+  row's weight; the weights' uncertainty travels with the row, and a
+  transport checkpoint is keyed by them. Windows are sized from the same
+  structural losses as by rows, and the leaf is asked for the same first
+  order. An endpoint constraint of a level is carried down as one more row
+  and checked on the leaf values, through the requested epsilon order (by
+  rows it is checked through the order its level is asked for). A level
+  with an endpoint boundary multiplies its weights by the boundary map.
+  Evaluated by rows instead: `--method factored` and `auto`, and more than
+  four requested integrals (`--henn-basis`), where weighted rows would not
+  be fewer. `--accumulation rows` selects that everywhere; the library
+  default (`NumericalOptions::accumulation`) is `rows`. In weighted mode
+  only the top level has a stored linear expression.
 - **Paths.** A leg stays on the real axis and passes a real singular point
   over a triangle on the causal side, which is derived for each point. An
   epsilon sample uses a path lifted to the contour height instead, crossing

@@ -334,12 +334,290 @@ class EpsilonRational {
     return polynomial(numerator_.value,numerator_low_)/polynomial(denominator_.value,denominator_low_);
   }
 };
+} // namespace affine_frobenius_detail
+// A reader asked a truncated endpoint series for epsilon orders it does not
+// hold; `missing` more orders would have answered it. Never a failure of the
+// method: the owner of the series builds it again with more orders.
+struct EpsilonOrdersNeeded : std::runtime_error {
+  long missing;
+  explicit EpsilonOrdersNeeded(long orders)
+      : std::runtime_error("truncated endpoint series: " + std::to_string(orders) +
+                           " more epsilon orders are needed"),
+        missing(orders) {}
+};
+namespace affine_frobenius_detail {
+// A Laurent series in epsilon with exact rational coefficients, known modulo
+// eps^order(): eps^shift*u(eps) + O(eps^order). An order of exact_order is a
+// Laurent polynomial known exactly. Sums and products carry the order the way
+// truncated power series do; nothing is ever read beyond it, and a value whose
+// known part vanishes is "zero to its order", never the exact zero.
+class EpsilonSeries {
+public:
+  static constexpr long exact_order = std::numeric_limits<long>::max() / 4;
+  EpsilonSeries() { fmpq_poly_init(u_); }
+  explicit EpsilonSeries(long n) : EpsilonSeries() { fmpq_poly_set_si(u_, n); }
+  EpsilonSeries(const EpsilonSeries &o) : EpsilonSeries() {
+    fmpq_poly_set(u_, o.u_);
+    shift_ = o.shift_;
+    order_ = o.order_;
+  }
+  EpsilonSeries(EpsilonSeries &&o) noexcept : EpsilonSeries() { swap(o); }
+  EpsilonSeries &operator=(EpsilonSeries o) noexcept {
+    swap(o);
+    return *this;
+  }
+  ~EpsilonSeries() { fmpq_poly_clear(u_); }
+  // The rational function `value` of one variable, modulo eps^order. With
+  // exact_order the denominator must be a monomial.
+  EpsilonSeries(const Exact &value, std::size_t variable, long order)
+      : EpsilonSeries() {
+    order_ = order;
+    if (value.is_zero())
+      return;
+    Polynomial numerator, denominator;
+    value.univariate_polynomials(numerator.value, denominator.value, variable);
+    const slong low = lowest(numerator.value), pole = lowest(denominator.value);
+    fmpz_poly_shift_right(numerator.value, numerator.value, low);
+    fmpz_poly_shift_right(denominator.value, denominator.value, pole);
+    shift_ = low - pole;
+    fmpq_poly_set_fmpz_poly(u_, numerator.value);
+    if (fmpz_poly_length(denominator.value) == 1)
+      fmpq_poly_scalar_div_fmpz(u_, u_, denominator.value->coeffs);
+    else {
+      if (order >= exact_order)
+        throw std::logic_error("an exact epsilon series needs a monomial denominator");
+      const long length = order - shift_;
+      if (length > 0) {
+        fmpq_poly_t d;
+        fmpq_poly_init(d);
+        fmpq_poly_set_fmpz_poly(d, denominator.value);
+        fmpq_poly_div_series(u_, u_, d, length);
+        fmpq_poly_clear(d);
+      }
+    }
+    normalize();
+  }
+  // `terms` coefficients from the lowest one on; exact if that is all of it.
+  static EpsilonSeries expand(const Exact &value, std::size_t variable, long terms) {
+    if (value.is_zero())
+      return {};
+    if (value.denominator_terms().size() == 1)
+      return EpsilonSeries(value, variable, exact_order);
+    return EpsilonSeries(value, variable, fuchsify::detail::valuation(value, variable) + terms);
+  }
+  // eps^shift*numerator(eps)/denominator + O(eps^order).
+  static EpsilonSeries from_integers(const fmpz_poly_t numerator, const fmpz_t denominator,
+                                     long shift, long order) {
+    EpsilonSeries out;
+    fmpq_poly_set_fmpz_poly(out.u_, numerator);
+    fmpq_poly_scalar_div_fmpz(out.u_, out.u_, denominator);
+    out.shift_ = shift;
+    out.order_ = order;
+    out.normalize();
+    return out;
+  }
+  static EpsilonSeries linear(const Rational &constant, const Rational &slope) {
+    EpsilonSeries out;
+    fmpq_poly_set_coeff_fmpq(out.u_, 0, constant.raw());
+    fmpq_poly_set_coeff_fmpq(out.u_, 1, slope.raw());
+    out.normalize();
+    return out;
+  }
+  EpsilonSeries constant(long n) const { return EpsilonSeries(n); }
+  // Zero to the known order (which includes the exact zero).
+  bool is_zero() const { return fmpq_poly_is_zero(u_); }
+  bool is_exact() const { return order_ >= exact_order; }
+  long order() const { return order_; }
+  // Lowest known exponent; the order itself for a value that is zero to it.
+  long valuation() const { return is_zero() ? order_ : shift_; }
+  // Forget the orders from `order` on.
+  void truncate(long order) {
+    if (order < order_) {
+      order_ = order;
+      normalize();
+    }
+  }
+  // A series in t = eps/scale, rewritten as the series in eps.
+  void divide_variable(const fmpz_t scale) {
+    if (is_zero() || fmpz_is_one(scale))
+      return;
+    fmpq_t a;
+    fmpq_init(a);
+    fmpq_set_fmpz(a, scale);
+    fmpq_inv(a, a);
+    fmpq_poly_rescale(u_, u_, a);
+    fmpq_pow_si(a, a, shift_);
+    fmpq_poly_scalar_mul_fmpq(u_, u_, a);
+    fmpq_clear(a);
+  }
+  // The series divided by a power series with a nonzero constant term.
+  void divide_unit(const fmpz_poly_t unit) {
+    if (is_zero())
+      return;
+    if (fmpz_poly_length(unit) == 1) {
+      fmpq_poly_scalar_div_fmpz(u_, u_, unit->coeffs);
+      return;
+    }
+    if (is_exact())
+      throw std::logic_error("an exact epsilon series needs a monomial denominator");
+    fmpq_poly_t d;
+    fmpq_poly_init(d);
+    fmpq_poly_set_fmpz_poly(d, unit);
+    fmpq_poly_div_series(u_, u_, d, order_ - shift_);
+    fmpq_poly_clear(d);
+    normalize();
+  }
+  void shift(long powers) {
+    if (!is_zero())
+      shift_ += powers;
+    if (!is_exact())
+      order_ += powers;
+  }
+  Rational coefficient(long exponent) const {
+    fmpq_t c;
+    fmpq_init(c);
+    if (!is_zero() && exponent >= shift_ && exponent - shift_ < fmpq_poly_length(u_))
+      fmpq_poly_get_coeff_fmpq(c, u_, exponent - shift_);
+    auto out = Rational::from_fmpq(c);
+    fmpq_clear(c);
+    return out;
+  }
+  // The known part as a Laurent polynomial of the field of `sample`.
+  Exact exact(const Exact &sample, std::size_t variable) const {
+    if (is_zero())
+      return sample.constant(0);
+    Polynomial numerator, denominator;
+    fmpq_poly_get_numerator(numerator.value, u_);
+    fmpz_poly_set_fmpz(denominator.value, fmpq_poly_denref(u_));
+    if (shift_ > 0)
+      fmpz_poly_shift_left(numerator.value, numerator.value, shift_);
+    else if (shift_ < 0)
+      fmpz_poly_shift_left(denominator.value, denominator.value, -shift_);
+    return sample.from_reduced_univariate_polynomials(numerator.value, denominator.value, variable);
+  }
+  EpsilonSeries &operator+=(const EpsilonSeries &b) { return add(b, false); }
+  EpsilonSeries &operator-=(const EpsilonSeries &b) { return add(b, true); }
+  friend EpsilonSeries operator+(EpsilonSeries a, const EpsilonSeries &b) { a += b; return a; }
+  friend EpsilonSeries operator-(EpsilonSeries a, const EpsilonSeries &b) { a -= b; return a; }
+  friend EpsilonSeries operator-(EpsilonSeries a) { fmpq_poly_neg(a.u_, a.u_); return a; }
+  friend EpsilonSeries operator*(const EpsilonSeries &a, const EpsilonSeries &b) {
+    EpsilonSeries out;
+    out.order_ = std::min(sum(a.valuation(), b.order_), sum(b.valuation(), a.order_));
+    if (a.is_zero() || b.is_zero())
+      return out;
+    out.shift_ = a.shift_ + b.shift_;
+    if (out.is_exact())
+      fmpq_poly_mul(out.u_, a.u_, b.u_);
+    else if (out.order_ > out.shift_)
+      fmpq_poly_mullow(out.u_, a.u_, b.u_, out.order_ - out.shift_);
+    out.normalize();
+    return out;
+  }
+  friend EpsilonSeries operator/(const EpsilonSeries &a, const EpsilonSeries &b) {
+    if (b.is_zero())
+      throw std::domain_error("division by an epsilon series that is zero to its known order");
+    EpsilonSeries out;
+    // 1/b is known through b.order - 2*valuation(b).
+    out.order_ = std::min(sum(a.order_, -b.shift_),
+                          sum(a.valuation(), sum(b.order_, -2 * b.shift_)));
+    if (a.is_zero())
+      return out;
+    out.shift_ = a.shift_ - b.shift_;
+    if (fmpq_poly_length(b.u_) == 1) {
+      fmpq_t c;
+      fmpq_init(c);
+      fmpq_poly_get_coeff_fmpq(c, b.u_, 0);
+      fmpq_poly_scalar_div_fmpq(out.u_, a.u_, c);
+      fmpq_clear(c);
+    } else if (out.is_exact())
+      throw std::logic_error("an exact epsilon series division needs a monomial divisor");
+    else if (out.order_ > out.shift_)
+      fmpq_poly_div_series(out.u_, a.u_, b.u_, out.order_ - out.shift_);
+    out.normalize();
+    return out;
+  }
+
+private:
+  struct Polynomial {
+    fmpz_poly_t value;
+    Polynomial() { fmpz_poly_init(value); }
+    ~Polynomial() { fmpz_poly_clear(value); }
+    Polynomial(const Polynomial &) = delete;
+    Polynomial &operator=(const Polynomial &) = delete;
+  };
+  fmpq_poly_t u_;
+  long shift_ = 0, order_ = exact_order;
+  static slong lowest(const fmpz_poly_t p) {
+    slong k = 0;
+    while (k < fmpz_poly_length(p) && fmpz_is_zero(fmpz_poly_get_coeff_ptr(p, k)))
+      ++k;
+    return k;
+  }
+  static long sum(long a, long b) {
+    return a >= exact_order || b >= exact_order ? exact_order : a + b;
+  }
+  void swap(EpsilonSeries &o) noexcept {
+    fmpq_poly_swap(u_, o.u_);
+    std::swap(shift_, o.shift_);
+    std::swap(order_, o.order_);
+  }
+  // No coefficient at or above the order, a nonzero lowest coefficient.
+  void normalize() {
+    if (!is_exact()) {
+      if (order_ - shift_ <= 0)
+        fmpq_poly_zero(u_);
+      else
+        fmpq_poly_truncate(u_, order_ - shift_);
+    }
+    slong low = 0;
+    const slong length = fmpq_poly_length(u_);
+    while (low < length && fmpz_is_zero(fmpq_poly_numref(u_) + low))
+      ++low;
+    if (low == length) {
+      fmpq_poly_zero(u_);
+      shift_ = 0;
+    } else if (low) {
+      fmpq_poly_shift_right(u_, u_, low);
+      shift_ += low;
+    }
+  }
+  EpsilonSeries &add(const EpsilonSeries &b, bool subtract) {
+    const long order = std::min(order_, b.order_);
+    if (!b.is_zero()) {
+      if (is_zero()) {
+        fmpq_poly_set(u_, b.u_);
+        if (subtract)
+          fmpq_poly_neg(u_, u_);
+        shift_ = b.shift_;
+      } else {
+        const long low = std::min(shift_, b.shift_);
+        fmpq_poly_t other;
+        fmpq_poly_init(other);
+        fmpq_poly_shift_left(other, b.u_, b.shift_ - low);
+        fmpq_poly_shift_left(u_, u_, shift_ - low);
+        if (subtract)
+          fmpq_poly_sub(u_, u_, other);
+        else
+          fmpq_poly_add(u_, u_, other);
+        fmpq_poly_clear(other);
+        shift_ = low;
+      }
+    }
+    order_ = order;
+    normalize();
+    return *this;
+  }
+};
 struct Integer {
   fmpz_t value;
   Integer() { fmpz_init(value); }
+  explicit Integer(long n) { fmpz_init_set_si(value, n); }
+  Integer(const Integer &other) { fmpz_init_set(value, other.value); }
+  Integer &operator=(const Integer &other) {
+    fmpz_set(value, other.value);
+    return *this;
+  }
   ~Integer() { fmpz_clear(value); }
-  Integer(const Integer &) = delete;
-  Integer &operator=(const Integer &) = delete;
 };
 // rho*(m + s*eps) in Z[eps] for the least positive integer rho.
 inline IntegerPolynomial linear(const Rational &m, const Rational &s,
@@ -537,6 +815,267 @@ public:
     }
   }
 
+  // ---- The same recurrence in truncated Laurent arithmetic ----
+  //
+  // Every coefficient is carried modulo a power of epsilon instead of as a
+  // rational function. In Q[[eps]] the resonance denominators m+s*eps (m
+  // nonzero) and the row scales are units, so nothing but an integer and a
+  // power of epsilon is left in a denominator: all coefficients of one x order
+  // are numerators in Z[t] over ONE shared integer and t^pole. The variable is
+  // t = eps/L, with L the least common multiple of the integers whose inverse
+  // series occur, so that these series have integer coefficients and the
+  // t^j coefficient of a numerator grows like L^j instead of every coefficient
+  // carrying L^(length).
+  //
+  // What is known is tracked, not assumed. A value carries the absolute
+  // epsilon order through which it is known and a structural bound of its
+  // logarithmic degree (from which sources reach it, whatever cancels):
+  // dividing by s*eps at a resonance of different slopes costs one order per
+  // logarithmic power, a row scale that vanishes at eps=0 its valuation. This
+  // bookkeeping does not depend on the numbers, so a pass without arithmetic
+  // (structure_only) tells how many orders a column loses, and the arithmetic
+  // pass starts with exactly that many more than it must deliver.
+  struct Meta {
+    long known = EpsilonSeries::exact_order; // absolute epsilon order known through
+    int bound = -1;                          // log-degree bound; negative: exactly zero
+    void merge(const Meta &source) {
+      known = std::min(known, source.known);
+      bound = std::max(bound, source.bound);
+    }
+  };
+  // t^valuation times a power series with a nonzero constant term.
+  struct Unit {
+    Z unit{1};
+    slong valuation = 0;
+  };
+  void enable_truncation(const std::vector<Exponent> &eigen, unsigned top) {
+    const unsigned d = rows_.size();
+    auto t = std::make_unique<Truncation>();
+    fmpz_one(t->scale.value);
+    Integer part;
+    // Every resonance denominator m+s*eps with m nonzero: (s/m)*L is integral.
+    for (unsigned column = 0; column < d; ++column)
+      for (unsigned row = 0; row < d; ++row) {
+        const auto slope = eigen[column].slope - eigen[row].slope;
+        if (slope.is_zero())
+          continue;
+        for (unsigned k = 0; k <= top; ++k) {
+          const auto m = eigen[column].power + Rational(k) - eigen[row].power;
+          if (m.is_zero())
+            continue;
+          const auto ratio = slope / m;
+          fmpz_lcm(t->scale.value, t->scale.value, fmpq_denref(ratio.raw()));
+        }
+      }
+    // The constant term of a scale, where that is a short integer.
+    const auto constant = [&](const Z &scale) {
+      const slong low = scale.valuation();
+      fmpz_abs(part.value, scale.raw()->coeffs + low);
+      if (fmpz_poly_length(scale.raw()) > low + 1 && fmpz_bits(part.value) <= 64)
+        fmpz_lcm(t->scale.value, t->scale.value, part.value);
+    };
+    for (const auto &row : rows_)
+      constant(row.scale);
+    for (const auto &row : frame_)
+      constant(row.scale);
+    fmpq_t q;
+    fmpq_init(q);
+    fmpq_set_fmpz(q, t->scale.value);
+    t->scale_rational = Rational::from_fmpq(q);
+    fmpq_clear(q);
+    // p(eps) = p(L*t).
+    const auto substitute = [&](Z value) {
+      fmpz_one(part.value);
+      for (slong e = 1; e < fmpz_poly_length(value.raw()); ++e) {
+        fmpz_mul(part.value, part.value, t->scale.value);
+        fmpz_mul(value.raw()->coeffs + e, value.raw()->coeffs + e, part.value);
+      }
+      return value;
+    };
+    const auto unit = [&](const Z &scale) {
+      Unit out;
+      out.unit = substitute(scale);
+      out.valuation = out.unit.valuation();
+      fmpz_poly_shift_right(out.unit.raw(), out.unit.raw(), out.valuation);
+      return out;
+    };
+    t->rows = rows_;
+    t->frame = frame_;
+    for (auto &row : t->rows) {
+      t->row_units.push_back(unit(row.scale));
+      for (auto &lag : row.lags)
+        for (auto &[j, coefficient] : lag)
+          coefficient = substitute(coefficient);
+      for (auto &q : row.derivative)
+        q = substitute(q);
+    }
+    for (auto &row : t->frame) {
+      t->frame_units.push_back(unit(row.scale));
+      for (auto &[j, coefficient] : row.entries)
+        coefficient = substitute(coefficient);
+    }
+    truncation_ = std::move(t);
+  }
+  // eps = scale()*t.
+  const fmpz *scale() const { return truncation_->scale.value; }
+  // One fundamental column through x order `top`, every value cut at the
+  // absolute epsilon order `cap`. For every order and physical row that is not
+  // structurally zero, emit(k, row, numerators, unit, denominator, pole, meta)
+  // receives the log coefficients numerators[l](t) of
+  //   numerators/(denominator * t^(pole+unit.valuation) * unit.unit(t)),
+  // valid below t^(meta.known+pole); the physical coefficient is known through
+  // the epsilon order meta.known-unit.valuation. With structure_only no number
+  // is computed and the numerators are empty.
+  template <class Emit>
+  void truncated_column(const std::vector<Exponent> &eigen,
+                        const std::vector<int> &successor, unsigned column,
+                        unsigned top, std::size_t ladder_bound, long cap,
+                        bool structure_only, Emit &&emit) const {
+    const auto &T = *truncation_;
+    const unsigned d = T.rows.size();
+    Integer rho, shift;
+    const Z exponent = linear(eigen[column].power,
+                              eigen[column].slope * T.scale_rational, rho);
+    const bool unit = fmpz_is_one(rho.value);
+    std::vector<std::vector<Value>> orders(top + 1, std::vector<Value>(d));
+    std::vector<std::vector<Meta>> meta(top + 1, std::vector<Meta>(d));
+    std::vector<Inverse> inverses(d);
+    Integer common(1), step, cofactor;
+    Z weight;
+    long pole = 0;
+    for (unsigned k = 0; k <= top; ++k) {
+      std::vector<Solved> solved(d);
+      for (unsigned row = d; row-- > 0;) {
+        const Row &r = T.rows[row];
+        const bool cleared = !r.derivative.empty();
+        Solved value;
+        const unsigned last = std::min<std::size_t>(k, r.lags.size() - 1);
+        for (unsigned lag = 1; lag <= last; ++lag) {
+          for (const auto &[j, coefficient] : r.lags[lag])
+            if (meta[k - lag][j].bound >= 0)
+              value.meta.merge(meta[k - lag][j]);
+          if (cleared && !r.derivative[lag].zero() && meta[k - lag][row].bound >= 0)
+            value.meta.merge(meta[k - lag][row]);
+        }
+        if (value.meta.bound >= 0) {
+          value.meta.known = std::min(value.meta.known, cap);
+          const long length = value.meta.known + pole;
+          if (!structure_only && length > 0) {
+            for (unsigned lag = 1; lag <= last; ++lag) {
+              const auto &source = orders[k - lag];
+              for (const auto &[j, coefficient] : r.lags[lag]) {
+                if (source[j].empty())
+                  continue;
+                if (cleared && !unit) {
+                  fmpz_poly_scalar_mul_fmpz(weight.raw(), coefficient.raw(), rho.value);
+                  accumulate_low(value.numerator, weight, source[j], 0, length);
+                } else
+                  accumulate_low(value.numerator, coefficient, source[j], 0, length);
+              }
+              const auto &previous = source[row];
+              if (!cleared || r.derivative[lag].zero() || previous.empty())
+                continue;
+              fmpz_poly_get_coeff_fmpz(shift.value, exponent.raw(), 0);
+              fmpz_addmul_ui(shift.value, rho.value, k - lag);
+              fmpz_poly_set(weight.raw(), exponent.raw());
+              fmpz_poly_set_coeff_fmpz(weight.raw(), 0, shift.value);
+              fmpz_poly_mul(weight.raw(), weight.raw(), r.derivative[lag].raw());
+              fmpz_poly_neg(weight.raw(), weight.raw());
+              accumulate_low(value.numerator, weight, previous, 0, length);
+              fmpz_poly_scalar_mul_fmpz(weight.raw(), r.derivative[lag].raw(), rho.value);
+              fmpz_poly_neg(weight.raw(), weight.raw());
+              accumulate_low(value.numerator, weight, previous, 1, length);
+            }
+            trim(value.numerator);
+            // The row equation was multiplied by its scale (and by rho).
+            if (!value.numerator.empty()) {
+              if (cleared && !unit)
+                fmpz_mul(value.denominator.value, value.denominator.value, rho.value);
+              divide_unit(value, T.row_units[row].unit, inverses[row], length);
+            }
+          }
+          value.rel = T.row_units[row].valuation;
+          value.meta.known -= T.row_units[row].valuation;
+        }
+        if (successor[row] >= 0 && solved[successor[row]].meta.bound >= 0)
+          value = sum(value, solved[successor[row]], pole, cap, structure_only);
+        solve_low(value,
+                  eigen[column].power + Rational(k) - eigen[row].power,
+                  (eigen[column].slope - eigen[row].slope) * T.scale_rational,
+                  pole, cap);
+        if (k == 0 && row == column) {
+          if (value.meta.bound >= 0)
+            throw std::logic_error("seeded Frobenius coefficient has a source");
+          value = Solved{};
+          value.meta.bound = 0;
+          if (!structure_only)
+            value.numerator.emplace_back(1);
+        }
+        if (value.numerator.size() > ladder_bound)
+          throw std::logic_error("affine Frobenius log ladder bound exceeded");
+        reduce_low(value);
+        solved[row] = std::move(value);
+      }
+      long rise = 0;
+      fmpz_one(step.value);
+      for (const auto &value : solved)
+        if (value.meta.bound >= 0) {
+          rise = std::max(rise, value.rel);
+          if (!value.numerator.empty())
+            fmpz_lcm(step.value, step.value, value.denominator.value);
+        }
+      for (unsigned row = 0; row < d; ++row) {
+        auto &value = solved[row];
+        meta[k][row] = value.meta;
+        if (value.numerator.empty())
+          continue;
+        fmpz_divexact(cofactor.value, step.value, value.denominator.value);
+        const long length = std::min(value.meta.known, cap) + pole + rise;
+        for (auto &c : value.numerator) {
+          if (!fmpz_is_one(cofactor.value))
+            fmpz_poly_scalar_mul_fmpz(c.raw(), c.raw(), cofactor.value);
+          if (rise > value.rel)
+            fmpz_poly_shift_left(c.raw(), c.raw(), rise - value.rel);
+          fmpz_poly_truncate(c.raw(), std::max(0l, length));
+        }
+        trim(value.numerator);
+        orders[k][row] = std::move(value.numerator);
+      }
+      if (rise || !fmpz_is_one(step.value)) {
+        for (unsigned old = k + 1 > window_ ? k + 1 - window_ : 0; old < k; ++old)
+          for (auto &value : orders[old])
+            for (auto &c : value) {
+              if (!fmpz_is_one(step.value))
+                fmpz_poly_scalar_mul_fmpz(c.raw(), c.raw(), step.value);
+              if (rise)
+                fmpz_poly_shift_left(c.raw(), c.raw(), rise);
+            }
+        fmpz_mul(common.value, common.value, step.value);
+        pole += rise;
+      }
+      Value physical;
+      for (unsigned row = 0; row < d; ++row) {
+        Meta known;
+        for (const auto &[j, coefficient] : T.frame[row].entries)
+          if (meta[k][j].bound >= 0)
+            known.merge(meta[k][j]);
+        if (known.bound < 0)
+          continue;
+        known.known = std::min(known.known, cap);
+        physical.clear();
+        if (!structure_only && known.known + pole > 0)
+          for (const auto &[j, coefficient] : T.frame[row].entries)
+            if (!orders[k][j].empty())
+              accumulate_low(physical, coefficient, orders[k][j], 0, known.known + pole);
+        trim(physical);
+        emit(k, row, physical, T.frame_units[row], common.value, pole, known);
+      }
+      if (k >= window_) {
+        orders[k - window_] = std::vector<Value>(d);
+      }
+    }
+  }
+
 private:
   struct Row {
     Z scale; // scale*g[lag][row][*] and scale*q~[lag] are integral
@@ -556,6 +1095,258 @@ private:
   std::vector<Row> rows_;
   std::vector<FrameRow> frame_;
   unsigned window_ = 0;
+  // The recurrence in t = eps/scale: the coefficients of rows_ and frame_
+  // with eps replaced by scale*t, and every scale as t^valuation times a unit.
+  struct Truncation {
+    Integer scale;
+    Rational scale_rational;
+    std::vector<Row> rows;
+    std::vector<FrameRow> frame;
+    std::vector<Unit> row_units, frame_units;
+  };
+  std::unique_ptr<Truncation> truncation_;
+  // numerator/(denominator * t^rel) relative to the shared denominator; valid
+  // below t^(meta.known + pole + rel).
+  struct Solved {
+    Value numerator;
+    Integer denominator{1};
+    long rel = 0;
+    Meta meta;
+  };
+  // numerator/denominator = 1/unit modulo t^length.
+  struct Inverse {
+    Z numerator;
+    Integer denominator;
+    slong length = 0;
+  };
+  static void mul_low(fmpz_poly_struct *out, const fmpz_poly_struct *a,
+                      const fmpz_poly_struct *b, long length) {
+    const long full = a->length + b->length - 1;
+    if (length <= 0 || !a->length || !b->length)
+      fmpz_poly_zero(out);
+    else if (b->length == 1)
+      fmpz_poly_scalar_mul_fmpz(out, a, b->coeffs), fmpz_poly_truncate(out, length);
+    else
+      fmpz_poly_mullow(out, a, b, std::min(length, full));
+  }
+  // target += source*coefficient modulo t^length, for a short coefficient.
+  static void addmul_low(fmpz_poly_struct *target, const fmpz_poly_struct *source,
+                         const fmpz_poly_struct *coefficient, long length) {
+    length = std::min<long>(length, source->length + coefficient->length - 1);
+    if (length <= 0)
+      return;
+    fmpz_poly_fit_length(target, length);
+    if (target->length < length) {
+      _fmpz_vec_zero(target->coeffs + target->length, length - target->length);
+      _fmpz_poly_set_length(target, length);
+    }
+    for (slong e = 0; e < coefficient->length && e < length; ++e)
+      if (!fmpz_is_zero(coefficient->coeffs + e))
+        _fmpz_vec_scalar_addmul_fmpz(target->coeffs + e, source->coeffs,
+                                     std::min<slong>(source->length, length - e),
+                                     coefficient->coeffs + e);
+    _fmpz_poly_normalise(target);
+  }
+  static void accumulate_low(Value &out, const Z &coefficient, const Value &source,
+                             unsigned drop, long length) {
+    if (coefficient.zero() || source.size() <= drop || length <= 0)
+      return;
+    if (out.size() < source.size() - drop)
+      out.resize(source.size() - drop);
+    Z scaled;
+    for (std::size_t l = drop; l < source.size(); ++l) {
+      if (source[l].zero())
+        continue;
+      if (drop) {
+        fmpz_poly_scalar_mul_ui(scaled.raw(), coefficient.raw(), l);
+        addmul_low(out[l - drop].raw(), source[l].raw(), scaled.raw(), length);
+      } else
+        addmul_low(out[l].raw(), source[l].raw(), coefficient.raw(), length);
+    }
+  }
+  static void divide_unit(Solved &value, const Z &unit, Inverse &inverse, long length) {
+    if (fmpz_poly_length(unit.raw()) == 1) {
+      const fmpz *c = unit.raw()->coeffs;
+      if (fmpz_is_one(c))
+        return;
+      if (fmpz_sgn(c) < 0)
+        for (auto &n : value.numerator)
+          fmpz_poly_neg(n.raw(), n.raw());
+      Integer magnitude;
+      fmpz_abs(magnitude.value, c);
+      fmpz_mul(value.denominator.value, value.denominator.value, magnitude.value);
+      return;
+    }
+    if (inverse.length < length) {
+      inverse.length = length + 8;
+      fmpq_poly_t q, r;
+      fmpq_poly_init(q);
+      fmpq_poly_init(r);
+      fmpq_poly_set_fmpz_poly(q, unit.raw());
+      fmpq_poly_inv_series(r, q, inverse.length);
+      fmpq_poly_get_numerator(inverse.numerator.raw(), r);
+      fmpz_set(inverse.denominator.value, fmpq_poly_denref(r));
+      fmpq_poly_clear(q);
+      fmpq_poly_clear(r);
+    }
+    for (auto &n : value.numerator)
+      mul_low(n.raw(), n.raw(), inverse.numerator.raw(), length);
+    fmpz_mul(value.denominator.value, value.denominator.value, inverse.denominator.value);
+    trim(value.numerator);
+  }
+  static Solved sum(const Solved &a, const Solved &b, long pole, long cap,
+                    bool structure_only) {
+    if (a.meta.bound < 0)
+      return b;
+    if (b.meta.bound < 0)
+      return a;
+    Solved out;
+    out.meta = a.meta;
+    out.meta.merge(b.meta);
+    out.meta.known = std::min(out.meta.known, cap);
+    out.rel = std::max(a.rel, b.rel);
+    if (structure_only)
+      return out;
+    const long length = out.meta.known + pole + out.rel;
+    out.numerator.resize(std::max(a.numerator.size(), b.numerator.size()));
+    Z term;
+    const auto add = [&](const Solved &value, const Solved &other) {
+      for (std::size_t l = 0; l < value.numerator.size(); ++l) {
+        fmpz_poly_scalar_mul_fmpz(term.raw(), value.numerator[l].raw(), other.denominator.value);
+        fmpz_poly_shift_left(term.raw(), term.raw(), out.rel - value.rel);
+        fmpz_poly_add(out.numerator[l].raw(), out.numerator[l].raw(), term.raw());
+      }
+    };
+    add(a, b);
+    add(b, a);
+    for (auto &c : out.numerator)
+      fmpz_poly_truncate(c.raw(), std::max(0l, length));
+    fmpz_mul(out.denominator.value, a.denominator.value, b.denominator.value);
+    trim(out.numerator);
+    return out;
+  }
+  // (delta + d/dL) out = rhs for delta = m + s*t.
+  static void solve_low(Solved &value, const Rational &m, const Rational &s,
+                        long pole, long cap) {
+    if (value.meta.bound < 0)
+      return;
+    value.meta.known = std::min(value.meta.known, cap);
+    auto &rhs = value.numerator;
+    Integer rho;
+    const Z lambda = linear(m, s, rho); // rho*delta
+    if (lambda.zero()) {
+      // Exact resonance: integrate in L with zero integration constant.
+      ++value.meta.bound;
+      if (rhs.empty())
+        return;
+      const std::size_t top = rhs.size() - 1;
+      Integer weights(1), factor;
+      for (std::size_t l = 2; l <= top + 1; ++l) {
+        fmpz_set_ui(factor.value, l);
+        fmpz_lcm(weights.value, weights.value, factor.value);
+      }
+      rhs.emplace_back();
+      for (std::size_t l = top + 1; l-- > 0;) {
+        fmpz_poly_scalar_mul_fmpz(rhs[l + 1].raw(), rhs[l].raw(), weights.value);
+        fmpz_poly_scalar_divexact_ui(rhs[l + 1].raw(), rhs[l + 1].raw(), l + 1);
+      }
+      fmpz_poly_zero(rhs[0].raw());
+      fmpz_mul(value.denominator.value, value.denominator.value, weights.value);
+      return;
+    }
+    // delta = t^a * unit; a = 1 where the powers resonate and the slopes differ.
+    const long a = m.is_zero() ? 1 : 0;
+    const long length = value.meta.known + pole + value.rel;
+    value.meta.known -= a * (value.meta.bound + 1);
+    if (rhs.empty())
+      return;
+    const std::size_t top = rhs.size() - 1;
+    // 1/delta = inverse(t)/(divisor*t^a).
+    Z inverse;
+    Integer divisor, c0, c1, power;
+    fmpz_poly_get_coeff_fmpz(c0.value, lambda.raw(), 0);
+    fmpz_poly_get_coeff_fmpz(c1.value, lambda.raw(), 1);
+    if (a || fmpz_is_zero(c1.value) || length <= 1) {
+      fmpz_poly_set_fmpz(inverse.raw(), rho.value);
+      fmpz_set(divisor.value, a ? c1.value : c0.value);
+    } else if (fmpz_divisible(c1.value, c0.value)) {
+      // (1/c0) * sum (-c1/c0)^j t^j.
+      fmpz_divexact(c1.value, c1.value, c0.value);
+      fmpz_neg(c1.value, c1.value);
+      fmpz_set(power.value, rho.value);
+      for (long j = 0; j < length; ++j) {
+        fmpz_poly_set_coeff_fmpz(inverse.raw(), j, power.value);
+        fmpz_mul(power.value, power.value, c1.value);
+      }
+      fmpz_set(divisor.value, c0.value);
+    } else {
+      // sum (-c1)^j c0^(length-1-j) t^j / c0^length.
+      fmpz_neg(c1.value, c1.value);
+      fmpz_set(power.value, rho.value);
+      for (long j = length; j-- > 0;) {
+        fmpz_poly_set_coeff_fmpz(inverse.raw(), j, power.value);
+        fmpz_mul(power.value, power.value, c0.value);
+      }
+      fmpz_one(power.value);
+      for (long j = 0; j < length; ++j) {
+        fmpz_mul(inverse.raw()->coeffs + j, inverse.raw()->coeffs + j, power.value);
+        fmpz_mul(power.value, power.value, c1.value);
+      }
+      _fmpz_poly_normalise(inverse.raw());
+      fmpz_pow_ui(divisor.value, c0.value, length);
+    }
+    if (fmpz_sgn(divisor.value) < 0) {
+      fmpz_neg(divisor.value, divisor.value);
+      fmpz_poly_neg(inverse.raw(), inverse.raw());
+    }
+    // out[l] = T[l]/(divisor*t^a)^(top+1-l), T[top] = rhs[top]*inverse,
+    // T[l] = (rhs[l]*(divisor*t^a)^(top-l) - (l+1)*T[l+1])*inverse.
+    std::vector<Integer> powers(top + 2, Integer(1));
+    for (std::size_t i = 1; i < powers.size(); ++i)
+      fmpz_mul(powers[i].value, powers[i - 1].value, divisor.value);
+    Z above, current;
+    for (std::size_t l = top + 1; l-- > 0;) {
+      fmpz_poly_scalar_mul_fmpz(current.raw(), rhs[l].raw(), powers[top - l].value);
+      if (a && top > l)
+        fmpz_poly_shift_left(current.raw(), current.raw(), a * (top - l));
+      if (l < top) {
+        fmpz_poly_scalar_mul_ui(above.raw(), above.raw(), l + 1);
+        fmpz_poly_sub(current.raw(), current.raw(), above.raw());
+      }
+      mul_low(current.raw(), current.raw(), inverse.raw(), length);
+      fmpz_poly_scalar_mul_fmpz(rhs[l].raw(), current.raw(), powers[l].value);
+      if (a && l)
+        fmpz_poly_shift_left(rhs[l].raw(), rhs[l].raw(), a * l);
+      above = current;
+    }
+    fmpz_mul(value.denominator.value, value.denominator.value, powers[top + 1].value);
+    value.rel += a * (top + 1);
+    const long valid = value.meta.known + pole + value.rel;
+    for (auto &c : rhs)
+      fmpz_poly_truncate(c.raw(), std::max(0l, valid));
+    trim(rhs);
+  }
+  // The integer denominator against the content of the numerators.
+  static void reduce_low(Solved &value) {
+    if (value.numerator.empty()) {
+      fmpz_one(value.denominator.value);
+      return;
+    }
+    Integer g(value.denominator), content;
+    for (const auto &c : value.numerator) {
+      if (fmpz_is_one(g.value))
+        return;
+      if (c.zero())
+        continue;
+      fmpz_poly_content(content.value, c.raw());
+      fmpz_gcd(g.value, g.value, content.value);
+    }
+    if (fmpz_is_one(g.value))
+      return;
+    fmpz_divexact(value.denominator.value, value.denominator.value, g.value);
+    for (auto &c : value.numerator)
+      fmpz_poly_scalar_divexact_fmpz(c.raw(), c.raw(), g.value);
+  }
   static Z integral(const Exact &value, std::size_t ei) {
     Z numerator, denominator;
     value.univariate_polynomials(numerator.raw(), denominator.raw(), ei);
@@ -744,6 +1535,12 @@ public:
     // solved on `threads` threads (0: one per hardware thread).
     std::function<void(unsigned,unsigned)> column_progress;
     unsigned threads = 0;
+    // Zero: every coefficient is the exact rational function of epsilon.
+    // Otherwise the coefficients are carried as truncated Laurent series in
+    // epsilon: column c is known through at least this many orders, counted
+    // from the lowest epsilon order of column c of the residue frame, and
+    // Expansion::epsilon_truncation states what is known of every entry.
+    unsigned epsilon_orders = 0;
     // The system is the recursion at one numeric dimension (no epsilon left).
     // Its exponents a+b*shift then carry no slope, and the dimensionally
     // regulated sectors (b nonzero) are recognised by a non-integer power at a
@@ -769,6 +1566,15 @@ public:
     // marks an exact zero row). Empty when no such frontier is known, e.g. for
     // contracted columns; beyond it coefficients are unknown, never zero.
     std::vector<long> row_x_valuations;
+    // Empty: the coefficients are exact. Otherwise entry [row][column] is the
+    // epsilon order T from which that entry is unknown: each coefficient is
+    // the Laurent polynomial of the true one modulo eps^T, and a term that is
+    // absent is O(eps^T), not zero. exact_order marks an exact entry.
+    std::vector<std::vector<long>> epsilon_truncation;
+    static constexpr long exact_order = affine_frobenius_detail::EpsilonSeries::exact_order;
+    long truncation(unsigned row, unsigned column) const {
+      return epsilon_truncation.empty() ? exact_order : epsilon_truncation[row][column];
+    }
   };
   struct Valuations {
     std::vector<long> minimum_by_column;
@@ -790,6 +1596,8 @@ public:
   unsigned dimension() const { return d_; }
   unsigned x_order() const { return n_; }
   unsigned finite_lag_rows() const { return finite_lag_rows_; }
+  // Coefficients are truncated Laurent series in epsilon (Options::epsilon_orders).
+  bool truncated() const { return !expansion_.epsilon_truncation.empty(); }
   const Matrix &residue_frame() const { return frame_; }
   const std::vector<Exponent> &exponents() const { return eigen_; }
   const std::vector<int> &jordan_successors() const { return successor_; }
@@ -950,7 +1758,13 @@ private:
     if (!regular_trace.denominator().substitute(origin).is_zero())
       out.expansion_.wronskian_prefactor =
           affine_frobenius_detail::determinant(out.frame_);
-    const IntegerRecurrence recurrence(g, derivative_lags, out.frame_, ei);
+    IntegerRecurrence recurrence(g, derivative_lags, out.frame_, ei);
+    const bool truncated = options.epsilon_orders != 0;
+    out.log_bounds_.assign(d, 0);
+    if (truncated) {
+      recurrence.enable_truncation(out.eigen_, n);
+      out.expansion_.epsilon_truncation.assign(d, std::vector<long>(d, Expansion::exact_order));
+    }
     // Columns are independent, so they are solved on separate threads and
     // their terms appended in column order: the result does not depend on the
     // thread count. Orders beyond a column's absolute frontier cannot
@@ -972,6 +1786,57 @@ private:
       IntegerPolynomial numerator, denominator, shared, divisor;
       for (unsigned column; !failed && (column = next++) < d;) try {
         auto &terms = columns[column];
+        if (truncated) {
+          using S = EpsilonSeries;
+          using R = IntegerRecurrence;
+          long lead = S::exact_order;
+          for (unsigned i = 0; i < d; ++i)
+            if (!out.frame_[i][column].is_zero())
+              lead = std::min(lead, fuchsify::detail::valuation(out.frame_[i][column], ei));
+          // How many orders the column loses, from a pass without numbers.
+          const long probe = 1l << 20;
+          long lowest = S::exact_order;
+          int logs = 0;
+          recurrence.truncated_column(out.eigen_, out.successor_, column, tops[column],
+            static_cast<std::size_t>(d) * (n + 1), probe, true,
+            [&](unsigned, unsigned, const R::Value &, const R::Unit &unit, const fmpz *, long,
+                const R::Meta &meta) {
+              lowest = std::min(lowest, meta.known - static_cast<long>(unit.valuation));
+              logs = std::max(logs, meta.bound);
+            });
+          out.log_bounds_[column] = logs;
+          const long cap = lead + static_cast<long>(options.epsilon_orders) + (probe - lowest);
+          struct Pending { unsigned k, row, log; S value; };
+          std::vector<Pending> pending;
+          std::vector<long> known(d, S::exact_order);
+          recurrence.truncated_column(out.eigen_, out.successor_, column, tops[column],
+            static_cast<std::size_t>(d) * (n + 1), cap, false,
+            [&](unsigned k, unsigned row, const R::Value &values, const R::Unit &unit,
+                const fmpz *common, long pole, const R::Meta &meta) {
+              const long order = meta.known - static_cast<long>(unit.valuation);
+              known[row] = std::min(known[row], order);
+              for (unsigned l = 0; l < values.size(); ++l) {
+                if (values[l].zero())
+                  continue;
+                auto value = S::from_integers(values[l].raw(), common,
+                                              -(pole + static_cast<long>(unit.valuation)), order);
+                value.divide_unit(unit.unit.raw());
+                value.divide_variable(recurrence.scale());
+                pending.push_back({k, row, l, std::move(value)});
+              }
+              if (pending.size() > options.max_terms)
+                throw std::length_error("affine Frobenius term budget exhausted");
+            });
+          for (unsigned row = 0; row < d; ++row)
+            out.expansion_.epsilon_truncation[row][column] = known[row];
+          for (auto &entry : pending) {
+            entry.value.truncate(known[entry.row]);
+            if (!entry.value.is_zero())
+              terms.push_back({entry.row, column, entry.log,
+                               out.eigen_[column].power + Rational(entry.k),
+                               out.slopes_[column], entry.value.exact(z, ei)});
+          }
+        } else
         recurrence.column(out.eigen_, out.successor_, column, tops[column],
           static_cast<std::size_t>(d) * (n + 1),
           [&](unsigned k, unsigned row, const IntegerRecurrence::Value &logs,
@@ -1427,6 +2292,8 @@ private:
   std::vector<Rational> slopes_;
   std::vector<Rational> frontiers_;
   std::vector<int> successor_;
+  // Structural bound of the logarithmic degree of each column (truncated mode).
+  std::vector<int> log_bounds_;
   Expansion expansion_{0, 0, {}};
   explicit AffineFrobeniusSeries(Exact z) : zero_(std::move(z)) {}
   // The fixed (slope-zero) sector is exact only inside the retained frontier:

@@ -63,7 +63,7 @@ if(BUILD_TESTING)
     list(APPEND native_tests box_oracle henn_boundary causal causal_contour pentagon_oracle affine_operator adjoint_transport linear_boundary
       henn_scalar_leaf box_bubble_oracle double_box_oracle box_triangle_oracle fire_checkpoint adjoint_scaling
       endpoint_gauge scalar_accumulator affine_large fire_backward_checkpoint affine_finite_lag conditioned_adjoint
-      factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational affine_endpoint_domain)
+      factored_transport factored_pipeline pipeline_preflight centered_adjoint prepared_stage adjoint_checkpoint modular_reconstruction fire_modular univariate_rational affine_endpoint_domain affine_truncated)
     # Explicit acceptance runner: large FT examples are opt-in, with a caller
     # supplied durable cache and finite preparation budget.
     add_executable(diffexp_check_ft_laptop tools/check_ft_laptop.cpp)

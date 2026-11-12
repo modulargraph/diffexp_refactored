@@ -190,7 +190,8 @@ from the command line: [transport protocol](docs/transport-protocol.md).
 - [Architecture](docs/architecture.md),
   [transport backend](docs/backend-review-implementation.md),
   [epsilon scheduling and basis search](docs/epsilon-demand-design.md),
-  [moving poles](docs/moving-poles.md)
+  [moving poles](docs/moving-poles.md),
+  [finite masters](docs/performance.md#finite-masters)
 - [Changelog](CHANGELOG.md)
 
 ## License and citation

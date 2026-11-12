@@ -22,6 +22,7 @@
 #include "diffexp/critical_points.hpp"
 #include "diffexp/epsilon_sampling.hpp"
 #include "diffexp/moving_poles.hpp"
+#include "diffexp/finite_masters.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -80,6 +81,7 @@ int main(int argc, char** argv) {
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
+      std::string finite_masters="on";unsigned finite_master_seconds_allowed=120;
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
       unsigned ibp_max_degree=0;std::string merge_selection="auto",boundary="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
@@ -164,6 +166,16 @@ int main(int argc, char** argv) {
           const std::string value=option_value;
           if(value!="truncated" && value!="exact")throw std::invalid_argument("--endpoint-series must be truncated or exact");
           numerical.truncated_endpoint_series=value=="truncated";
+        }
+        else if(option=="--finite-masters") {
+          finite_masters=option_value;
+          if(finite_masters!="on" && finite_masters!="off")throw std::invalid_argument("--finite-masters must be on or off");
+        }
+        else if(option=="--finite-masters-seconds") {
+          const std::string value=option_value;
+          const auto parsed=std::from_chars(value.data(),value.data()+value.size(),finite_master_seconds_allowed);
+          if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || !finite_master_seconds_allowed || finite_master_seconds_allowed>86400)
+            throw std::invalid_argument("--finite-masters-seconds must be in 1..86400");
         }
         else if(option=="--moving-poles") {
           moving_poles=option_value;
@@ -373,6 +385,54 @@ int main(int argc, char** argv) {
       options.endpoint_refused=[&progress](unsigned level,bool upper,const std::string& reason) {
         progress<<"Level "<<level<<": boundary not taken at x = "<<(upper?1:0)<<": "<<reason<<"\n"<<std::flush;
       };
+      // Masters that are finite at epsilon = 0 where the level has such
+      // integrals (finite_masters.hpp).
+      boost::json::array finite_master_levels;double finite_master_seconds=0;
+      // All levels below an exchanged one follow, or none is exchanged: see
+      // finite_masters::revoke.
+      struct FiniteLadderBroken {unsigned depth;};
+      std::vector<std::filesystem::path> finite_master_records;bool finite_masters_withdrawn=false;
+      // Only for a family without a cut and without a stated contour. Finite
+      // masters can have apparent singular points that the level's own
+      // masters do not show, and elsewhere every real singular point needs a
+      // causal side: that of a point the integrals do not have cannot always
+      // be derived (sunrise below threshold at timelike momentum, where the
+      // exchanged masters stopped the run at x = 1/2).
+      bool finite_masters_apply=false;
+      if(finite_masters=="on" && (!numerical.causal_prescription || (numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty())))
+        try{finite_masters_apply=diffexp::causal::euclidean(configuration.family);}catch(const std::exception&){}
+      if(finite_masters_apply)options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& exact_field,const auto& sources,unsigned depth,const auto& reduce) {
+        if(finite_masters_withdrawn)return closure;
+        diffexp::finite_masters::Report chosen;
+        closure=diffexp::finite_masters::choose(merged,exact_field,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
+          std::move(closure),sources,0,1,reduce,chosen,cache/"finite-masters",finite_master_seconds_allowed);
+        finite_master_seconds+=chosen.seconds;
+        if(!chosen.steps.empty())finite_master_records.push_back(chosen.record);
+        else if(chosen.divergent_before && !finite_master_records.empty()) {
+          progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"; the levels above take their masters back\n"<<std::flush;
+          for(const auto& record:finite_master_records)
+            diffexp::finite_masters::revoke(record,"kept: level "+std::to_string(depth+1)+" below has no finite masters");
+          throw FiniteLadderBroken{depth};
+        }
+        if(!chosen.divergent_before)return closure;
+        if(chosen.steps.empty() && !chosen.candidates){progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"\n"<<std::flush;return closure;}
+        progress<<"Level "<<depth+1<<": finite masters: "<<chosen.divergent_before<<" of "<<chosen.masters<<" masters fail the convergence test at epsilon = 0 -> "
+          <<chosen.divergent_after<<"; "<<chosen.candidates<<" candidate integrals reduced in "<<chosen.reductions<<" further reductions ("<<chosen.reduction_seconds
+          <<" s); connection characters "<<chosen.characters_before<<" -> "<<chosen.characters_after<<"; epsilon poles of the connection "<<chosen.connection_pole_before
+          <<" -> "<<chosen.connection_pole_after<<", of the source rows "<<chosen.source_pole_before<<" -> "<<chosen.source_pole_after<<"; "<<chosen.seconds<<" s\n";
+        const auto name=[](const diffexp::ibp::Integral& a){std::string out="[";for(std::size_t i=0;i<a.size();++i)out+=(i?",":"")+std::to_string(a[i]);return out+"]";};
+        boost::json::array steps;
+        for(const auto& step:chosen.steps) {
+          progress<<"  master "<<step.replaced<<" "<<name(step.from)<<" replaced by "<<name(step.to)<<"\n";
+          steps.push_back(boost::json::object{{"replaced_master",step.replaced},{"from",name(step.from)},{"by",name(step.to)}});
+        }
+        if(!chosen.note.empty())progress<<"  "<<chosen.note<<"\n";
+        finite_master_levels.push_back(boost::json::object{{"level",depth+1},{"masters",chosen.masters},{"failing_before",chosen.divergent_before},{"failing_after",chosen.divergent_after},
+          {"candidates",chosen.candidates},{"reductions",chosen.reductions},{"reduction_seconds",chosen.reduction_seconds},
+          {"characters_before",chosen.characters_before},{"characters_after",chosen.characters_after},{"steps",std::move(steps)},{"note",chosen.note},{"seconds",chosen.seconds}});
+        progress<<std::flush;
+        return closure;
+      };
       // exchange: a level swaps masters for cached integrals of the same sector
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
@@ -381,10 +441,7 @@ int main(int argc, char** argv) {
         describe_moving_poles(depth,result);return level;
       };
       // A spent time budget names the three knobs that bound the preparation.
-      auto graph=[&] {
-        try {
-          return diffexp::recursion::prepare(configuration.family,std::move(requested),options,provider,
-            [&](const auto& event) {
+      const auto level_progress=[&](const auto& event) {
               progress<<"Level "<<event.depth<<": "<<event.physical_propagators<<" propagators; ";
               if(event.scalar_leaf)progress<<"analytic scalar boundary";
               else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
@@ -394,7 +451,16 @@ int main(int argc, char** argv) {
               else if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
                 <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
               progress<<std::flush;
-            });
+            };
+      auto graph=[&] {
+        try {
+          try {
+            return diffexp::recursion::prepare(configuration.family,requested,options,provider,level_progress);
+          } catch(const FiniteLadderBroken&) {
+            // The same preparation with every level's own masters.
+            finite_masters_withdrawn=true;finite_master_levels.clear();finite_master_records.clear();moving_pole_levels.clear();
+            return diffexp::recursion::prepare(configuration.family,requested,options,provider,level_progress);
+          }
         } catch(const std::runtime_error& error) {
           const std::string message=error.what();
           if(message.find("time budget")==std::string::npos && message.find("exhausted reconstruction budget")==std::string::npos)throw;
@@ -433,6 +499,7 @@ int main(int argc, char** argv) {
         {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings},
         {"continued_solves",ibp_statistics.continued_solves},{"continued_equations",ibp_statistics.continued_equations},{"reused_solves",ibp_statistics.reused_solves},{"continued_solve_seconds",ibp_statistics.continued_solve_seconds},{"seeds",ibp_seeds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
+      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"euclidean_family",finite_masters_apply},{"withdrawn",finite_masters_withdrawn},{"seconds",finite_master_seconds}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
       };
@@ -901,6 +968,17 @@ Feynman-trick recursion
   --epsilon-shift Q               experimental: expand around epsilon=Q (a rational); coefficient k
                                   then multiplies (epsilon-Q)^k, and order 0 is the integral in
                                   d0-2Q dimensions (docs/performance.md)
+  --finite-masters on|off         masters that are finite at epsilon = 0, for levels whose requested
+                                  integrals are (default on; docs/performance.md): the masters that
+                                  fail a convergence test are exchanged for integrals of their sector
+                                  with more dots, which removes the cancellation of epsilon poles
+                                  between the levels. All masters of a level and all levels below an
+                                  exchanged one, or none, and only if the connection gets no moving
+                                  pole and no higher pole in epsilon; only for families without a cut (Euclidean
+                                  region) and without a stated contour; the choice is recorded beside
+                                  the exact cache
+  --finite-masters-seconds N      time allowed per level for reducing the candidate integrals
+                                  (default 120); a level that needs longer keeps its masters
   --moving-poles keep|remove|exchange
                                   per level, the denominator factors of the connection that mix
                                   x with epsilon (docs/moving-poles.md; default remove for ft,

@@ -16,7 +16,7 @@ inline json::array mapping_json(const std::map<ibp::Integral,ibp::Relation>& red
 }
 inline void validate(const fire::Result& result,const ibp::PropagatorBasis& basis,const Exact& sample,
     const std::vector<ibp::Integral>& requested) {
-  if(!result.success||requested.empty()||result.reductions.size()>20000)throw std::invalid_argument("invalid completed FIRE batch");
+  if(!result.success||requested.empty())throw std::invalid_argument("invalid completed FIRE batch");
   for(const auto& a:requested){validate_index(a,basis);if(!result.reductions.count(a))throw std::invalid_argument("cached FIRE batch omits demand");}
   for(const auto& [a,row]:result.reductions) {
     validate_index(a,basis);
@@ -30,7 +30,7 @@ inline void validate(const fire::Result& result,const ibp::PropagatorBasis& basi
 }
 inline artifacts::Identity identity(const ibp::PropagatorBasis& b,const Exact& dimension,const ExactField& field,
     const std::vector<ibp::Integral>& requested,const fire::Options& options) {
-  (void)(dimension+Exact(field));if(requested.empty()||requested.size()>10000)throw std::invalid_argument("invalid FIRE batch demand");
+  (void)(dimension+Exact(field));if(requested.empty())throw std::invalid_argument("invalid FIRE batch demand");
   json::array gram,pairs,denominators,rewrites,symbols,demands,zeros;
   for(const auto& row:b.space.external_gram){json::array values;for(const auto& c:row)values.emplace_back(c.str());gram.push_back(values);}
   for(const auto& [a,c]:b.space.pairs)pairs.push_back(json::array{a,c});

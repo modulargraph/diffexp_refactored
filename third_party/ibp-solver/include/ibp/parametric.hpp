@@ -24,6 +24,11 @@ struct InputCoefficient {
   terms.resize(count);std::erase_if(terms,[](auto t){return !t.second;});
  }
  bool empty()const{return !constant&&terms.empty();}
+ bool operator==(const InputCoefficient&)const=default;
+};
+struct InputCoefficientHash {
+ std::size_t operator()(const InputCoefficient& c)const {std::uint64_t h=1469598103934665603ULL^static_cast<std::uint64_t>(c.constant);
+  for(auto [id,k]:c.terms){h*=1099511628211ULL;h^=id;h*=1099511628211ULL;h^=static_cast<std::uint64_t>(k);}return h;}
 };
 enum class ParametricOrdering {dots_first,total_degree};
 // Treat numerator powers and extra denominator powers at the same degree.
@@ -32,7 +37,17 @@ inline auto total_degree_grade(const Integral& a){auto [sector,dots,nums,powers]
 class ParametricProgram {
  public:
  Program program;
- std::vector<std::vector<InputCoefficient>> coefficients;
+ // The equations: rows[i] are the terms of equation i, each a column and
+ // the form of its coefficient, forms[term.form]. A family has few distinct
+ // coefficients (an integer times a contraction value, or a short sum of
+ // such), so each is kept once. program.equations stays empty: a solver
+ // reads the rows with the values of the forms at its point
+ // (evaluate_forms), and nothing is bound or copied per point.
+ std::vector<InputCoefficient> forms;
+ FormRows rows;
+ const InputCoefficient& coefficient(std::size_t i,std::size_t j)const{return forms[rows[i][j].form];}
+ // The values of all forms at one point.
+ std::vector<Word> evaluate_forms(const std::vector<Word>& inputs,const Field& f)const{std::vector<Word> out;out.reserve(forms.size());for(const auto& form:forms)out.push_back(form.evaluate(inputs,f));return out;}
  std::vector<bool> constant_inputs;
  std::size_t input_count=0;
  // Where each equation comes from: its seed and operator, or a target of a
@@ -41,15 +56,12 @@ class ParametricProgram {
  struct Origin {Integral seed;std::uint32_t op=0;bool operator==(const Origin&)const=default;};
  static constexpr std::uint32_t target=std::numeric_limits<std::uint32_t>::max();
  std::vector<Origin> origins;
- void bind(const std::vector<Word>& inputs,const Field& f,const std::vector<std::uint32_t>* selection=nullptr){
-  if(inputs.size()!=input_count)throw std::invalid_argument("parametric input arity");
-  for(auto v:inputs)if(v>=f.prime())throw std::invalid_argument("noncanonical parametric input");
-  auto row=[&](std::size_t i){if(i>=program.equations.size())throw std::invalid_argument("parametric source index");
-   for(std::size_t j=0;j<program.equations[i].size();++j)program.equations[i][j].constant=coefficients[i][j].evaluate(inputs,f);};
-  if(selection)for(auto i:*selection)row(i);else for(std::size_t i=0;i<program.equations.size();++i)row(i);
- }
- static ParametricProgram compile(const InputGeometry& g,const SeedOptions& options,std::vector<Integral> targets={},ParametricOrdering ordering=ParametricOrdering::dots_first,const std::vector<std::pair<unsigned,unsigned>>& sector_bounds={}){
-  if(!g.loops||g.loops>4||!g.physical||g.physical>12||g.n>16||g.n<g.physical||!g.inputs||g.inputs>=InputGeometry::zero||g.dimension>=g.inputs||g.trace.size()!=g.contractions.size()||g.zero_sectors.size()!=(std::size_t(1)<<g.physical)||options.dots>8||options.numerators>8)
+ // `admitted`, if given, further says which seeds within the bounds of
+ // their sector are generated, from the sector and the seed's dots and
+ // numerators: bounds are a box, what a sector needs need not be one.
+ static ParametricProgram compile(const InputGeometry& g,const SeedOptions& options,std::vector<Integral> targets={},ParametricOrdering ordering=ParametricOrdering::dots_first,const std::vector<std::pair<unsigned,unsigned>>& sector_bounds={},
+   const std::function<bool(std::size_t,unsigned,unsigned)>& admitted={}){
+  if(!g.loops||!g.physical||g.physical>Integral::max_physical||g.n>Integral::slots||g.n<g.physical||!g.inputs||g.inputs>=InputGeometry::zero||g.dimension>=g.inputs||g.trace.size()!=g.contractions.size()||g.zero_sectors.size()!=(std::size_t(1)<<g.physical)||options.dots>Integral::max_seed_power||options.numerators>Integral::max_seed_power)
    throw std::invalid_argument("parametric geometry or seed bounds");
   if(!g.constant_inputs.empty()&&g.constant_inputs.size()!=g.inputs)throw std::invalid_argument("constant input mask arity");
   for(const auto& op:g.contractions){if(op.size()!=g.n)throw std::invalid_argument("contraction slot arity");for(const auto& row:op){if(row.size()!=g.n+1)throw std::invalid_argument("contraction affine arity");for(auto id:row)if(id!=InputGeometry::zero&&id>=g.inputs)throw std::invalid_argument("contraction input id");}}
@@ -61,14 +73,20 @@ class ParametricProgram {
   ParametricProgram out;out.input_count=g.inputs;out.constant_inputs=g.constant_inputs;if(out.constant_inputs.empty())out.constant_inputs.resize(g.inputs);
   auto& p=out.program;std::unordered_map<Integral,Column,IntegralHash> ids;
   auto intern=[&](const Integral& a){auto [it,inserted]=ids.try_emplace(a,p.integrals.size());if(inserted)p.integrals.push_back(a);return it->second;};
-  struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Equation> equations;std::vector<Origin> origins;
+  struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Origin> origins;
+  using Kept=FormTerm;FormRows equations;
+  std::unordered_map<InputCoefficient,std::uint32_t,InputCoefficientHash> form_ids;
+  auto form=[&](InputCoefficient&& value){auto [it,inserted]=form_ids.try_emplace(value,static_cast<std::uint32_t>(out.forms.size()));if(inserted)out.forms.push_back(std::move(value));return it->second;};
+  auto keep=[&](Equation&& row){auto& kept=equations.emplace_back();kept.reserve(row.size());for(auto& term:row)kept.push_back({term.column,form(std::move(term.value))});};
   if(targets.empty()){Integral top;for(unsigned k=0;k<g.physical;++k)top.powers[k]=1;targets.push_back(top);for(unsigned k=0;k<g.n;++k){auto a=top;a.powers[k]+=k<g.physical?1:-1;targets.push_back(a);}}
   p.targets=targets;
-  for(const auto& target:targets){for(unsigned k=g.physical;k<16;++k)if(target.powers[k]>0||(k>=g.n&&target.powers[k]))throw std::invalid_argument("invalid target auxiliary slots");p.target_columns.push_back(intern(target));
-   if(g.zero_sectors[sector(target,g.physical)]){equations.push_back({{intern(target),{1,{}}}});origins.push_back({target,ParametricProgram::target});}}
+  for(const auto& target:targets){for(unsigned k=g.physical;k<Integral::slots;++k)if(target.powers[k]>0||(k>=g.n&&target.powers[k]))throw std::invalid_argument("invalid target auxiliary slots");p.target_columns.push_back(intern(target));
+   if(g.zero_sectors[sector(target,g.physical)]){keep(Equation{{intern(target),{1,{}}}});origins.push_back({target,ParametricProgram::target});}}
   Integral seed;
   auto consume=[&]{const auto mask=sector(seed,g.physical);if(g.zero_sectors[mask])return;
-   if(!sector_bounds.empty()){unsigned dots=0,nums=0;for(unsigned k=0;k<g.n;++k){if(seed.powers[k]>0)dots+=seed.powers[k]-1;else nums-=seed.powers[k];}if(dots>sector_bounds[mask].first||nums>sector_bounds[mask].second)return;}
+   if(!sector_bounds.empty()||admitted){unsigned dots=0,nums=0;for(unsigned k=0;k<g.n;++k){if(seed.powers[k]>0)dots+=seed.powers[k]-1;else nums-=seed.powers[k];}
+    if(!sector_bounds.empty()&&(dots>sector_bounds[mask].first||nums>sector_bounds[mask].second))return;
+    if(admitted&&!admitted(mask,dots,nums))return;}
 if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget");
    for(unsigned op=0;op<g.contractions.size();++op){Equation raw;
     auto add=[&](const Integral& a,std::uint32_t input,std::int64_t scale){if(input!=InputGeometry::zero&&scale&&!g.zero_sectors[sector(a,g.physical)])raw.push_back({intern(a),{0,{{input,scale}}}});};
@@ -78,7 +96,7 @@ if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget")
     std::sort(raw.begin(),raw.end(),[](const auto& a,const auto& b){return a.column<b.column;});Equation row;
     for(auto& term:raw){if(!row.empty()&&row.back().column==term.column){auto& terms=row.back().value.terms;terms.insert(terms.end(),term.value.terms.begin(),term.value.terms.end());}else row.push_back(std::move(term));}
     for(auto& term:row)term.value.normalize();std::erase_if(row,[](const auto& t){return t.value.empty();});
-    if(!row.empty()){total_terms+=row.size();if(total_terms>options.max_terms)throw std::length_error("parametric term budget");equations.push_back(std::move(row));origins.push_back({seed,op});}
+    if(!row.empty()){total_terms+=row.size();if(total_terms>options.max_terms)throw std::length_error("parametric term budget");keep(std::move(row));origins.push_back({seed,op});}
    }
   };
   auto visit=[&](auto&& self,unsigned k,unsigned dots,unsigned nums)->void {
@@ -95,7 +113,7 @@ if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget")
   for(auto& c:p.target_columns)c=inverse[c];
   std::vector<std::uint32_t> order(equations.size());std::iota(order.begin(),order.end(),0);
   std::stable_sort(order.begin(),order.end(),[&](auto i,auto j){const auto& a=equations[i];const auto& b=equations[j];return a.front().column==b.front().column?a.size()<b.size():a.front().column>b.front().column;});
-  for(auto i:order){auto& row=equations[i];p.equations.emplace_back();out.coefficients.emplace_back();out.origins.push_back(origins[i]);for(auto& t:row){p.equations.back().push_back({t.column,0,0});out.coefficients.back().push_back(std::move(t.value));}}
+  out.rows.reserve(equations.size());for(auto i:order){out.rows.push_back(std::move(equations[i]));out.rows.back().shrink_to_fit();out.origins.push_back(origins[i]);}
   return out;
  }
 };

@@ -49,7 +49,7 @@ inline std::string indices(const ibp::Integral& a) {
 // integration and therefore proves the sector scaleless. This criterion is
 // conservative; it does not guess massless scaling or discrete symmetries.
 inline std::vector<ibp::Integral> free_loop_sectors(const ibp::PropagatorBasis& b) {
-  if(b.physical_count>12)throw std::invalid_argument("FIRE zero-sector enumeration exceeds 4096-sector budget");
+  if(b.physical_count>=8*sizeof(std::size_t))throw std::invalid_argument("zero-sector enumeration: more physical denominators than bits of a sector mask");
   std::vector<ibp::Integral> result;auto zero=b.space.zero().constant;
   for(std::size_t mask=0;mask<(std::size_t(1)<<b.physical_count);++mask) {
     std::map<std::size_t,std::vector<Exact>> echelon;

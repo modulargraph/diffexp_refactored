@@ -48,8 +48,20 @@ inline constexpr std::size_t planning_base=60000;                             //
 inline constexpr std::size_t validation_base=100000,validation_stride=100;    // held-out points, indexed by reconstruction primes used
 inline constexpr std::size_t validation_points=3;
 inline constexpr unsigned validation_primes=2;
-inline bool slice(std::size_t ordinal){return ordinal>=slice_base&&ordinal<slice_base+slice_stride*slice_axes;}
-inline bool validation(std::size_t ordinal){return ordinal>=validation_base;}
+// The ranges above are where the first points of each kind have always been.
+// A reconstruction that needs more of a kind continues in a range of its own,
+// so that no number of samples makes two kinds share a point: ordinary
+// samples after slice_base-1 from ordinary_far on, the points of a slice
+// after its first slice_stride from slice_far on, 2^32 per axis.
+inline constexpr std::size_t ordinary_far=std::size_t(1)<<40,slice_far=std::size_t(1)<<44,slice_far_stride=std::size_t(1)<<32;
+inline bool slice(std::size_t ordinal){return (ordinal>=slice_base&&ordinal<slice_base+slice_stride*slice_axes)||(ordinal>=slice_far&&ordinal<slice_far+slice_far_stride*slice_axes);}
+inline bool validation(std::size_t ordinal){return ordinal>=validation_base&&ordinal<ordinary_far;}
+// The ordinal of the i-th point of the slice along an axis, its axis, and the
+// first point of its line.
+inline std::size_t slice_point(std::size_t axis,std::size_t i){return i<slice_stride?slice_base+slice_stride*axis+i:slice_far+slice_far_stride*axis+i;}
+inline std::size_t slice_axis(std::size_t ordinal){return ordinal>=slice_far?(ordinal-slice_far)/slice_far_stride:(ordinal-slice_base)/slice_stride;}
+// The ordinary sample after a given one.
+inline std::size_t next_ordinary(std::size_t ordinal){return ordinal+1==slice_base?ordinary_far:ordinal+1;}
 inline std::size_t validation_point(unsigned reconstruction_primes,std::size_t j){return validation_base+validation_stride*reconstruction_primes+j;}
 }
 namespace detail {
@@ -103,7 +115,7 @@ inline std::string table(const Rows& rows) {
 }
 // What fire_batch::validate requires of an exact reduction, of residues.
 inline void validate(const Rows& rows,const ibp::PropagatorBasis& basis,const std::vector<ibp::Integral>& requested) {
-  if(requested.empty()||rows.size()>20000)throw std::invalid_argument("invalid finite-field reduction");
+  if(requested.empty())throw std::invalid_argument("invalid finite-field reduction");
   for(const auto& a:requested){fire_batch::validate_index(a,basis);if(!rows.count(a))throw std::invalid_argument("finite-field reduction omits demand");}
   for(const auto& [a,row]:rows){fire_batch::validate_index(a,basis);
     for(const auto& [master,c]:row){fire_batch::validate_index(master,basis);if(!c)throw std::invalid_argument("zero finite-field mapping term");
@@ -126,7 +138,7 @@ inline std::set<ibp::Integral> masters(const Probe& probe) {
 inline std::vector<modular::Word> sample_point(std::size_t variables,const std::vector<std::size_t>& active,bool slices,unsigned prime_index,std::size_t ordinal) {
   auto point=modular::point(variables,prime_index,ordinal);
   if(slices&&ordinals::slice(ordinal)){
-    const auto axis=(ordinal-ordinals::slice_base)/ordinals::slice_stride;
+    const auto axis=ordinals::slice_axis(ordinal);
     if(axis>=active.size())throw std::invalid_argument("degree slice axis");
     auto line=modular::point(variables,prime_index,ordinals::slice_base+ordinals::slice_stride*axis);
     line[active[axis]]=point[active[axis]];point=std::move(line);
@@ -149,7 +161,7 @@ class Session {
  public:
   Session(ibp::PropagatorBasis basis,Exact dimension,ExactField field,Options options,fs::path exact_batches={})
     :basis_(std::move(basis)),dimension_(std::move(dimension)),field_(std::move(field)),options_(std::move(options)) {
-    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||options_.max_degree>256||!options_.max_variable_degree||options_.max_variable_degree>4096||options_.max_primes<2||options_.prime_count<4||options_.max_primes>options_.prime_count-ordinals::validation_primes||options_.max_samples_per_prime<8||options_.max_samples_per_prime>(std::size_t(1)<<20)||!options_.probe_timeout_seconds)
+    if(options_.cache_directory.empty()||(options_.executable.empty()&&!options_.sample_provider)||!options_.modulus||options_.provider_identity.empty()||options_.prime_table.empty()||!options_.max_degree||!options_.max_variable_degree||options_.max_primes<2||options_.prime_count<4||options_.max_primes>options_.prime_count-ordinals::validation_primes||options_.max_samples_per_prime<8||!options_.probe_timeout_seconds)
       throw std::invalid_argument("invalid finite modular reconstruction budgets or paths");
     if(!options_.sample_checkpoint_interval||options_.sample_checkpoint_interval>4096)throw std::invalid_argument("modular checkpoint interval must be 1..4096");
     if(options_.max_skipped_samples>64)throw std::invalid_argument("modular exceptional-sample budget must be 0..64");
@@ -211,9 +223,11 @@ class Session {
       auto record=[&](unsigned prime_index,std::size_t ordinal){return result.directory/("sample-"+std::to_string(prime_index)+"-"+std::to_string(ordinal)+".json");};
       // Points a provider may work on ahead: those of the given ordinals that
       // have no record yet and will therefore be requested from it.
+      // For a slice, `first` counts along the line of sliced_axis.
+      bool sliced_announcement=false;std::size_t sliced_axis=0;
       auto announce=[&](unsigned prime_index,std::size_t first,std::size_t count) {
         if(!options_.upcoming_samples)return;std::vector<std::vector<modular::Word>> points;
-        for(auto ordinal=first;ordinal<first+count;++ordinal)if(!fs::exists(record(prime_index,ordinal)))points.push_back(locate(prime_index,ordinal));
+        for(std::size_t i=0;i<count;++i)if(const auto ordinal=sliced_announcement?ordinals::slice_point(sliced_axis,first+i):first+i;!fs::exists(record(prime_index,ordinal)))points.push_back(locate(prime_index,ordinal));
         options_.upcoming_samples(points,options_.modulus(prime_index));
       };
       // The held-out points of a candidate lifted from `primes` primes that
@@ -279,7 +293,7 @@ class Session {
       const std::string moved="terminal integrals differ from the reference samples";
       auto acquire=[&](unsigned prime_index,std::size_t wanted,std::vector<detail::Probe>& into) {
         std::size_t announced=0;
-        while(into.size()<wanted){const auto ordinal=cursor[prime_index]++;
+        while(into.size()<wanted){const auto ordinal=cursor[prime_index];cursor[prime_index]=ordinals::next_ordinary(ordinal);
           // Every missing sample takes at least one further ordinal.
           if(ordinal>=announced){announce(prime_index,ordinal,wanted-into.size());announced=ordinal+wanted-into.size();}
           try{auto sample=probe(prime_index,ordinal);
@@ -335,8 +349,8 @@ class Session {
             std::vector<detail::Probe> line;std::size_t wanted=8;std::vector<std::optional<modular::Image>> shapes(keys.size());
             const auto maximum=std::min<std::size_t>(2*options_.max_variable_degree+4,options_.max_samples_per_prime);
             for(;;){
-              announce(1,ordinals::slice_base+ordinals::slice_stride*axis+line.size(),wanted-line.size());
-              try{while(line.size()<wanted){auto sample=probe(1,ordinals::slice_base+ordinals::slice_stride*axis+line.size());if(detail::masters(sample)!=terminal){valid=false;break;}line.push_back(std::move(sample));}}
+              sliced_announcement=true;sliced_axis=axis;announce(1,line.size(),wanted-line.size());sliced_announcement=false;
+              try{while(line.size()<wanted){auto sample=probe(1,ordinals::slice_point(axis,line.size()));if(detail::masters(sample)!=terminal){valid=false;break;}line.push_back(std::move(sample));}}
               catch(const detail::SliceFailure& e){status(std::string(e.what())+"; using multivariate discovery");valid=false;}
               if(!valid)break;auto slice=flatten(line);for(auto& s:slice)s.point={s.point[axis]};std::size_t found=0;
               for(std::size_t i=0;i<keys.size();++i){remaining();
@@ -380,25 +394,27 @@ class Session {
         for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));
         std::vector<Exact> coefficients;for(const auto& lift:lifts){auto c=lift.reconstruct(dimension_,active);if(!c)break;coefficients.push_back(*c);}
         bool valid=coefficients.size()==keys.size();std::vector<std::string> validation_files;
+        // Why a candidate is not accepted yet, for the progress line.
+        std::string pending=valid?"":std::to_string(keys.size()-coefficients.size())+" or fewer coefficients are not rational numbers within the modulus yet";
         if(valid)for(unsigned check_prime=pi+1;check_prime<=pi+ordinals::validation_primes&&valid;++check_prime)for(std::size_t j=0;j<ordinals::validation_points&&valid;++j) {
           const auto ordinal=ordinals::validation_point(pi,j);std::optional<detail::Probe> held;
           // Held-out ordinals are fixed by the completion record. An exceptional
           // one rejects this attempt; the next prime brings fresh points.
           try{held=probe(check_prime,ordinal,anchor(pi,check_prime,j));}
-          catch(const detail::ExceptionalPoint& e){status(std::string("exceptional held-out point: ")+e.what());valid=false;break;}
+          catch(const detail::ExceptionalPoint& e){status(std::string("exceptional held-out point: ")+e.what());valid=false;pending="a held-out point was exceptional";break;}
           const auto& check=*held;
           validation_files.push_back("sample-"+std::to_string(check_prime)+"-"+std::to_string(ordinal)+".json");
-          if(detail::masters(check)!=terminal){valid=false;break;}
+          if(detail::masters(check)!=terminal){valid=false;pending="a held-out elimination leaves other integrals unreduced";break;}
           detail::Rows candidate;for(const auto& [a,row]:probes.front().rows)candidate[a];
           try{for(std::size_t k=0;k<keys.size();++k){const auto actual=modular::evaluate(coefficients[k],check.point,options_.modulus(check_prime));
-              if(actual!=detail::coefficient(check,keys[k])){valid=false;break;}
+              if(actual!=detail::coefficient(check,keys[k])){valid=false;pending="the candidate disagrees with a held-out sample";break;}
               if(actual)candidate.at(keys[k].first).emplace(keys[k].second,actual);}
-            if(valid&&candidate!=check.rows)valid=false;
-          }catch(const std::domain_error&){valid=false;}
+            if(valid&&candidate!=check.rows){valid=false;pending="the candidate disagrees with a held-out sample";}
+          }catch(const std::domain_error&){valid=false;pending="the candidate has a pole at a held-out point";}
         }
         json::array raw_lifts;for(const auto& lift:lifts){json::array residues;for(const auto& r:lift.residues){char* s=fmpz_get_str(nullptr,10,r.value);residues.emplace_back(s);flint_free(s);}raw_lifts.push_back(residues);}
         detail::save(result.directory/"progress.json",{{"schema","DiffExp3.ModularProgress/v1"},{"identity",identity},{"stage","CRT-and-validation"},{"reconstruction_primes",pi},{"samples_per_prime",probes.size()},{"residues",raw_lifts},{"fresh_samples",fresh},{"reused_samples",hits},{"skipped_samples",skipped},{"candidate_validated",valid}});
-        status("modular reconstruction primes "+std::to_string(pi)+", independent validation "+(valid?"passed":"requires more primes"));
+        status("modular reconstruction primes "+std::to_string(pi)+", independent validation "+(valid?"passed":"requires more primes ("+pending+")"));
         if(!valid){foresee(pi+1);continue;}
         for(const auto& [a,row]:probes.front().rows)result.reductions.emplace(a,ibp::Relation{});
         for(std::size_t i=0;i<keys.size();++i)ibp::add(result.reductions.at(keys[i].first),keys[i].second,coefficients[i]);

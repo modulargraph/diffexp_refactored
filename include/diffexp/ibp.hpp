@@ -315,7 +315,7 @@ class ExactReducer {
  public:
   using Witness=std::map<std::size_t,Exact>;
   struct Reduction {Relation remainder;Witness witness;};
-  explicit ExactReducer(const Exact& sample,std::size_t equation_limit=20000)
+  explicit ExactReducer(const Exact& sample,std::size_t equation_limit=std::numeric_limits<std::size_t>::max())
       : one_(sample.constant(1)),equation_limit_(equation_limit) {}
   void insert(Relation equation) {
     if(sources_.size()>=equation_limit_) throw std::runtime_error("exact IBP equation budget exhausted");

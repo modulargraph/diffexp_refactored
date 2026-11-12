@@ -547,23 +547,56 @@ inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
     }
     unsigned rank = 0;
     std::vector<bool> used(d, false);
+    // Every entry that is not zero is an admissible pivot in exact
+    // arithmetic, but the gauge is afterwards evaluated at the point and its
+    // size is the size of the numbers the epsilon recurrence of the inverse
+    // subtracts from each other: a pivot of 2^-209 (an entry that consists
+    // of the last retained x orders of the series alone) made the gauge 2^418
+    // and cost 393 bits per epsilon order. The pivot is therefore the first
+    // entry, in the order of columns and rows, within 2^-20 of the largest
+    // admissible one. size[row][column]: log2 of the entry at the point,
+    // -infinity for an entry that is zero or not separated from zero, NaN
+    // where it is not yet evaluated.
+    constexpr double unknown = std::numeric_limits<double>::quiet_NaN(),
+                     none = -std::numeric_limits<double>::infinity();
+    std::vector<std::vector<double>> size(d, std::vector<double>(d, unknown));
     for (;;) {
       std::optional<std::pair<unsigned, unsigned>> pivot;
       bool structural_nonzero = false;
-      for (unsigned column = 0; column < d && !pivot; ++column)
+      double largest = none;
+      for (unsigned column = 0; column < d; ++column)
         if (!used[column])
-          for (unsigned row = rank; row < d; ++row)
-            if (!leading[row][column].is_zero()) {
-              structural_nonzero = true;
+          for (unsigned row = rank; row < d; ++row) {
+            auto &known = size[row][column];
+            if (leading[row][column].is_zero()) {
+              known = none;
+              continue;
+            }
+            structural_nonzero = true;
+            if (std::isnan(known)) {
+              known = none;
               try {
                 auto value = evaluate_at(leading[row][column]);
                 if (value.is_finite() && !value.contains_zero()) {
-                  pivot = {{row, column}};
-                  break;
+                  mag_t lower;
+                  mag_init(lower);
+                  acb_get_mag_lower(lower, value.raw());
+                  if (!mag_is_zero(lower)) known = mag_get_d_log2_approx(lower);
+                  mag_clear(lower);
                 }
               } catch (const PrecisionNeeded &) {
               }
             }
+            largest = std::max(largest, known);
+          }
+      if (largest > none)
+        for (unsigned column = 0; column < d && !pivot; ++column)
+          if (!used[column])
+            for (unsigned row = rank; row < d; ++row)
+              if (size[row][column] >= largest - 20) {
+                pivot = {{row, column}};
+                break;
+              }
       if (!pivot) {
         if (structural_nonzero)
           throw PrecisionNeeded(
@@ -576,6 +609,7 @@ inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
       used[column] = true;
       if (row != rank) {
         std::swap(leading[row], leading[rank]);
+        std::swap(size[row], size[rank]);
         for (auto &m : gauge.inverse_epsilon_powers)
           std::swap(m[row], m[rank]);
       }
@@ -594,6 +628,7 @@ inline RowGauge row_gauge_coefficients(unsigned d, const Exact &zero,
       for (unsigned i = 0; i < d; ++i)
         if (i != rank && !leading[i][column].is_zero()) {
           const auto factor = leading[i][column];
+          size[i].assign(d, unknown);
           for (unsigned j = 0; j < d; ++j)
             if (!leading[rank][j].is_zero()) {
               budget.spend();

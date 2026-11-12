@@ -73,6 +73,8 @@ struct Statistics {
   // eliminations started ahead and those of them that were used. Seconds of
   // such work are summed over threads.
   std::size_t batched_replays=0,early_solves=0,early_solves_used=0;
+  // Eliminations of the selected equations served from a batch.
+  std::size_t batched_solves=0;
   // Eliminations repeated with wider seeds (Options::max_seed_widenings).
   std::size_t seed_widenings=0;
   // Complete eliminations that did not start from nothing (they are not among
@@ -267,6 +269,17 @@ class Sampler {
           ahead_.erase(ahead_.begin());return out;
         }
       }
+      // Without a trace (it did not fit its budget at this prime) the
+      // announced points are eliminated together as well: each the selected
+      // equations alone, as this thread would have done one after another.
+      if(!independent&&learned.disabled&&options_.selected_source_rows&&plan_->selection&&threads_>1)if(auto* slot=announced(point,modulus)){
+        if(!slot->result||slot->state!=state_)eliminate_announced(requested,modulus,solve,limits);
+        if(slot->result&&slot->state==state_){
+          out=std::move(*slot->result);++stats_.selected_solves;++stats_.batched_solves;stats_.selected_equations+=plan_->selection->size();stats_.selected_solve_seconds+=slot->seconds;
+          ++stats_.probes;stats_.generation_seconds+=std::chrono::duration<double>(generated-begin).count();stats_.elimination_seconds+=slot->seconds;
+          ahead_.erase(ahead_.begin());return out;
+        }
+      }
       if(!independent&&learned.trace){const auto replay_begin=std::chrono::steady_clock::now();try{rows=learned.trace->evaluate_inputs(values,field,learned.workspace);++stats_.trace_replays;replayed=true;}
         catch(const std::domain_error&){learned.trace.reset();++state_;++stats_.trace_fallbacks;}stats_.trace_replay_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-replay_begin).count();}
       // Held-out samples use fresh primal elimination of original IBP rows,
@@ -280,6 +293,7 @@ class Sampler {
         // A point is revisited by a wider batch or wider seeds; a held-out
         // point is not, once the seeds of its batch are known to suffice.
         const bool revisited=!independent||!plan_->contained;
+        double primal_seconds=0;
         auto primal=[&](bool selected){
           auto started=std::chrono::steady_clock::now();double seconds=0;
           const auto* sources=selected?&*plan_->selection:nullptr;dependencies.reset();early.reset();owned.reset();
@@ -326,7 +340,7 @@ class Sampler {
             if(!selected)noted(*solver);
             if(!selected&&revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,owned});
           }
-          seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+          seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();primal_seconds=seconds;
           if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;}
           else if(continued){++stats_.continued_solves;stats_.continued_equations+=continued->rows.size();stats_.continued_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
@@ -395,7 +409,14 @@ class Sampler {
         if(!independent){
           ++state_;
           if(replayed)learned.checked=true;
-          else if(!learned.disabled){const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.seconds=remaining();tracing.max_fill=solve.max_fill;
+          else if(!learned.disabled){const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.max_fill=solve.max_fill;
+            // A trace pays where it is learned in about the time of an
+            // elimination: a replay then beats eliminating the selected
+            // equations again. Where learning takes much longer (it also
+            // takes far more memory), the selected equations are eliminated
+            // at every point instead, which is as fast as replaying a long
+            // trace and runs in batches as well (eliminate_announced).
+            tracing.seconds=std::min(remaining(),std::max(0.25,2*primal_seconds));
             tracing.max_nodes=options_.max_trace_nodes?options_.max_trace_nodes:std::min<std::size_t>(std::numeric_limits<std::uint32_t>::max(),limits.memory_bytes/128);
             // The primal rows above are already a valid reduction. A trace that
             // does not fit its node, fill or time budget only costs the replay
@@ -405,7 +426,8 @@ class Sampler {
               if(options_.progress&&!plan_->trace_told){plan_->trace_told=true;options_.progress("arithmetic trace: "+std::to_string(learned.trace->instructions())+" instructions, "+std::to_string(learned.trace->registers())+" registers, from "+std::to_string(selection().size())+" equations and "+std::to_string(program.target_columns.size())+" targets");}}
             catch(const std::length_error&){learned.disabled=true;}
             catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
-            if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;if(options_.progress)options_.progress("arithmetic trace exceeds its budget at this prime; continuing with primal elimination");}
+            if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;
+              if(options_.progress&&!plan_->trace_told){plan_->trace_told=true;options_.progress("no arithmetic trace (learning one takes longer than eliminating the "+std::to_string(selection().size())+" selected equations a few times, or it does not fit its memory); samples eliminate them at every point");}}
             else if(stats_.trace_instructions=std::max(stats_.trace_instructions,learned.trace->instructions()),stats_.trace_rows=std::max(stats_.trace_rows,selection().size());learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
             learned.checked=false;stats_.trace_learning_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-learning_begin).count();}
         }
@@ -454,6 +476,37 @@ class Sampler {
     if(modulus!=ahead_modulus_)return nullptr;
     auto it=std::find_if(ahead_.begin(),ahead_.end(),[&](const Ahead& slot){return slot.point==point;});
     if(it==ahead_.end())return nullptr;ahead_.erase(ahead_.begin(),it);return &ahead_.front();
+  }
+  // Eliminates the selected equations at a bounded stretch of announced
+  // points, the requested one first, each worker with its own equations and
+  // solver. A point whose elimination fails, or leaves other integrals
+  // unreduced than the pilot did, keeps no result: its own request then takes
+  // the serial path, which falls back to all equations and reports failures.
+  void eliminate_announced(const std::vector<ibp::Integral>& requested,modular::Word modulus,const ::ibp::SolveOptions& probe,const fire::Options& limits) {
+    using clock=std::chrono::steady_clock;auto since=[](clock::time_point t){return std::chrono::duration<double>(clock::now()-t).count();};
+    std::vector<Ahead*> batch;const std::size_t stretch=4*threads_;
+    for(auto& slot:ahead_){if(batch.size()==stretch)break;if(!slot.result||slot.state!=state_){slot.result.reset();batch.push_back(&slot);}}
+    const auto began=clock::now();std::atomic<std::size_t> next{0};
+    const auto& parametric=*plan_->program;const auto& program=parametric.program;const auto& selected=*plan_->selection;const auto& terminal=plan_->terminal_columns;
+    auto work=[&]{
+      ::ibp::Field field(modulus);::ibp::Program local;std::optional<::ibp::Solver> solver;
+      for(;;){const auto i=next.fetch_add(1);if(i>=batch.size()||since(began)>=limits.timeout_seconds)break;auto& slot=*batch[i];const auto start=clock::now();
+        try{std::vector<::ibp::Word> values;for(const auto& input:inputs_)values.push_back(modular::evaluate(input,slot.point,modulus));
+          const auto forms=parametric.evaluate_forms(values,field);
+          if(!solver){local.integrals.resize(program.integrals.size());local.equations.resize(program.equations.size());local.target_columns=program.target_columns;
+            for(auto source:selected){auto& row=local.equations[source];row.reserve(program.equations[source].size());for(const auto& entry:program.equations[source])row.push_back({entry.column,0,0});}
+            auto solve=probe;solve.complete_rows=false;solve.progress={};solve.seconds=std::max(1.0,limits.timeout_seconds-since(began));solver.emplace(local,field,solve);}
+          for(auto source:selected){auto& row=local.equations[source];for(std::size_t j=0;j<row.size();++j)row[j].constant=forms[parametric.coefficients[source][j]];}
+          solver->restart(std::max(1.0,limits.timeout_seconds-since(began)));solver->solve(0,&selected);auto rows=solver->targets();
+          std::set<::ibp::Column> found;for(const auto& row:rows)for(const auto& entry:row)found.insert(entry.column);
+          if(found!=terminal)continue;
+          fire::Result reduced;emit(reduced,rows,program,requested);slot.seconds=since(start);slot.state=state_;slot.result=std::move(reduced);
+        }catch(...){}
+      }};
+    const auto busy=std::min<std::size_t>(running(),threads_-1);
+    std::vector<std::jthread> pool;
+    try{for(std::size_t i=1;i<std::min<std::size_t>(batch.size(),threads_-busy);++i)pool.emplace_back([&]{work();flint_cleanup();});}catch(const std::system_error&){}
+    work();
   }
   // Replays a bounded stretch of announced points, the requested one first,
   // each worker in its own workspace. A point that fails in any way keeps no

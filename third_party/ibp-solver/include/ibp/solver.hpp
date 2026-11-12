@@ -9,6 +9,11 @@ namespace ibp {
 using Column=std::uint32_t;
 struct LinearEntry {Column column;Word constant,dimension;};
 struct Entry {Column column;Word value;bool operator==(const Entry&)const=default;};
+// A term of an equation whose coefficient is one of a table of values (the
+// forms of a ParametricProgram at a point): eight bytes instead of the
+// twenty-four of a LinearEntry, and no copy of the equations per point.
+struct FormTerm {Column column;std::uint32_t form;};
+using FormRows=std::vector<std::vector<FormTerm>>;
 using Row=std::vector<Entry>;
 struct SeedOptions {unsigned dots=1,numerators=1;std::size_t max_seeds=100000,max_terms=10000000,max_states=2000000;double seconds=120;};
 struct Program {
@@ -71,6 +76,8 @@ struct Pivot {Row row;std::uint32_t source;std::vector<Column> dependencies;};
 class Solver {
  const Program& program_;const Field& field_;SolveOptions options_;std::chrono::steady_clock::time_point started_;
  std::vector<int> lookup_;std::vector<Pivot> pivots_;Statistics stats_;
+ // If set, the equations: rows of terms and the values their forms take.
+ const FormRows* rows_=nullptr;const std::vector<Word>* forms_=nullptr;
  double told_=0;
  void budget(){if(stats_.fill>options_.max_fill)throw std::length_error("pivot fill budget exceeded");const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started_).count();
   if(elapsed>options_.seconds)throw std::runtime_error("elimination time budget exceeded");
@@ -105,7 +112,10 @@ class Solver {
  std::vector<Leading> leading_;std::vector<std::uint32_t> mark_;std::uint32_t generation_=0;
  using Fetch=std::function<Row(std::uint32_t)>;
  Word dimension_=0;
- Row source_row(std::uint32_t source)const{Row row;for(const auto& a:program_.equations.at(source)){const auto value=field_.add(a.constant,field_.mul(dimension_,a.dimension));if(value)row.push_back({a.column,value});}return row;}
+ Row source_row(std::uint32_t source)const{Row row;
+  if(rows_){const auto& terms=rows_->at(source);row.reserve(terms.size());for(const auto& a:terms)if(const auto value=(*forms_)[a.form])row.push_back({a.column,value});return row;}
+  for(const auto& a:program_.equations.at(source)){const auto value=field_.add(a.constant,field_.mul(dimension_,a.dimension));if(value)row.push_back({a.column,value});}return row;}
+ std::size_t equation_count()const{return rows_?rows_->size():program_.equations.size();}
  // The leading row of pivot `wanted`: its equation with the columns before
  // the pivot's own eliminated by the leading rows of their pivots, which are
  // found first. What can stand before the pivot column is known from the
@@ -150,12 +160,15 @@ class Solver {
  }
  public:
  Solver(const Program& program,const Field& field,SolveOptions options={}):program_(program),field_(field),options_(options),lookup_(program.integrals.size(),-1){}
+ // The equations are `rows` with the coefficients `forms`; both must outlive
+ // the solver, and `forms` keep their values while it is used.
+ Solver(const Program& program,const Field& field,SolveOptions options,const FormRows& rows,const std::vector<Word>& forms):program_(program),field_(field),options_(options),lookup_(program.integrals.size(),-1),rows_(&rows),forms_(&forms){}
  // `kept` continues an elimination: pivots of a subsystem of this program,
  // in this program's columns and equation indices. With them, `selected`
  // names the equations that subsystem did not contain.
  void solve(Word dimension,const std::vector<std::uint32_t>* selected=nullptr,std::vector<Pivot> kept={}){started_=std::chrono::steady_clock::now();told_=0;pivots_=std::move(kept);leading_.clear();dimension_=dimension;std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};
   for(std::size_t i=0;i<pivots_.size();++i){const auto& row=pivots_[i].row;if(row.empty()||row.front().column>=lookup_.size()||lookup_[row.front().column]>=0)throw std::invalid_argument("kept pivots are not an echelon basis of this program");lookup_[row.front().column]=i;stats_.fill+=row.size();++stats_.rank;}
-  auto insert=[&](std::uint32_t source){if((stats_.equations++&127)==0)budget();Row row;for(const auto& a:program_.equations[source]){auto value=field_.add(a.constant,field_.mul(dimension,a.dimension));if(value)row.push_back({a.column,value});}std::vector<Column> dependencies;
+  auto insert=[&](std::uint32_t source){if((stats_.equations++&127)==0)budget();Row row=source_row(source);std::vector<Column> dependencies;
    if(options_.complete_rows){
     bool reducible=false;for(const auto& entry:row)if(lookup_[entry.column]>=0){reducible=true;break;}
     if(reducible)row=reduce(std::move(row));
@@ -171,9 +184,9 @@ class Solver {
     }catch(...){clear(low,high);throw;}
     stats_.peak_row=std::max(stats_.peak_row,row.size());
    }
-   if(row.empty())return;auto inverse=field_.inv(row.front().value);for(auto& entry:row)entry.value=field_.mul(entry.value,inverse);auto column=row.front().column;stats_.fill+=row.size();lookup_[column]=pivots_.size();pivots_.push_back({std::move(row),source,std::move(dependencies)});++stats_.rank;budget();
+   if(row.empty())return;auto inverse=field_.inv(row.front().value);for(auto& entry:row)entry.value=field_.mul(entry.value,inverse);auto column=row.front().column;row.shrink_to_fit();dependencies.shrink_to_fit();stats_.fill+=row.size();lookup_[column]=pivots_.size();pivots_.push_back({std::move(row),source,std::move(dependencies)});++stats_.rank;budget();
   };
-  if(selected)for(auto row:*selected){if(row>=program_.equations.size())throw std::invalid_argument("selected equation out of range");insert(row);}else for(std::uint32_t row=0;row<program_.equations.size();++row)insert(row);
+  if(selected)for(auto row:*selected){if(row>=equation_count())throw std::invalid_argument("selected equation out of range");insert(row);}else for(std::uint32_t row=0;row<equation_count();++row)insert(row);
   stats_.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started_).count();
  }
  Row reduce(Row row,std::vector<Column>* touched=nullptr){

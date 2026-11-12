@@ -89,10 +89,12 @@ class ArithmeticTrace {
     }
    }
   };
-  for(auto source:selection){budget();if(source>=program.equations.size())throw std::invalid_argument("trace source out of range");TraceRow row;
-   for(std::size_t j=0;j<program.equations[source].size();++j){auto e=program.equations[source][j];Id id;
-    if(parametric){const auto& c=parametric->forms.at(parametric->coefficients.at(source).at(j));id=constant(f.integer(c.constant));for(auto [slot,k]:c.terms)id=operation(Op::add,id,operation(Op::mul,constant(f.integer(k)),input_ids.at(slot)));}
-    else id=operation(Op::add,constant(e.constant),operation(Op::mul,constant(e.dimension),dim));
+  for(auto source:selection){budget();if(source>=(parametric?parametric->rows.size():program.equations.size()))throw std::invalid_argument("trace source out of range");TraceRow row;
+   if(parametric)for(const auto& term:parametric->rows[source]){const auto& c=parametric->forms.at(term.form);Id id=constant(f.integer(c.constant));
+    for(auto [slot,k]:c.terms)id=operation(Op::add,id,operation(Op::mul,constant(f.integer(k)),input_ids.at(slot)));
+    if(nonzero(id))row.push_back({term.column,id});}
+   else for(std::size_t j=0;j<program.equations[source].size();++j){auto e=program.equations[source][j];
+    const Id id=operation(Op::add,constant(e.constant),operation(Op::mul,constant(e.dimension),dim));
     if(nonzero(id))row.push_back({e.column,id});}
    if(options.complete_rows)reduce(row);
    else while(!row.empty()&&lookup[row.front().column]>=0)row=subtract(row,pivots[lookup[row.front().column]],row.front().id);
@@ -129,7 +131,7 @@ class ArithmeticTrace {
  static ArithmeticTrace learn(const Program& p,const Field& f,Word d,const std::vector<std::uint32_t>& s,Options o){return build(p,f,d,s,o);}
  static ArithmeticTrace learn(const Program& p,const Field& f,Word d,const std::vector<std::uint32_t>& s){return learn(p,f,d,s,Options{});}
  static ArithmeticTrace learn_parametric(const ParametricProgram& p,const Field& f,const std::vector<Word>& inputs,const std::vector<std::uint32_t>& s,Options o){
-  if(!p.input_count||inputs.size()!=p.input_count||p.constant_inputs.size()!=p.input_count||p.coefficients.size()!=p.program.equations.size())throw std::invalid_argument("parametric trace input arity");
+  if(!p.input_count||inputs.size()!=p.input_count||p.constant_inputs.size()!=p.input_count)throw std::invalid_argument("parametric trace input arity");
   for(auto v:inputs)if(v>=f.prime())throw std::invalid_argument("noncanonical parametric trace input");
   return build(p.program,f,0,s,o,&p,inputs);
  }

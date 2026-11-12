@@ -37,12 +37,15 @@ inline auto total_degree_grade(const Integral& a){auto [sector,dots,nums,powers]
 class ParametricProgram {
  public:
  Program program;
- // The coefficient of term j of equation i is forms[coefficients[i][j]]: a
- // family has few distinct coefficients (an integer times a contraction
- // value, or a short sum of such), so each is kept once and a term names it.
+ // The equations: rows[i] are the terms of equation i, each a column and
+ // the form of its coefficient, forms[term.form]. A family has few distinct
+ // coefficients (an integer times a contraction value, or a short sum of
+ // such), so each is kept once. program.equations stays empty: a solver
+ // reads the rows with the values of the forms at its point
+ // (evaluate_forms), and nothing is bound or copied per point.
  std::vector<InputCoefficient> forms;
- std::vector<std::vector<std::uint32_t>> coefficients;
- const InputCoefficient& coefficient(std::size_t i,std::size_t j)const{return forms[coefficients[i][j]];}
+ FormRows rows;
+ const InputCoefficient& coefficient(std::size_t i,std::size_t j)const{return forms[rows[i][j].form];}
  // The values of all forms at one point.
  std::vector<Word> evaluate_forms(const std::vector<Word>& inputs,const Field& f)const{std::vector<Word> out;out.reserve(forms.size());for(const auto& form:forms)out.push_back(form.evaluate(inputs,f));return out;}
  std::vector<bool> constant_inputs;
@@ -53,14 +56,6 @@ class ParametricProgram {
  struct Origin {Integral seed;std::uint32_t op=0;bool operator==(const Origin&)const=default;};
  static constexpr std::uint32_t target=std::numeric_limits<std::uint32_t>::max();
  std::vector<Origin> origins;
- void bind(const std::vector<Word>& inputs,const Field& f,const std::vector<std::uint32_t>* selection=nullptr){
-  if(inputs.size()!=input_count)throw std::invalid_argument("parametric input arity");
-  for(auto v:inputs)if(v>=f.prime())throw std::invalid_argument("noncanonical parametric input");
-  const auto values=evaluate_forms(inputs,f);
-  auto row=[&](std::size_t i){if(i>=program.equations.size())throw std::invalid_argument("parametric source index");
-   for(std::size_t j=0;j<program.equations[i].size();++j)program.equations[i][j].constant=values[coefficients[i][j]];};
-  if(selection)for(auto i:*selection)row(i);else for(std::size_t i=0;i<program.equations.size();++i)row(i);
- }
  // `admitted`, if given, further says which seeds within the bounds of
  // their sector are generated, from the sector and the seed's dots and
  // numerators: bounds are a box, what a sector needs need not be one.
@@ -79,7 +74,7 @@ class ParametricProgram {
   auto& p=out.program;std::unordered_map<Integral,Column,IntegralHash> ids;
   auto intern=[&](const Integral& a){auto [it,inserted]=ids.try_emplace(a,p.integrals.size());if(inserted)p.integrals.push_back(a);return it->second;};
   struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Origin> origins;
-  struct Kept {Column column;std::uint32_t form;};std::vector<std::vector<Kept>> equations;
+  using Kept=FormTerm;FormRows equations;
   std::unordered_map<InputCoefficient,std::uint32_t,InputCoefficientHash> form_ids;
   auto form=[&](InputCoefficient&& value){auto [it,inserted]=form_ids.try_emplace(value,static_cast<std::uint32_t>(out.forms.size()));if(inserted)out.forms.push_back(std::move(value));return it->second;};
   auto keep=[&](Equation&& row){auto& kept=equations.emplace_back();kept.reserve(row.size());for(auto& term:row)kept.push_back({term.column,form(std::move(term.value))});};
@@ -118,7 +113,7 @@ if(++p.seeds>options.max_seeds)throw std::length_error("parametric seed budget")
   for(auto& c:p.target_columns)c=inverse[c];
   std::vector<std::uint32_t> order(equations.size());std::iota(order.begin(),order.end(),0);
   std::stable_sort(order.begin(),order.end(),[&](auto i,auto j){const auto& a=equations[i];const auto& b=equations[j];return a.front().column==b.front().column?a.size()<b.size():a.front().column>b.front().column;});
-  for(auto i:order){auto& row=equations[i];p.equations.emplace_back();out.coefficients.emplace_back();out.origins.push_back(origins[i]);p.equations.back().reserve(row.size());out.coefficients.back().reserve(row.size());for(auto& t:row){p.equations.back().push_back({t.column,0,0});out.coefficients.back().push_back(t.form);}std::vector<Kept>().swap(row);}
+  out.rows.reserve(equations.size());for(auto i:order){out.rows.push_back(std::move(equations[i]));out.rows.back().shrink_to_fit();out.origins.push_back(origins[i]);}
   return out;
  }
 };

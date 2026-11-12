@@ -25,13 +25,25 @@ inline std::string rational_text(const json::value& value) {
  throw std::invalid_argument("family coefficients must be rational strings or integers");
 }
 struct Integral {
- std::array<std::int8_t,16> powers{};
+ // One power per scalar product of the family, L(L+1)/2+L*E of them: 18 for
+ // three loops and five points, 26 for four loops and five points. The slots
+ // a family does not use stay zero. This width is the storage of an integral,
+ // not a property of the algorithms: nothing else depends on its value.
+#ifndef IBP_SOLVER_INTEGRAL_SLOTS
+#define IBP_SOLVER_INTEGRAL_SLOTS 32
+#endif
+ static constexpr unsigned slots=IBP_SOLVER_INTEGRAL_SLOTS;
+ // What a power can hold with room for the raising of one IBP operator.
+ static constexpr unsigned max_seed_power=120;
+ // Sectors are dense bit masks of the physical denominators.
+ static constexpr unsigned max_physical=31;
+ std::array<std::int8_t,slots> powers{};
  auto operator<=>(const Integral&)const=default;
 };
 struct IntegralHash {
  std::size_t operator()(const Integral& a)const {std::uint64_t h=1469598103934665603ULL;for(auto v:a.powers){h^=static_cast<unsigned char>(v);h*=1099511628211ULL;}return h;}
 };
-inline unsigned sector(const Integral& a,unsigned physical) {unsigned mask=0;for(unsigned i=0;i<physical;++i)if(a.powers[i]>0)mask|=1u<<i;return mask;}
+inline std::size_t sector(const Integral& a,unsigned physical) {std::size_t mask=0;for(unsigned i=0;i<physical;++i)if(a.powers[i]>0)mask|=std::size_t(1)<<i;return mask;}
 inline auto grade(const Integral& a){unsigned sector_size=0,dots=0,numerators=0;for(auto v:a.powers)if(v>0){++sector_size;dots+=v-1;}else numerators-=v;return std::tuple{sector_size,dots,numerators,a.powers};}
 using Affine=std::vector<Word>;
 struct Geometry {
@@ -53,10 +65,10 @@ class Family {
  Geometry compile(const Field& f)const {
   const auto& lines=input_.at("propagators").as_array();const auto& gram=input_.at("external_gram").as_array();
   auto loops_value=input_.at("loops").as_int64(),physical_value=input_.at("physical_count").as_int64();
-  if(loops_value<1||loops_value>4||physical_value<1||physical_value>12||gram.size()>16)throw std::invalid_argument("family size budget");
+  if(loops_value<1||physical_value<1||physical_value>Integral::max_physical||gram.size()>Integral::slots)throw std::invalid_argument("family size");
   unsigned l=loops_value,e=gram.size(),physical=physical_value;
-  if(!l || l>4 || physical>12 || !physical || physical>lines.size())throw std::invalid_argument("family size budget");
-  unsigned n=l*(l+1)/2+l*e;if(n>16 || physical>n || lines.size()>n)throw std::invalid_argument("at most16 independent scalar products; partial fractions needed for overcomplete denominators");
+  if(!l || physical>Integral::max_physical || !physical || physical>lines.size())throw std::invalid_argument("family size");
+  unsigned n=l*(l+1)/2+l*e;if(n>Integral::slots || physical>n || lines.size()>n)throw std::invalid_argument("more scalar products than an integral stores (IBP_SOLVER_INTEGRAL_SLOTS), or overcomplete denominators, which need partial fractions");
   for(const auto& row:gram)if(row.as_array().size()!=e)throw std::invalid_argument("Gram shape");
   ExactMatrix gram_exact(e,e);
   for(unsigned i=0;i<e;++i)for(unsigned j=0;j<e;++j){auto text=rational_text(gram[i].as_array()[j]);auto q=fmpq_mat_entry(gram_exact.value,i,j);if(fmpq_set_str(q,text.c_str(),10)||fmpz_is_zero(fmpq_denref(q)))throw std::invalid_argument("invalid Gram rational");fmpq_canonicalise(q);}
@@ -86,9 +98,9 @@ class Family {
   std::vector<Affine> sp(n,Affine(n+1));for(unsigned i=0;i<n;++i)for(unsigned j=0;j<n;++j){sp[i][j]=matrix[i][n+j];sp[i][n]=f.sub(sp[i][n],f.mul(sp[i][j],out.denominators[j][n]));}
   for(unsigned i=0;i<l;++i)for(unsigned v=0;v<l+e;++v){out.trace.push_back(i==v);out.contractions.emplace_back();for(const auto& q:out.denominators){Affine derivative(n+1),rewritten(n+1);for(unsigned z=0;z<n;++z){auto [a,b]=pairs[z];if(a==i)axpy(derivative,dot(v,b),q[z]);if(b==i)axpy(derivative,dot(v,a),q[z]);}rewritten[n]=derivative[n];for(unsigned z=0;z<n;++z)axpy(rewritten,sp[z],derivative[z]);out.contractions.back().push_back(std::move(rewritten));}}
   // Prove free-loop sectors over Q, never infer zero sectors from modular rank.
-  out.zero_sectors.resize(1u<<physical);
-  for(unsigned mask=0;mask<(1u<<physical);++mask){unsigned count=std::popcount(mask);if(!count){out.zero_sectors[mask]=true;continue;}fmpq_mat_t exact,reduced;fmpq_mat_init(exact,count,l);fmpq_mat_init(reduced,count,l);unsigned r=0;
-   for(unsigned k=0;k<physical;++k)if(mask&(1u<<k)){const auto& c=lines[k].as_object().at("loop_coefficients").as_array();for(unsigned j=0;j<l;++j){auto text=rational_text(c[j]);if(fmpq_set_str(fmpq_mat_entry(exact,r,j),text.c_str(),10)){fmpq_mat_clear(exact);fmpq_mat_clear(reduced);throw std::invalid_argument("invalid loop coefficient");}fmpq_canonicalise(fmpq_mat_entry(exact,r,j));}++r;}
+  out.zero_sectors.resize(std::size_t(1)<<physical);
+  for(std::size_t mask=0;mask<(std::size_t(1)<<physical);++mask){unsigned count=std::popcount(mask);if(!count){out.zero_sectors[mask]=true;continue;}fmpq_mat_t exact,reduced;fmpq_mat_init(exact,count,l);fmpq_mat_init(reduced,count,l);unsigned r=0;
+   for(unsigned k=0;k<physical;++k)if(mask&(std::size_t(1)<<k)){const auto& c=lines[k].as_object().at("loop_coefficients").as_array();for(unsigned j=0;j<l;++j){auto text=rational_text(c[j]);if(fmpq_set_str(fmpq_mat_entry(exact,r,j),text.c_str(),10)){fmpq_mat_clear(exact);fmpq_mat_clear(reduced);throw std::invalid_argument("invalid loop coefficient");}fmpq_canonicalise(fmpq_mat_entry(exact,r,j));}++r;}
    out.zero_sectors[mask]=fmpq_mat_rref(reduced,exact)<l;fmpq_mat_clear(exact);fmpq_mat_clear(reduced);
   }
   return out;

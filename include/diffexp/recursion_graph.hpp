@@ -50,7 +50,16 @@ struct Options {
   // combination of the original propagators (critical_points.hpp). It is
   // cheap, so every pair of every level is counted; where it answers, it
   // decides and count_masters is not asked.
-  std::function<std::optional<std::size_t>(const std::vector<std::vector<Rational>>&,unsigned,unsigned)> count_critical_points;
+  // The last argument is the seconds one count may take. The first pair is
+  // counted alone within selection_seconds. If it does not finish, the level
+  // merges the first pair at once: the count only ranks the candidates and
+  // is not worth more than that. If it does, the other pairs are counted on
+  // selection_threads threads (0: one per hardware thread), each within
+  // selection_seconds plus four times what the first pair took.
+  std::function<std::optional<std::size_t>(const std::vector<std::vector<Rational>>&,unsigned,unsigned,unsigned)> count_critical_points;
+  unsigned selection_seconds=10,selection_threads=0;
+  // Told what the selection of a level is doing and how it ended.
+  std::function<void(const std::string&)> selection_progress;
   // Told the choice of a level (one-based depth, pair, candidates, masters of
   // the pair and of the first pair) before that level is reduced.
   std::function<void(unsigned,unsigned,unsigned,std::size_t,std::size_t,std::size_t)> merge_chosen;
@@ -381,17 +390,39 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       std::vector<std::pair<unsigned,unsigned>> pairs;
       for(unsigned l=0;l<lines;++l)for(unsigned r=l+1;r<lines;++r)if((l==0 && r==1) || same_routing(l,r))pairs.emplace_back(l,r);
       std::vector<std::optional<std::size_t>> counts(pairs.size());
-      std::atomic<std::size_t> next{0};
-      const auto work=[&]{for(std::size_t i;(i=next++)<pairs.size();)
-        try{counts[i]=options.count_critical_points(composition,pairs[i].first,pairs[i].second);}catch(const std::exception&){}};
-      {
-        std::vector<std::jthread> workers;
-        const unsigned threads=std::min<unsigned>(std::max(1u,std::thread::hardware_concurrency()),static_cast<unsigned>(pairs.size()));
-        for(unsigned t=1;t<threads;++t)workers.emplace_back(work);
-        work();
+      const auto say=[&](const std::string& text){if(options.selection_progress)options.selection_progress("Level "+std::to_string(depth+1)+": "+text);};
+      if(pairs.size()>1) {
+        const auto since=[](std::chrono::steady_clock::time_point t){return std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();};
+        const auto started=std::chrono::steady_clock::now();
+        try{counts[0]=options.count_critical_points(composition,pairs[0].first,pairs[0].second,options.selection_seconds);}catch(const std::exception&){}
+        const double first=since(started);
+        // A count that fails at once is not a matter of time: as before,
+        // the eliminations below are then asked.
+        if(!counts[0] && first>=0.5*options.selection_seconds) {
+          say("the masters of the first merge were not counted within "+std::to_string(options.selection_seconds)+" s ("+std::to_string(lines)+
+            " propagators); merging the first pair without comparing the other "+std::to_string(pairs.size()-1));
+          // Counting by eliminations costs far more than what just failed.
+          chosen_from_graph=true;
+        } else if(counts[0]) {
+          const unsigned each=options.selection_seconds+static_cast<unsigned>(std::min(4*first,86400.0));
+          const unsigned threads=std::min<unsigned>(options.selection_threads?options.selection_threads:std::max(1u,std::thread::hardware_concurrency()),static_cast<unsigned>(pairs.size()-1));
+          say("counting the masters of "+std::to_string(pairs.size()-1)+" other merges on "+std::to_string(threads)+" threads, at most "+std::to_string(each)+
+            " s each (the first pair: "+std::to_string(*counts[0])+" masters)");
+          std::atomic<std::size_t> next{1};
+          const auto work=[&]{for(std::size_t i;(i=next++)<pairs.size();)
+            try{counts[i]=options.count_critical_points(composition,pairs[i].first,pairs[i].second,each);}catch(const std::exception&){}};
+          {
+            std::vector<std::jthread> workers;
+            for(unsigned t=1;t<threads;++t)workers.emplace_back(work);
+            work();
+          }
+          std::size_t answered=0;for(const auto& count:counts)answered+=count.has_value();
+          say(std::to_string(answered)+" of "+std::to_string(pairs.size())+" merges counted in "+std::to_string(since(started))+" s");
+        }
       }
       // The first pair is kept unless another has strictly fewer masters.
       if(pairs.size()>1 && counts.front()) {
+        chosen_from_graph=false;
         std::size_t best=0;candidates=0;
         for(std::size_t i=0;i<pairs.size();++i)if(counts[i]){++candidates;if(*counts[i]<*counts[best])best=i;}
         left=pairs[best].first;right=pairs[best].second;counted_masters=*counts[best];first_pair_masters=*counts.front();

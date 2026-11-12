@@ -15,12 +15,12 @@ struct Program {
  std::vector<Column> target_columns;std::size_t seeds=0;
 };
 inline Program generate(const Geometry& g,const Field& f,const SeedOptions& options,std::vector<Integral> targets={}) {
- if(options.dots>8 || options.numerators>8)throw std::invalid_argument("seed degree budget <=8");
+ if(options.dots>Integral::max_seed_power || options.numerators>Integral::max_seed_power)throw std::invalid_argument("seed powers exceed what an integral stores");
  const auto generation_start=std::chrono::steady_clock::now();std::size_t states=0;
  Program out;std::unordered_map<Integral,Column,IntegralHash> ids;
  auto intern=[&](const Integral& a){auto [it,inserted]=ids.try_emplace(a,out.integrals.size());if(inserted)out.integrals.push_back(a);return it->second;};
  if(targets.empty()){Integral top;for(unsigned k=0;k<g.physical;++k)top.powers[k]=1;targets.push_back(top);for(unsigned k=0;k<g.n;++k){auto target=top;target.powers[k]+=k<g.physical?1:-1;targets.push_back(target);}}
- out.targets=targets;for(const auto& target:targets){for(unsigned k=g.physical;k<16;++k)if(target.powers[k]>0 || (k>=g.n && target.powers[k]))throw std::invalid_argument("invalid target numerator slots");out.target_columns.push_back(intern(target));}
+ out.targets=targets;for(const auto& target:targets){for(unsigned k=g.physical;k<Integral::slots;++k)if(target.powers[k]>0 || (k>=g.n && target.powers[k]))throw std::invalid_argument("invalid target numerator slots");out.target_columns.push_back(intern(target));}
  for(const auto& target:targets)if(g.zero_sectors[sector(target,g.physical)])out.equations.push_back({{intern(target),1,0}});
  std::size_t terms=0;Integral seed;
  auto consume=[&]{if(g.zero_sectors[sector(seed,g.physical)])return;if(++out.seeds>options.max_seeds)throw std::length_error("seed budget exceeded");

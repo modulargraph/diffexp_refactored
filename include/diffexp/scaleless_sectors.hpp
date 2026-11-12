@@ -94,7 +94,7 @@ inline Symanzik symanzik(const ibp::PropagatorBasis& b) {
 
 // One flag per sector, indexed by the bit mask of its lines.
 inline std::vector<bool> sectors(const ibp::PropagatorBasis& b) {
-  if(b.physical_count>12)throw std::invalid_argument("scaleless sector enumeration exceeds the 4096-sector budget");
+  if(b.physical_count>=8*sizeof(std::size_t))throw std::invalid_argument("scaleless sector enumeration: more physical denominators than bits of a sector mask");
   const auto lines=b.physical_count;const auto polynomials=symanzik(b);
   std::vector<std::pair<std::size_t,const detail::Exponent*>> monomials;
   for(const auto* polynomial:{&polynomials.U,&polynomials.F})for(const auto& [e,c]:*polynomial) {

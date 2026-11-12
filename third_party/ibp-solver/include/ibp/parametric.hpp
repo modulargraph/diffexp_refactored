@@ -49,7 +49,7 @@ class ParametricProgram {
   if(selection)for(auto i:*selection)row(i);else for(std::size_t i=0;i<program.equations.size();++i)row(i);
  }
  static ParametricProgram compile(const InputGeometry& g,const SeedOptions& options,std::vector<Integral> targets={},ParametricOrdering ordering=ParametricOrdering::dots_first,const std::vector<std::pair<unsigned,unsigned>>& sector_bounds={}){
-  if(!g.loops||g.loops>4||!g.physical||g.physical>12||g.n>16||g.n<g.physical||!g.inputs||g.inputs>=InputGeometry::zero||g.dimension>=g.inputs||g.trace.size()!=g.contractions.size()||g.zero_sectors.size()!=(std::size_t(1)<<g.physical)||options.dots>8||options.numerators>8)
+  if(!g.loops||!g.physical||g.physical>Integral::max_physical||g.n>Integral::slots||g.n<g.physical||!g.inputs||g.inputs>=InputGeometry::zero||g.dimension>=g.inputs||g.trace.size()!=g.contractions.size()||g.zero_sectors.size()!=(std::size_t(1)<<g.physical)||options.dots>Integral::max_seed_power||options.numerators>Integral::max_seed_power)
    throw std::invalid_argument("parametric geometry or seed bounds");
   if(!g.constant_inputs.empty()&&g.constant_inputs.size()!=g.inputs)throw std::invalid_argument("constant input mask arity");
   for(const auto& op:g.contractions){if(op.size()!=g.n)throw std::invalid_argument("contraction slot arity");for(const auto& row:op){if(row.size()!=g.n+1)throw std::invalid_argument("contraction affine arity");for(auto id:row)if(id!=InputGeometry::zero&&id>=g.inputs)throw std::invalid_argument("contraction input id");}}
@@ -64,7 +64,7 @@ class ParametricProgram {
   struct Term {Column column;InputCoefficient value;};using Equation=std::vector<Term>;std::vector<Equation> equations;std::vector<Origin> origins;
   if(targets.empty()){Integral top;for(unsigned k=0;k<g.physical;++k)top.powers[k]=1;targets.push_back(top);for(unsigned k=0;k<g.n;++k){auto a=top;a.powers[k]+=k<g.physical?1:-1;targets.push_back(a);}}
   p.targets=targets;
-  for(const auto& target:targets){for(unsigned k=g.physical;k<16;++k)if(target.powers[k]>0||(k>=g.n&&target.powers[k]))throw std::invalid_argument("invalid target auxiliary slots");p.target_columns.push_back(intern(target));
+  for(const auto& target:targets){for(unsigned k=g.physical;k<Integral::slots;++k)if(target.powers[k]>0||(k>=g.n&&target.powers[k]))throw std::invalid_argument("invalid target auxiliary slots");p.target_columns.push_back(intern(target));
    if(g.zero_sectors[sector(target,g.physical)]){equations.push_back({{intern(target),{1,{}}}});origins.push_back({target,ParametricProgram::target});}}
   Integral seed;
   auto consume=[&]{const auto mask=sector(seed,g.physical);if(g.zero_sectors[mask])return;

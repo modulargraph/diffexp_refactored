@@ -2,6 +2,30 @@
 
 ## 2.2.1
 
+- Exact IBP preparation of large levels. The selected equations of a level
+  are eliminated at eight sample points at a time (`ibp/batch.hpp`: the
+  pivot search and row storage once per batch, products accumulated
+  unreduced, three 52-bit words a lane with AVX-512 IFMA where the build
+  targets it, two 64-bit words otherwise; 61-bit primes as before), by
+  leading columns or with complete rows, whichever the first batch of a
+  plan measures faster, and without the columns that get no pivot and are
+  not terminal. A lane where a pivot of its batch vanishes is eliminated
+  alone as before. A coefficient function is lifted from the primes its
+  integers need: the lattice that finds its common denominator takes
+  coefficients spread over numerator and denominator, and a lifted
+  coefficient is kept while the samples of further primes agree with it.
+  The denominators are factored modulo a prime, their factors lifted to
+  the rationals from the first primes, and further primes sampled for the
+  numerators alone (`modular::DenominatorFactors`, `fit_numerator`).
+  Three-loop subfamily of the pentagon-box-box benchmark with ten
+  propagators, CPU seconds of a level with fresh sampling on three
+  threads: level 1 33 -> 16, level 2 280 -> 54, level 3 3297 -> 221
+  (15 primes of 750 samples -> 10 primes, 462 samples from the third on;
+  11023 -> 5331 eliminations), level 4 1060 -> 132 (10 -> 9 primes,
+  4019 -> 2748 eliminations). Level 5 is not finished: 14 primes of 628
+  samples in 6615 CPU seconds, where its denominators' factors were not
+  lifted within the four primes then allowed. Reductions are unchanged:
+  kite, double_box_planar and banana4 return the same JSON.
 - Endpoint series in truncated Laurent arithmetic. In an expanded run the
   coefficients of an endpoint series are Laurent series in epsilon cut at
   the orders the operators read, instead of rational functions of epsilon

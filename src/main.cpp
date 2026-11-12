@@ -360,7 +360,7 @@ int main(int argc, char** argv) {
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
         diffexp::moving_poles::Result result;
-        level=diffexp::moving_poles::exchange(std::move(level),0,1,{},&result);
+        level=diffexp::moving_poles::exchange(std::move(level),0,1,{},&result,cache/"moving-poles");
         describe_moving_poles(depth,result);return level;
       };
       // A spent time budget names the three knobs that bound the preparation.
@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
         // on the exact graph, before any epsilon shift: at a numeric dimension
         // a moving pole is one more ordinary pole.
         if(moving_poles=="remove") {
-          for(auto& [depth,basis]:diffexp::moving_poles::bases(graph,{},describe_moving_poles))
+          for(auto& [depth,basis]:diffexp::moving_poles::bases(graph,{},describe_moving_poles,cache/"moving-poles"))
             numerical.physical_bases.insert_or_assign(depth,epsilon_shift.empty()?std::move(basis):
               diffexp::moving_poles::shift_epsilon(std::move(basis),diffexp::Rational(epsilon_shift),epsilon_order==0));
           // The scan for a smaller connection continues from these bases.

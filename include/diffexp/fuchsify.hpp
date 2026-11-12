@@ -60,13 +60,15 @@ inline std::vector<unsigned> rref(Matrix &a, unsigned columns) {
     std::swap(a[p], a[row]);
     auto q = a[row][c];
     for (auto &e : a[row])
-      e = e / q;
+      if (!e.is_zero())
+        e = e / q;
     for (unsigned i = 0; i < a.size(); ++i)
       if (i != row) {
         q = a[i][c];
         if (!q.is_zero())
           for (unsigned j = 0; j < a[i].size(); ++j)
-            a[i][j] = a[i][j] - q * a[row][j];
+            if (!a[row][j].is_zero())
+              a[i][j] = a[i][j] - q * a[row][j];
       }
     pivots.push_back(c);
     ++row;
@@ -396,10 +398,48 @@ inline Result prepare(const Matrix &input, std::size_t xi,
       std::optional<std::vector<long>> best;
       auto best_score = before;
       unsigned candidates = 0;
+      // The score of a candidate is its pole order and the rank of its
+      // leading coefficient. A shear moves the valuation of entry (i,j) by
+      // s[j]-s[i] and leaves its leading coefficient alone, so both follow
+      // from the valuations and leading coefficients of the current matrix,
+      // taken once for all candidates; and a candidate with a higher pole
+      // order than the best one needs no rank. Only a candidate of pole
+      // order one or less, where the term s[i]/x of the shear enters the
+      // leading coefficient, is formed and scored as a matrix.
+      std::vector<std::vector<long>> order(d, std::vector<long>(d, 0));
+      auto lead = zeros(d, d, x);
+      {
+        std::vector<Exact> origin;
+        for (unsigned i = 0; i < x.variable_count(); ++i)
+          origin.push_back(i == xi ? x.constant(0) : x.variable(i));
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            if (!current[i][j].is_zero()) {
+              order[i][j] = valuation(current[i][j], xi);
+              lead[i][j] = (current[i][j] * power(x, -order[i][j])).substitute(origin);
+            }
+      }
       auto consider = [&](const std::vector<long> &s) {
         if (candidates++ >= options.max_shear_candidates)
           return;
-        auto sc = score(diagonal_gauge(current, s, x), xi);
+        long pole = 0;
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            if (!current[i][j].is_zero())
+              pole = std::max(pole, -(order[i][j] + s[j] - s[i]));
+        std::pair<unsigned, unsigned> sc;
+        if (pole < 2)
+          sc = score(diagonal_gauge(current, s, x), xi);
+        else {
+          if (static_cast<unsigned long>(pole) > best_score.first)
+            return;
+          auto top = zeros(d, d, x);
+          for (unsigned i = 0; i < d; ++i)
+            for (unsigned j = 0; j < d; ++j)
+              if (!current[i][j].is_zero() && order[i][j] + s[j] - s[i] == -pole)
+                top[i][j] = lead[i][j];
+          sc = {static_cast<unsigned>(pole), static_cast<unsigned>(rref(top, d).size())};
+        }
         if (sc < best_score) {
           best_score = sc;
           best = s;

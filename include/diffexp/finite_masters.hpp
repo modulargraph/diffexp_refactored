@@ -28,6 +28,7 @@
 // the master. Sectors without such an integral keep their masters.
 #include "diffexp/moving_poles.hpp"
 #include "diffexp/epsilon_gauge.hpp"
+#include "diffexp/level_cache.hpp"
 #include "diffexp/scaleless_sectors.hpp"
 #include <chrono>
 
@@ -185,13 +186,15 @@ struct Report {
 // and source identities). The closure of the result is the given one
 // transformed by an exact, verified change of basis, with rows for the first
 // `sources` requests. With `script`, exactly those steps are taken (an
-// exception if one does not apply). The source identities of the result name
+// exception if one does not apply). Without `finish_incomplete` a result
+// that still has failing masters is not a closure: only its masters are set.
+// The source identities of the result name
 // the passing integrals in the new masters: they are what the internal basis
 // scan of the numerical phase may mix in, and the exchanged masters are not
 // offered to it again.
 inline level::Result exchange(level::Result level, std::size_t xi, std::size_t ei, const Convergence &convergent,
                               std::vector<Step> &steps, std::size_t sources, const std::vector<Step> *script = nullptr,
-                              bool guarded = true) {
+                              bool guarded = true, bool finish_incomplete = true) {
   steps.clear();
   if (!level.success || level.matrix.empty())
     return level;
@@ -238,6 +241,9 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
     }
   };
   const bool checked = !script && guarded, guard = checked && sheared(level.matrix);
+  // Unchecked and all or none: the steps are found first, without the
+  // connection, and taken only if they exchange every failing master.
+  const bool light = !script && !guarded && !finish_incomplete;
   // Nor is a step taken that gives the connection a singular point that moves
   // with epsilon and that it did not have: finite integrals can be dependent
   // at single points, and a moving pole that meets an endpoint at epsilon = 0
@@ -269,6 +275,21 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
       if ((guard && !sheared(next.connection)) || new_moving_pole(next.connection))
         return false;
       basis = std::move(next);
+    } else if (light) {
+      // Which steps apply is decided by the old masters in the new ones alone.
+      std::vector<Exact> inverse_row(d, z.constant(0));
+      for (std::size_t j = 0; j < d; ++j)
+        inverse_row[j] = j == k ? z.constant(1) / q[k] : z.constant(0) - q[j] / q[k];
+      for (std::size_t i = 0; i < d; ++i) {
+        const Exact pivot = basis.from_basis[i][k];
+        if (pivot.is_zero())
+          continue;
+        for (std::size_t j = 0; j < d; ++j)
+          if (j == k)
+            basis.from_basis[i][j] = pivot * inverse_row[j];
+          else if (!inverse_row[j].is_zero())
+            basis.from_basis[i][j] = basis.from_basis[i][j] + pivot * inverse_row[j];
+      }
     } else
       moving_poles::replace_row(basis, k, q, xi);
     steps.push_back({k, masters[k], integral});
@@ -304,6 +325,15 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
     }
   if (steps.empty())
     return level;
+  if (left && !finish_incomplete) {
+    // Only the masters are reported: the caller wants all or none.
+    level.ordered_basis = masters;
+    return level;
+  }
+  if (light) {
+    const auto planned = steps;
+    return exchange(std::move(level), xi, ei, convergent, steps, sources, &planned);
+  }
   recursion::verify_physical_basis(basis, level.matrix, xi);
   level.requested_integrals.resize(std::min(sources, level.requested_integrals.size()));
   level.target_rows.resize(std::min(sources, level.target_rows.size()));
@@ -390,16 +420,16 @@ inline ibp::Integral integral_from(const boost::json::value &value) {
 // (a level that needs longer keeps its masters). It is asked for the
 // sources and, per sector with failing masters, the passing integrals of the
 // lowest total powers that are at least as many as those masters; then for
-// one more total power per round while a failing master is left and its
-// sector has passing integrals within reach (as many further powers as the
-// sector has lines beyond the first total that has one). The returned
+// the next two passing integrals per master still open, round by round,
+// while its sector has passing integrals within reach (as many further
+// powers as the sector has lines beyond the first total that has one). The returned
 // closure has rows for the sources only. What was decided is recorded in
-// `directory` (unless empty), and a later preparation of the same level
-// reduces the recorded requests once and repeats the recorded steps.
-inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loops, const Rational &dimension_at_zero,
-                            level::Result closure, const std::vector<ibp::Integral> &sources, std::size_t xi, std::size_t ei,
+// `directory` (unless empty) with the exchanged closure, and a later
+// preparation of the same level reads it there.
+inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField &field, std::size_t loops,
+                            const Rational &dimension_at_zero, level::Result closure, const std::vector<ibp::Integral> &sources, std::size_t xi, std::size_t ei,
                             const std::function<level::Result(const std::vector<ibp::Integral> &, double)> &reduce, Report &report,
-                            const std::filesystem::path &directory = {}, double seconds = 60) {
+                            const std::filesystem::path &directory = {}, double seconds = 120) {
   namespace json = boost::json;
   const auto start = std::chrono::steady_clock::now();
   const auto elapsed = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
@@ -445,7 +475,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
   // The record of an earlier preparation of this level.
   std::filesystem::path file;
   if (!directory.empty()) {
-    std::string text = "finite-masters-v5|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "|";
+    std::string text = "finite-masters-v7|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "|";
     for (const auto &name : closure.matrix.at(0).at(0).variables())
       text += name + ",";
     for (const std::vector<ibp::Integral> *list : std::initializer_list<const std::vector<ibp::Integral> *>{&closure.ordered_basis, &sources}) {
@@ -478,18 +508,16 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
         report.note = std::string(object.at("note").as_string());
         if (script.empty())
           return finish(std::move(closure), {});
-        auto requests = sources;
-        for (const auto &item : object.at("requests").as_array())
-          requests.push_back(detail::integral_from(item));
-        const auto before = elapsed();
-        auto wider = requests.size() > sources.size() ? reduce(requests, std::numeric_limits<double>::infinity()) : closure;
-        report.reduction_seconds += elapsed() - before;
-        report.reductions += requests.size() > sources.size();
-        if (wider.success && wider.ordered_basis == closure.ordered_basis) {
-          std::vector<Step> steps;
-          auto level = exchange(std::move(wider), xi, ei, convergent, steps, sources.size(), &script);
-          return finish(std::move(level), std::move(steps));
-        }
+        // The exchanged closure itself, as it was written.
+        const auto &payload = object.at("closure");
+        if (artifacts::detail::sha256(artifacts::detail::canonical(payload)) != std::string(object.at("closure_sha256").as_string()))
+          throw std::runtime_error("finite-master record is damaged");
+        auto level = cached_level::detail::decode(payload, merged, field);
+        level.differential_witnesses.clear();
+        level.target_witnesses.clear();
+        if (level.requested_integrals != sources || level.ordered_basis.size() != closure.ordered_basis.size())
+          throw std::runtime_error("finite-master record does not belong to this level");
+        return finish(std::move(level), std::move(script));
       }
     } catch (const std::exception &) {
       // An unreadable or stale record: the search decides.
@@ -506,6 +534,8 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
     ibp::Integral pattern;
     long next, last;
     bool found = false;
+    // Passing integrals of the totals enumerated so far that were not requested yet.
+    std::vector<ibp::Integral> pending;
   };
   std::map<std::vector<bool>, Search> searches;
   for (const auto &master : closure.ordered_basis)
@@ -517,7 +547,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
       for (bool present : shape)
         lines += present;
       const long first = std::max(lines, convergent.minimal_total());
-      searches.emplace(shape, Search{master, first, first + lines});
+      searches.emplace(shape, Search{master, first, first + lines, false, {}});
     }
   const std::set<ibp::Integral> masters(closure.ordered_basis.begin(), closure.ordered_basis.end());
   std::vector<ibp::Integral> requests = sources;
@@ -536,7 +566,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
   const auto attempt = [&](const level::Result &from) {
     for (const bool guarded : {false, true}) {
       std::vector<Step> steps;
-      auto now = exchange(from, xi, ei, convergent, steps, sources.size(), nullptr, guarded);
+      auto now = exchange(from, xi, ei, convergent, steps, sources.size(), nullptr, guarded, false);
       const auto left = failing(now);
       if (left && !guarded) {
         // More candidates are needed whatever the check says.
@@ -572,21 +602,34 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
       const auto need = wanted.find(shape);
       if (need == wanted.end())
         continue;
+      // The first reduction takes whole totals, as many as give one
+      // candidate per failing master. Not all of them are independent, and
+      // the reductions get dearer with every dot: a later one takes only
+      // the next two candidates per master that is still open.
+      const std::size_t count = first ? need->second : 2 * need->second;
       std::size_t fresh = 0;
-      while (search.next <= search.last && fresh < (first ? need->second : 1)) {
-        const auto total = search.next++;
-        const auto found = convergent_integrals(convergent, search.pattern, total);
-        if (found.empty())
+      while (fresh < count) {
+        if (search.pending.empty()) {
+          if (search.next > search.last)
+            break;
+          const auto total = search.next++;
+          for (auto &integral : convergent_integrals(convergent, search.pattern, total)) {
+            if (!search.found) {
+              search.found = true;
+              search.last = std::max(search.last, total + static_cast<long>(std::count(shape.begin(), shape.end(), true)));
+            }
+            if (!masters.count(integral) && !requested.count(integral))
+              search.pending.push_back(std::move(integral));
+          }
           continue;
-        if (!search.found) {
-          search.found = true;
-          search.last = std::max(search.last, total + static_cast<long>(std::count(shape.begin(), shape.end(), true)));
         }
-        for (const auto &integral : found)
-          if (!masters.count(integral) && requested.insert(integral).second) {
-            added.push_back(integral);
+        const std::size_t take = first ? search.pending.size() : std::min(search.pending.size(), count - fresh);
+        for (std::size_t i = 0; i < take; ++i)
+          if (requested.insert(search.pending[i]).second) {
+            added.push_back(search.pending[i]);
             ++fresh;
           }
+        search.pending.erase(search.pending.begin(), search.pending.begin() + static_cast<std::ptrdiff_t>(take));
       }
     }
     if (added.empty())
@@ -634,8 +677,19 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, std::size_t loop
         steps.push_back(json::object{{"replaced", step.replaced}, {"from", detail::integral_json(step.from)}, {"to", detail::integral_json(step.to)}});
       for (const auto &integral : best_requests)
         extra.push_back(detail::integral_json(integral));
-      detail::write_record(file, json::object{{"schema", "DiffExp.FiniteMasters/v1"}, {"steps", std::move(steps)},
-                                              {"requests", std::move(extra)}, {"candidates", report.candidates}, {"note", report.note}});
+      json::object record{{"schema", "DiffExp.FiniteMasters/v1"}, {"steps", std::move(steps)},
+                          {"requests", std::move(extra)}, {"candidates", report.candidates}, {"note", report.note}};
+      if (complete) {
+        // The closure is stored without witnesses: it is the certified one
+        // of the recorded requests transformed by the recorded steps.
+        auto stored = trim(best);
+        stored.differential_witnesses.assign(stored.ordered_basis.size(), {});
+        stored.target_witnesses.assign(stored.requested_integrals.size(), {});
+        auto payload = cached_level::detail::payload(stored);
+        record["closure_sha256"] = artifacts::detail::sha256(artifacts::detail::canonical(payload));
+        record["closure"] = std::move(payload);
+      }
+      detail::write_record(file, record);
     } catch (const std::exception &) {
       // The record is a convenience; the result does not depend on it.
     }

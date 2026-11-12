@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
-      std::string finite_masters="off";
+      std::string finite_masters="on";unsigned finite_master_seconds_allowed=120;
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
       unsigned ibp_max_degree=0;std::string merge_selection="auto",boundary="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
@@ -165,6 +165,12 @@ int main(int argc, char** argv) {
         else if(option=="--finite-masters") {
           finite_masters=option_value;
           if(finite_masters!="on" && finite_masters!="off")throw std::invalid_argument("--finite-masters must be on or off");
+        }
+        else if(option=="--finite-masters-seconds") {
+          const std::string value=option_value;
+          const auto parsed=std::from_chars(value.data(),value.data()+value.size(),finite_master_seconds_allowed);
+          if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || !finite_master_seconds_allowed || finite_master_seconds_allowed>86400)
+            throw std::invalid_argument("--finite-masters-seconds must be in 1..86400");
         }
         else if(option=="--moving-poles") {
           moving_poles=option_value;
@@ -381,11 +387,11 @@ int main(int argc, char** argv) {
       // finite_masters::revoke.
       struct FiniteLadderBroken {unsigned depth;};
       std::vector<std::filesystem::path> finite_master_records;bool finite_masters_withdrawn=false;
-      if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& sources,unsigned depth,const auto& reduce) {
+      if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& exact_field,const auto& sources,unsigned depth,const auto& reduce) {
         if(finite_masters_withdrawn)return closure;
         diffexp::finite_masters::Report chosen;
-        closure=diffexp::finite_masters::choose(merged,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
-          std::move(closure),sources,0,1,reduce,chosen,cache/"finite-masters");
+        closure=diffexp::finite_masters::choose(merged,exact_field,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
+          std::move(closure),sources,0,1,reduce,chosen,cache/"finite-masters",finite_master_seconds_allowed);
         finite_master_seconds+=chosen.seconds;
         if(!chosen.steps.empty())finite_master_records.push_back(chosen.record);
         else if(chosen.divergent_before && !finite_master_records.empty()) {
@@ -942,6 +948,14 @@ Feynman-trick recursion
   --epsilon-shift Q               experimental: expand around epsilon=Q (a rational); coefficient k
                                   then multiplies (epsilon-Q)^k, and order 0 is the integral in
                                   d0-2Q dimensions (docs/performance.md)
+  --finite-masters on|off         masters that are finite at epsilon = 0, for levels whose requested
+                                  integrals are (default on; docs/performance.md): the masters that
+                                  fail a convergence test are exchanged for integrals of their sector
+                                  with more dots, which removes the cancellation of epsilon poles
+                                  between the levels. All masters of a level and all levels below an
+                                  exchanged one, or none; the choice is recorded beside the exact cache
+  --finite-masters-seconds N      time allowed per level for reducing the candidate integrals
+                                  (default 120); a level that needs longer keeps its masters
   --moving-poles keep|remove|exchange
                                   per level, the denominator factors of the connection that mix
                                   x with epsilon (docs/moving-poles.md; default remove for ft,

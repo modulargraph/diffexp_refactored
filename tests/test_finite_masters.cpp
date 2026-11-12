@@ -79,17 +79,18 @@ int main(){try {
       return wider;
     };
     fm::Report report;
-    const auto chosen=fm::choose(massive,1,Rational(4),bare,{integral(2,1)},0,1,reduce,report,directory);
+    const auto chosen=fm::choose(massive,field,1,Rational(4),bare,{integral(2,1)},0,1,reduce,report,directory);
     check(report.divergent_before==2 && report.divergent_after==0 && report.steps.size()==2 && reductions==1 && !report.recorded,"choice with one further reduction");
     check(chosen.ordered_basis==std::vector<ibp::Integral>{integral(3,0),integral(2,1)} && chosen.target_rows.size()==1,"chosen masters");
     fm::Report second;
-    const auto repeated=fm::choose(massive,1,Rational(4),bare,{integral(2,1)},0,1,reduce,second,directory);
-    check(second.recorded && reductions==2 && repeated.matrix==chosen.matrix && repeated.ordered_basis==chosen.ordered_basis,"recorded choice repeated");
+    const auto repeated=fm::choose(massive,field,1,Rational(4),bare,{integral(2,1)},0,1,reduce,second,directory);
+    check(second.recorded && reductions==1 && second.steps.size()==2 && repeated.matrix==chosen.matrix && repeated.ordered_basis==chosen.ordered_basis
+      && repeated.target_rows==chosen.target_rows && repeated.requested_integrals==chosen.requested_integrals,"recorded choice read back without a reduction");
     // A divergent request keeps the masters, without a reduction.
     fm::Report kept;
     auto divergent=bare;divergent.requested_integrals={integral(1,1)};
-    const auto same=fm::choose(massive,1,Rational(4),divergent,{integral(1,1)},0,1,reduce,kept,directory);
-    check(kept.steps.empty() && reductions==2 && same.ordered_basis==bare.ordered_basis && !kept.note.empty(),"divergent requests keep the masters");
+    const auto same=fm::choose(massive,field,1,Rational(4),divergent,{integral(1,1)},0,1,reduce,kept,directory);
+    check(kept.steps.empty() && reductions==1 && same.ordered_basis==bare.ordered_basis && !kept.note.empty(),"divergent requests keep the masters");
     // No finite replacement for one master: all masters are kept.
     const auto partial=[&](const std::vector<ibp::Integral>& requests,double seconds) {
       auto wider=reduce(requests,seconds);
@@ -97,7 +98,7 @@ int main(){try {
       return wider;
     };
     fm::Report none;
-    const auto unchanged=fm::choose(massive,1,Rational(4),bare,{integral(2,1)},0,1,partial,none);
+    const auto unchanged=fm::choose(massive,field,1,Rational(4),bare,{integral(2,1)},0,1,partial,none);
     check(none.steps.empty() && none.divergent_after==2 && unchanged.ordered_basis==bare.ordered_basis && unchanged.matrix==bare.matrix,"all masters or none");
     std::filesystem::remove_all(directory);
   }

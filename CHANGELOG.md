@@ -2,6 +2,25 @@
 
 ## 2.2.1
 
+- Numerical phase, counted work. A moving pole is kept when its removal
+  would leave the level's connection more than four times larger
+  (`moving_poles::Options::max_growth`), and the outcome of the moving-pole
+  search is recorded beside the exact cache (`moving-poles/`) and applied
+  again instead of being searched for by every run and every sample. The
+  gauge of an endpoint to Fuchsian form applies a shear entry by entry
+  instead of through an exact inverse and three dense products. A transport
+  leg reads its poles from the compiled circuit instead of isolating the
+  roots of every denominator again. An endpoint series converts its
+  coefficients for projection once. `timings` lists
+  `endpoint_gauge_seconds`, `endpoint_frame_seconds` and
+  `endpoint_observable_seconds`; the phases now add up to
+  `numerical_seconds`. Results of the default runs are unchanged.
+- Working precision. Without `--precision-bits` (or `working_bits` in the
+  family file) a run starts at 384 bits and computes its numbers again with
+  more when rounding leaves a coefficient fewer digits than `--leaf-digits`
+  asks for (`precision` in the JSON report; at most 4096 bits). The samples
+  of a fit start at the precision an earlier sample needed
+  (`--precision-floor`).
 - Built-in IBP solver, preparation. Seeds start small and grow on demand:
   the default numerator degree is 1 (was 2; `--ibp-numerators`,
   `preparation.ibp_numerators`), and a requested integral no longer raises

@@ -110,6 +110,58 @@ Transport time is linear in the number of epsilon orders carried.
   own nearest singular point: a singular point next to x = 0 does not move
   the overlap point at x = 1 (the progress line `endpoint overlap=` shows
   both).
+- **Truncated endpoint series** (`--endpoint-series truncated`, expanded
+  runs). A coefficient of the series is a rational function of epsilon of
+  which the operators read a dozen Laurent orders. The series therefore
+  carries each coefficient as a Laurent series in epsilon with exact
+  rational coefficients, cut at the orders that are read
+  (`AffineFrobeniusSeries::Options::epsilon_orders`). An expansion states,
+  entry by entry, the order from which it is unknown; projections and
+  primitives carry that order, and a reader that needs more throws
+  `EpsilonOrdersNeeded`, on which the endpoint is built again with exactly
+  the missing orders. Zero tests, valuations, exponents and logarithms are
+  those of the exact coefficients below that order: nothing is read above
+  it, and a coefficient that is not stored is unknown there, not zero. Three
+  things make this work:
+  - Modulo a power of epsilon, dividing by epsilon loses an order for good.
+    The eigenvector frame of the residue is singular at epsilon = 0
+    wherever exponents collide there (0, -eps, -2 eps, ...), and in it every
+    x order would lose three or four epsilon orders. The recurrence
+    therefore runs in a frame with the same column flag that is unimodular
+    at epsilon = 0 (`unimodular_frame`): the residue is upper triangular in
+    it instead of diagonal, and a row couples to the rows after it. The
+    columns computed are the same ones.
+  - The Fuchsian form itself must be regular at epsilon = 0. A Jordan frame
+    of a nilpotent leading coefficient over Q(eps) can be singular there; the
+    top level of the four-loop banana then has poles of second and third
+    order in epsilon in its Fuchsian matrix, which no constant change of
+    coordinates removes. `fuchsify::Options::regular_variable` makes the
+    Fuchsification take Jordan chains that are regular with a regular
+    inverse at epsilon = 0 where the usual frame is not and such chains
+    exist (the head of a chain is free modulo the kernel below it). A
+    connection that still has a pole at epsilon = 0 keeps exact
+    coefficients.
+  - What a column loses to resonances between exponents of different slope
+    (two or three orders in the bananas) is found by a pass over the
+    recurrence without arithmetic, so the arithmetic pass starts with as
+    many orders as it must deliver, no more.
+
+  The numerators live in Z[t], t = eps/L with L the least common multiple
+  of the resonance denominators, over one integer per x order. A plan is
+  first asked for its operators at window zero, which fixes the windows of
+  the run; the endpoint is then built once more with the orders of its
+  final window (7 to 10 orders first, 12 to 17 then, for the four-loop
+  banana). Results are identical to those of the exact series, in all
+  digits and radii, on the seventeen families of `examples/feynman` that
+  were run expanded (all but the double pentagon and the Higgs+jet family).
+  In CPU seconds of
+  the whole run, exact against truncated: four-loop banana 21.4 and 14.8
+  (series 8.1 and 4.1, operators 3.1 and 2.1, observables 1.6 and 0.6),
+  with unequal masses 37.3 and 25.9 (series 15.4 and 7.2), planar double
+  box 4.6 and 4.6, kite 1.21 and 1.17; a family of a tenth of a second can be slower by the
+  second build. The exact series remain for `--endpoint-series exact`, for
+  the endpoint that carries a level's boundary, and for samples, whose
+  series have no epsilon left.
 - **Moving poles removed** (`--moving-poles remove`). Denominator factors
   that mix the merge parameter with epsilon are removed by exchanging a
   master. This narrows no epsilon window but shrinks the connection where
@@ -356,8 +408,9 @@ sample values are in
 
 - The expanded recursion of the double pentagon does not finish in hours:
   levels 2 and 1 have 64 x 33 and 69-master systems with epsilon through 12.
-- The exact endpoint series cannot be continued numerically without
-  redoing the exact pole-cancelling step on the full series; a timing-only
-  run suggests about 1.5 times for the four-loop banana if it could.
+- The truncated endpoint series still have exact rational coefficients:
+  the pole-cancelling steps need them. A level builds its endpoints twice
+  (window zero, then the final window), because the windows are only known
+  from the operators of the first build.
 - In a sample the endpoint observables and series are still exact
   arithmetic, about 20 s of 150 s for the double pentagon.

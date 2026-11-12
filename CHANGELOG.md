@@ -2,6 +2,22 @@
 
 ## 2.2.1
 
+- Endpoint series in truncated Laurent arithmetic. In an expanded run the
+  coefficients of an endpoint series are Laurent series in epsilon cut at
+  the orders the operators read, instead of rational functions of epsilon
+  (`--endpoint-series truncated`, the default; `exact` keeps the rational
+  functions; `NumericalOptions::truncated_endpoint_series`,
+  `AffineFrobeniusSeries::Options::epsilon_orders`). An expansion records
+  the order from which each entry is unknown, readers ask for missing
+  orders (`EpsilonOrdersNeeded`) and the endpoint is built again with them
+  (`endpoint_series_refinements` in the JSON report). The Fuchsification
+  takes Jordan chains that are regular at epsilon = 0 where they exist
+  (`fuchsify::Options::regular_variable`), and the recurrence runs in a
+  frame that is unimodular there. Results of seventeen example families
+  are unchanged in every digit;
+  the four-loop banana takes 14.8 instead of 21.4 CPU seconds, with
+  unequal masses 25.9 instead of 37.3. Samples and boundary endpoints keep
+  the exact series. See [performance.md](docs/performance.md).
 - Cancellation between the levels. The exact row gauge of an endpoint
   frame takes a pivot within 2^-20 of the largest admissible one instead of
   the first entry that is not zero: the expanded run of a three-loop family

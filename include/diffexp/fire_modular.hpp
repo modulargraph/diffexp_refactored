@@ -405,14 +405,13 @@ class Session {
       // The denominators as products of factors over the rationals
       // (modular::DenominatorFactors). While the factors are not lifted,
       // every prime is sampled and fitted completely and its denominators
-      // add to them; a few primes at most. Once they are, a prime takes the
+      // add to them. Once they are, a prime takes the
       // samples the largest numerator needs and three more, and a fit finds
       // the numerator alone: with the spare samples a denominator that is
       // not the function's leaves no numerator. A prime at which a fit fails
       // is sampled and fitted completely, and if its denominators are not
       // the predicted ones the factors are given up.
       std::optional<modular::DenominatorFactors> factors;bool denominators_known=false;std::size_t numerator_samples=8;
-      constexpr unsigned factor_primes=4;
       const auto predicts=[&](const std::vector<modular::Image>& at_prime,unsigned prime_index){
         modular::DenominatorFactors::At at(*factors,options_.modulus(prime_index));
         for(std::size_t i=0;i<keys.size();++i){remaining();const auto predicted=at.denominator(i,images[i].ansatz);
@@ -441,7 +440,7 @@ class Session {
           if(factors&&denominators_known){
             if(!predicts(next_images,pi)){factors.reset();denominators_known=false;status("the complete fits of prime "+std::to_string(pi)+" do not return the denominators their factors predict; every prime is fitted completely");}
           }else if(factors){
-            if(!factors->absorb(next_images,options_.modulus(pi),deadline)||(!factors->lifted()&&factors->primes()>=factor_primes)){factors.reset();status("the factors of the denominators are not the same, or not small, at "+std::to_string(pi)+" primes; every prime is fitted completely");}
+            if(!factors->absorb(next_images,options_.modulus(pi),deadline)){factors.reset();status("the denominators of prime "+std::to_string(pi)+" do not have the factors of the first prime; every prime is fitted completely");}
             else if(factors->lifted()){if((denominators_known=predicts(next_images,pi)))told();else factors.reset();}
           }
         }

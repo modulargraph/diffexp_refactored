@@ -414,7 +414,7 @@ class Sampler {
         // A complete anchor compares against the pilot; it does not replace the
         // pilot's subset, which the reconstruction samples were drawn from.
         if(options_.selected_source_rows&&!selected&&!(complete&&plan_->selection)){
-          plan_->selection=selection();plan_->terminal_columns=terminals(full);plan_->lean.reset();
+          plan_->selection=selection();plan_->terminal_columns=terminals(full);plan_->lean.reset();plan_->lean_complete=false;
           // Which way the selected equations are eliminated at every sample
           // point is measured here, once: the few of the leading way, whose
           // rows keep their tails, or the more of complete rows. A level with
@@ -434,7 +434,7 @@ class Sampler {
               if(options_.progress&&(!leading||*leading>0.25))options_.progress("trial: "+std::to_string(wider.size())+" selected equations with complete rows: "+(whole?std::to_string(*whole)+" s":std::string("failed")));
               if(whole&&(!leading||*whole<*leading)){
                 if(options_.progress)options_.progress("selected equations: "+std::to_string(wider.size())+" eliminated with complete rows in "+std::to_string(*whole)+" s, against "+std::to_string(plan_->selection->size())+" by their leading columns in "+(leading?std::to_string(*leading)+" s":std::string("more than the fill budget"))+"; samples take the first");
-                plan_->complete_selection=true;plan_->selection=std::move(wider);plan_->lean.reset();dependencies=*plan_->selection;}
+                plan_->complete_selection=true;plan_->selection=std::move(wider);plan_->lean.reset();plan_->lean_complete=false;dependencies=*plan_->selection;}
             }
           }
           if(options_.progress)options_.progress("full IBP pilot: "+std::to_string(parametric.rows.size())+" equations, "+std::to_string(plan_->selection->size())+" original rows needed for target identities");
@@ -505,7 +505,8 @@ class Sampler {
     // The selected equations, in order, without the terms of the columns
     // that neither get a pivot from them nor are terminal
     // (eliminate_announced), and their indices 0, 1, ...
-    std::optional<::ibp::FormRows> lean;std::vector<std::uint32_t> lean_order;};
+    // lean_complete: they are eliminated with complete rows (measured).
+    std::optional<::ibp::FormRows> lean;std::vector<std::uint32_t> lean_order;bool lean_complete=false;};
   static bool same_equations(const ::ibp::ParametricProgram& a,const ::ibp::ParametricProgram& b) {
     if(a.input_count!=b.input_count||a.constant_inputs!=b.constant_inputs||a.program.integrals!=b.program.integrals||a.rows.size()!=b.rows.size())return false;
     for(std::size_t i=0;i<a.rows.size();++i){const auto& x=a.rows[i];const auto& y=b.rows[i];if(x.size()!=y.size())return false;
@@ -563,19 +564,39 @@ class Sampler {
             }catch(const std::domain_error&){bad|=std::uint64_t(1)<<k;for(std::size_t f=0;f<parametric.forms.size();++f)forms[f*lanes+k]=1;}}
           auto mine=bounds;mine.seconds=std::max(1.0,limits.timeout_seconds-since(began));
           const bool lean=plan_->lean.has_value();
-          if(lean)solver.solve(*plan_->lean,forms.data(),plan_->lean_order,complete_rows,mine);else solver.solve(parametric.rows,forms.data(),selected,complete_rows,mine);
-          for(auto& lane:rows)for(auto& row:lane)row.clear();
-          for(std::size_t t=0;t<program.target_columns.size();++t){solver.reduce(program.target_columns[t],reduced);
-            for(std::size_t e=0;e<reduced.columns.size();++e){const auto column=reduced.columns[e];
-              for(unsigned k=0;k<lanes;++k)if(const auto value=reduced.values[e*lanes+k]){if(is_terminal[column])rows[k][t].push_back({column,value});else bad|=std::uint64_t(1)<<k;}}}
-          bad|=solver.failed();multiplications+=solver.statistics().multiplications/lanes*count;
+          // The reduced targets of the present batch into `into`; the lanes
+          // that failed or left an integral that is not terminal.
+          const auto eliminate=[&](bool whole,bool complete,std::vector<std::vector<::ibp::Row>>& into){std::uint64_t failed=0;
+            if(whole)solver.solve(parametric.rows,forms.data(),selected,complete,mine);else solver.solve(*plan_->lean,forms.data(),plan_->lean_order,complete,mine);
+            for(auto& lane:into)for(auto& row:lane)row.clear();
+            for(std::size_t t=0;t<program.target_columns.size();++t){solver.reduce(program.target_columns[t],reduced);
+              for(std::size_t e=0;e<reduced.columns.size();++e){const auto column=reduced.columns[e];
+                for(unsigned k=0;k<lanes;++k)if(const auto value=reduced.values[e*lanes+k]){if(is_terminal[column])into[k][t].push_back({column,value});else failed|=std::uint64_t(1)<<k;}}}
+            return failed|solver.failed();};
+          bad|=eliminate(!lean,lean?complete_rows||plan_->lean_complete:complete_rows,rows);multiplications+=solver.statistics().multiplications/lanes*count;
           if(first&&!lean){
             // The columns without a pivot that are not terminal, if the
             // batch was sound at some point.
             if(bad!=(lanes==64?~std::uint64_t(0):(std::uint64_t(1)<<lanes)-1)){
               ::ibp::FormRows kept(selected.size());std::size_t dropped=0;
               for(std::size_t r=0;r<selected.size();++r)for(const auto& term:parametric.rows[selected[r]]){if(solver.pivot(term.column)||is_terminal[term.column])kept[r].push_back(term);else ++dropped;}
-              plan_->lean_order.resize(selected.size());std::iota(plan_->lean_order.begin(),plan_->lean_order.end(),0);plan_->lean=std::move(kept);stats_.pruned_terms+=dropped;}
+              plan_->lean_order.resize(selected.size());std::iota(plan_->lean_order.begin(),plan_->lean_order.end(),0);plan_->lean=std::move(kept);stats_.pruned_terms+=dropped;
+              // The selected equations eliminated by their leading columns
+              // or with complete rows have the same pivots and reduce the
+              // targets to the same residues (a row reduced further is the
+              // same row modulo the rows before it). Which is faster depends
+              // on the level: both are timed on this batch, once.
+              if(!complete_rows)try{
+                std::vector<std::vector<::ibp::Row>> leading(lanes,std::vector<::ibp::Row>(program.target_columns.size())),complete=leading;
+                auto timed=clock::now();const auto bad_leading=eliminate(false,false,leading);const double seconds_leading=since(timed);const auto fill_leading=solver.statistics().fill;
+                timed=clock::now();const auto bad_complete=eliminate(false,true,complete);const double seconds_complete=since(timed);
+                bool same=!(bad_leading&~bad)&&!(bad_complete&~bad);
+                for(unsigned k=0;k<lanes&&same;++k)if(!(bad>>k&1))same=leading[k]==rows[k]&&complete[k]==rows[k];
+                if(same&&seconds_complete<seconds_leading){plan_->lean_complete=true;
+                  if(options_.progress)options_.progress("batches of "+std::to_string(lanes)+" points: "+std::to_string(selected.size())+" selected equations without "+std::to_string(dropped)+" terms of columns that get no pivot; with complete rows "+std::to_string(seconds_complete)+" s a batch (pivot fill "+std::to_string(solver.statistics().fill)+"), by leading columns "+std::to_string(seconds_leading)+" s (pivot fill "+std::to_string(fill_leading)+"); samples take the first");}
+                else if(options_.progress)options_.progress("batches of "+std::to_string(lanes)+" points: "+std::to_string(selected.size())+" selected equations without "+std::to_string(dropped)+" terms of columns that get no pivot; by leading columns "+std::to_string(seconds_leading)+" s a batch (pivot fill "+std::to_string(fill_leading)+"), with complete rows "+(same?std::to_string(seconds_complete)+" s":std::string("not the same residues"))+"; samples take the first");
+              }catch(const std::length_error&){}
+            }
           }
           const double seconds=since(start)/count;
           for(std::size_t k=0;k<count;++k){auto& slot=*batch[i+k];if(bad>>k&1){++failures;continue;}

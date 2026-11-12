@@ -120,15 +120,32 @@ Transport time is linear in the number of epsilon orders carried.
   took 110 s). The outcome of the search is recorded beside the exact cache
   (`moving-poles/`), so that later runs and the samples of a fit apply the
   recorded steps instead of searching again.
-- **Working precision** (`--precision-bits`, 384 by default). Every level
-  loses precision between its overlap points and its matching point: 30 to
-  140 bits a level in the samples of the large families (the transported
-  row is a small combination of solutions that grow towards the endpoint).
-  A seven-level sample can lose all 384. When rounding leaves a coefficient
-  fewer digits than `--leaf-digits` asks for, the numbers are computed
-  again with that many bits more; the exact endpoint plans are kept. A
-  precision stated on the command line or in the family file is not
-  changed, and nothing is raised beyond 4096 bits.
+- **Working precision** (`--precision-bits`, 384 by default). When
+  rounding leaves a coefficient fewer digits than `--leaf-digits` asks for,
+  the numbers are computed again with that many bits more; the exact
+  endpoint plans are kept. A precision stated on the command line or in the
+  family file is not changed, and nothing is raised beyond 4096 bits. What a
+  run loses is the cancellation between its levels (next section), not a
+  sum over the levels: a sample of the three-loop family with seven levels
+  returns the same 26 digits at 256, 384 and 512 bits, and its expanded run
+  the same 30 digits at 256 and 384.
+- **Cancelled epsilon orders** (weighted accumulation). The windows of the
+  weights and of the transported rows are declared from the lowest orders of
+  the operators that made them, and most of those orders cancel in the sum
+  over the masters: the three-loop family declares weights from epsilon^-11
+  that start at epsilon^-5 on every level. An order that is below the first
+  one kept by the admitted tail and 64 bits more, in its values, radii and
+  estimated errors, is set to zero and leaves the window, with the orders
+  of the endpoint operators, the transports and the leaf that only it asked
+  for (`NumericalOptions::clear_cancelled_orders`; `cleared_epsilon_orders`
+  in the JSON report). Values and radii do not change. Products of the
+  transports: four-loop banana 106 to 73 million, with unequal masses 188
+  to 130 million, the three-loop family 2672 to 2211 million; the double
+  box is unchanged. Orders that cancelled only down to the size of
+  the estimated error are kept: clearing those as well saved two per cent
+  more on the banana and made its error five times larger, because the
+  error of the levels above cancels in the result together with its parts
+  in the other orders.
 - **Merge selection** (`--merge-selection auto`). Which two propagators a
   level merges decides how large the levels below become. Candidates are
   the pairs on one loop momentum, whose merged line is again an ordinary
@@ -206,6 +223,53 @@ loses about 160 bits expanded and 180 in a sample), a different contour
 height, and `--method factored`, which transports the solution map instead
 of the rows and is slower and less accurate on every family measured.
 
+## Cancellation between the levels
+
+A level hands the level below one weight per requested integral, and the
+requested integral is the sum of weight times value over those integrals.
+That sum cancels. With the values taken from an evaluation by rows, the
+ratio of the sum of the absolute terms to the result is, level by level:
+
+| Run | Result | Cancellation in bits, into levels 2, 3, ... |
+| --- | ---: | --- |
+| three-loop family, sample at 1/400 | 2^22 | 32, 42, 48, 48, 46, 32, 21 |
+| four-loop banana, sample at 1/400 | 2^5 | 31, 22, 9 |
+| four-loop banana, unequal masses, sample | 2^5 | 30, 22, 9 |
+| four-loop banana, expanded, order 0 | 2^5 | 7, 6, 2 |
+
+It is not a loss that adds up over the levels but a profile with a maximum
+in the middle, and it is the cancellation of epsilon poles. In the sample
+of the banana the weights are of order one and the masters of the first
+level without a dot on the merged propagator are of order 2^32 to 2^34,
+about 400^4, while the integral with the second power of the merged
+propagator, the one the top level integrates, is 2^5. In the expanded
+run the same thing is ten orders: the weights start at epsilon^-3, the
+values at epsilon^-7, the result at epsilon^0. In a sample every cancelled
+order costs log2(400) = 8.6 bits.
+
+The estimated error of the Taylor tails, contracted with the values, stays
+at 2^-95 to 2^-100 of the sum of the absolute terms on every level (tail
+2^-90): the amplification of the tail, 2^45 for the three-loop family, is
+this cancellation and nothing else. Consequences:
+
+- Powers of x, 1-x or epsilon on the masters change nothing. The sum of the
+  absolute terms is the same for every diagonal rescaling, and the
+  arithmetic is floating point with an exponent per value.
+- The position of the overlap points moves the error by a factor of 50
+  between overlap ratios 4 and 256 (three-loop sample, tail 2^-90: 7e-9,
+  5e-8 at the default 16, 7e-8 at 64, 3.5e-7), of 2^45.
+- Only another master basis changes it: one whose masters are as finite as
+  the integrals requested from them. No criterion that finds such a basis
+  from the reductions alone is implemented; the basis scan minimises the
+  size of the connection under the constraint of the child's window
+  (without it the same sample has an error ten times larger).
+- A run cannot know the amplification before it has the leaf. It starts
+  with a tail ten digits below the leaf digits and computes its numbers
+  again with a smaller one if the estimated error leaves fewer digits than
+  asked (`precision.raises`). The samples of a fit start at the tail an
+  earlier sample ended with (`--tail-floor`): 20 s of CPU a sample for the
+  three-loop family instead of 29 to 51.
+
 ## Epsilon sampling
 
 `diffexp ft --epsilon-strategy sample` prepares the recursion once,
@@ -230,11 +294,11 @@ leaf are specialised to the numeric dimension.
   costs digits in deep recursions: samples ask the leaf for at most 16
   digits, 12 from six levels on, unless `--leaf-digits` is given.
 - One sample alone is `--epsilon-shift Q --epsilon-order 0`.
-- A sample that had to raise its working precision (see above) reports it,
-  and the samples started after it begin at that precision
-  (`--precision-floor`). For a three-loop family with nine propagators and
-  seven levels a sample has 8 digits at 384 bits and 18 at 448, where the
-  Taylor tail of 16 leaf digits takes over.
+- A sample that had to raise its working precision or to lower its
+  admitted Taylor tail (see above) reports it, and the samples started
+  after it begin there (`--precision-floor`, `--tail-floor`). The samples
+  of the three-loop family with nine propagators and seven levels lower
+  their tail from 2^-74 to 2^-90 at twelve leaf digits.
 
 Accuracy of the finite part of the four-loop equal-mass banana from samples
 at +-k/400 (reference 39.655526834297652...):
@@ -276,12 +340,19 @@ sample values are in
 
 ## Limits
 
-- A deep recursion with many scales loses far more precision expanded than
-  sampled. The three-loop nine-propagator family above (levels of 24, 28,
-  29, 19, 12, 6, 2 masters, epsilon windows 17 to 23 orders wide) completes
-  its expanded run in about ten minutes and returns radii of 1e+1301 at 384
-  bits; no precision below 4096 bits repairs that, and none is tried. Its
-  samples take 26 to 37 s each.
+- The three-loop nine-propagator family above (levels of 24, 28, 29, 19,
+  12, 6, 2 masters) completes its expanded run in eight minutes of CPU at
+  384 bits (and with the same radii at 256): epsilon^-3 -0.03856003231106270194105959677166, epsilon^-2
+  0.2358790303121863943656230314247, epsilon^-1
+  -0.7331964058080754098075156607597, epsilon^0
+  -0.334121690143700457171765090273 (radii 8e-33 to 7e-31), in agreement
+  with the fit of its samples. It used to return radii of 1e+1301: the
+  exact row gauge of the third level's endpoint frame eliminated with the
+  first entry that was not zero, 2^-209 at an overlap point of 1/2048, so
+  that the evaluated gauge had entries of 2^418 and every epsilon order of
+  the inverse frame lost 393 bits at any working precision. The gauge now
+  takes a pivot within 2^-20 of the largest. The transported windows are
+  still 11 to 22 orders wide where the result has four.
 
 - The expanded recursion of the double pentagon does not finish in hours:
   levels 2 and 1 have 64 x 33 and 69-master systems with epsilon through 12.

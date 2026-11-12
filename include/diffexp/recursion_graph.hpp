@@ -39,10 +39,10 @@ struct Options {
   // for further reductions (finite_masters.hpp). It is given the closure for
   // the level's sources, the merged family, the sources, the zero-based depth
   // and a function that closes the level for a longer list of requests, the
-  // sources first; it returns a closure of the same size with rows for the
-  // sources only. It runs before exchange_masters.
+  // sources first, within a number of seconds; it returns a closure of the
+  // same size with rows for the sources only. It runs before exchange_masters.
   std::function<level::Result(level::Result,const ibp::PropagatorBasis&,const std::vector<ibp::Integral>&,unsigned,
-    const std::function<level::Result(const std::vector<ibp::Integral>&)>&)> choose_masters;
+    const std::function<level::Result(const std::vector<ibp::Integral>&,double)>&)> choose_masters;
   // Which two propagators a level merges. Without explicit `merges` and with
   // this counter, the pairs with a common loop momentum are tried at every
   // level and the one whose merged family has the fewest master integrals is
@@ -479,7 +479,12 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       if(options.choose_masters) {
         const auto masters=node.closure.ordered_basis.size();
         node.closure=options.choose_masters(std::move(node.closure),node.merged,node.source_indices,depth,
-          [&](const std::vector<ibp::Integral>& requests){return provider(node.merged,dimension,field,0,requests,budget);});
+          [&](const std::vector<ibp::Integral>& requests,double seconds) {
+            auto limited=budget;
+            if(seconds<static_cast<double>(limited.total_timeout_seconds))limited.total_timeout_seconds=std::max(1u,static_cast<unsigned>(seconds));
+            limited.provider.timeout_seconds=std::min(limited.provider.timeout_seconds,limited.total_timeout_seconds);
+            return provider(node.merged,dimension,field,0,requests,limited);
+          });
         if(!node.closure.success || node.closure.ordered_basis.size()!=masters || node.closure.matrix.size()!=masters)
           throw std::logic_error("recursive master choice changed the size of a level");
       }

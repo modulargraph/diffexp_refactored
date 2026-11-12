@@ -377,11 +377,23 @@ int main(int argc, char** argv) {
       // Masters that are finite at epsilon = 0 where the level has such
       // integrals (finite_masters.hpp).
       boost::json::array finite_master_levels;double finite_master_seconds=0;
+      // All levels below an exchanged one follow, or none is exchanged: see
+      // finite_masters::revoke.
+      struct FiniteLadderBroken {unsigned depth;};
+      std::vector<std::filesystem::path> finite_master_records;bool finite_masters_withdrawn=false;
       if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& sources,unsigned depth,const auto& reduce) {
+        if(finite_masters_withdrawn)return closure;
         diffexp::finite_masters::Report chosen;
         closure=diffexp::finite_masters::choose(merged,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
           std::move(closure),sources,0,1,reduce,chosen,cache/"finite-masters");
         finite_master_seconds+=chosen.seconds;
+        if(!chosen.steps.empty())finite_master_records.push_back(chosen.record);
+        else if(chosen.divergent_before && !finite_master_records.empty()) {
+          progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"; the levels above take their masters back\n"<<std::flush;
+          for(const auto& record:finite_master_records)
+            diffexp::finite_masters::revoke(record,"kept: level "+std::to_string(depth+1)+" below has no finite masters");
+          throw FiniteLadderBroken{depth};
+        }
         if(!chosen.divergent_before)return closure;
         if(chosen.steps.empty() && !chosen.candidates){progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"\n"<<std::flush;return closure;}
         progress<<"Level "<<depth+1<<": finite masters: "<<chosen.divergent_before<<" of "<<chosen.masters<<" masters fail the convergence test at epsilon = 0 -> "
@@ -408,10 +420,7 @@ int main(int argc, char** argv) {
         describe_moving_poles(depth,result);return level;
       };
       // A spent time budget names the three knobs that bound the preparation.
-      auto graph=[&] {
-        try {
-          return diffexp::recursion::prepare(configuration.family,std::move(requested),options,provider,
-            [&](const auto& event) {
+      const auto level_progress=[&](const auto& event) {
               progress<<"Level "<<event.depth<<": "<<event.physical_propagators<<" propagators; ";
               if(event.scalar_leaf)progress<<"analytic scalar boundary";
               else progress<<event.masters<<" masters; "<<event.sources<<" shared source integrals";
@@ -421,7 +430,16 @@ int main(int argc, char** argv) {
               else if(event.anchor!=event.requested_anchor)progress<<"Level "<<event.depth<<": requested anchor "<<event.requested_anchor.str()
                 <<" is singular in the selected master basis; matching at "<<event.anchor.str()<<" instead\n";
               progress<<std::flush;
-            });
+            };
+      auto graph=[&] {
+        try {
+          try {
+            return diffexp::recursion::prepare(configuration.family,requested,options,provider,level_progress);
+          } catch(const FiniteLadderBroken&) {
+            // The same preparation with every level's own masters.
+            finite_masters_withdrawn=true;finite_master_levels.clear();finite_master_records.clear();moving_pole_levels.clear();
+            return diffexp::recursion::prepare(configuration.family,requested,options,provider,level_progress);
+          }
         } catch(const std::runtime_error& error) {
           const std::string message=error.what();
           if(message.find("time budget")==std::string::npos && message.find("exhausted reconstruction budget")==std::string::npos)throw;
@@ -460,7 +478,7 @@ int main(int argc, char** argv) {
         {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings},
         {"continued_solves",ibp_statistics.continued_solves},{"continued_equations",ibp_statistics.continued_equations},{"reused_solves",ibp_statistics.reused_solves},{"continued_solve_seconds",ibp_statistics.continued_solve_seconds},{"seeds",ibp_seeds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
-      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"seconds",finite_master_seconds}};
+      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"withdrawn",finite_masters_withdrawn},{"seconds",finite_master_seconds}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
       };

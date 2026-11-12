@@ -16,7 +16,7 @@ struct Options {
   // tried with, not what it is confined to: a requested integral asks for the
   // seeds that generate it and an integral left unreduced at the edge of the
   // seeds widens them (see target_seeds and max_seed_widenings).
-  unsigned dots=1,numerators=1,max_degree=16,max_variable_degree=64,max_primes=32,probe_timeout_seconds=20;
+  unsigned dots=1,numerators=1,max_degree=16,max_variable_degree=64,max_primes=(1u<<20)-2,probe_timeout_seconds=20;
   std::size_t max_samples_per_prime=512;
   // Ordinary samples are recomputed from their deterministic points in a few
   // milliseconds, so only every n-th is made durable; held-out validation
@@ -89,11 +89,14 @@ struct Statistics {
   std::size_t trace_instructions=0,trace_rows=0;
 };
 // Descending primes below 2^61; two beyond the reconstruction primes validate.
-inline constexpr unsigned prime_count=64;
+// The table is made as far as it is asked for: how many primes a
+// reconstruction takes is a matter of its time budget, not of this number.
+inline constexpr unsigned prime_count=1u<<20;
 inline modular::Word prime(unsigned index) {
   if(index<1||index>prime_count)throw std::invalid_argument("IBP solver prime index must be 1.."+std::to_string(prime_count));
-  static const auto values=[] {std::array<modular::Word,prime_count> out{};out[0]=2305843009213693951ULL;
-    for(unsigned i=1;i<out.size();++i){auto p=out[i-1]-2;while(!n_is_prime(p))p-=2;out[i]=p;}return out;}();
+  static std::mutex guard;static std::vector<modular::Word> values{2305843009213693951ULL};
+  const std::lock_guard lock(guard);
+  while(values.size()<index){auto p=values.back()-2;while(!n_is_prime(p))p-=2;values.push_back(p);}
   return values[index-1];
 }
 class Sampler {

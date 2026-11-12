@@ -394,25 +394,27 @@ class Session {
         for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));
         std::vector<Exact> coefficients;for(const auto& lift:lifts){auto c=lift.reconstruct(dimension_,active);if(!c)break;coefficients.push_back(*c);}
         bool valid=coefficients.size()==keys.size();std::vector<std::string> validation_files;
+        // Why a candidate is not accepted yet, for the progress line.
+        std::string pending=valid?"":std::to_string(keys.size()-coefficients.size())+" or fewer coefficients are not rational numbers within the modulus yet";
         if(valid)for(unsigned check_prime=pi+1;check_prime<=pi+ordinals::validation_primes&&valid;++check_prime)for(std::size_t j=0;j<ordinals::validation_points&&valid;++j) {
           const auto ordinal=ordinals::validation_point(pi,j);std::optional<detail::Probe> held;
           // Held-out ordinals are fixed by the completion record. An exceptional
           // one rejects this attempt; the next prime brings fresh points.
           try{held=probe(check_prime,ordinal,anchor(pi,check_prime,j));}
-          catch(const detail::ExceptionalPoint& e){status(std::string("exceptional held-out point: ")+e.what());valid=false;break;}
+          catch(const detail::ExceptionalPoint& e){status(std::string("exceptional held-out point: ")+e.what());valid=false;pending="a held-out point was exceptional";break;}
           const auto& check=*held;
           validation_files.push_back("sample-"+std::to_string(check_prime)+"-"+std::to_string(ordinal)+".json");
-          if(detail::masters(check)!=terminal){valid=false;break;}
+          if(detail::masters(check)!=terminal){valid=false;pending="a held-out elimination leaves other integrals unreduced";break;}
           detail::Rows candidate;for(const auto& [a,row]:probes.front().rows)candidate[a];
           try{for(std::size_t k=0;k<keys.size();++k){const auto actual=modular::evaluate(coefficients[k],check.point,options_.modulus(check_prime));
-              if(actual!=detail::coefficient(check,keys[k])){valid=false;break;}
+              if(actual!=detail::coefficient(check,keys[k])){valid=false;pending="the candidate disagrees with a held-out sample";break;}
               if(actual)candidate.at(keys[k].first).emplace(keys[k].second,actual);}
-            if(valid&&candidate!=check.rows)valid=false;
-          }catch(const std::domain_error&){valid=false;}
+            if(valid&&candidate!=check.rows){valid=false;pending="the candidate disagrees with a held-out sample";}
+          }catch(const std::domain_error&){valid=false;pending="the candidate has a pole at a held-out point";}
         }
         json::array raw_lifts;for(const auto& lift:lifts){json::array residues;for(const auto& r:lift.residues){char* s=fmpz_get_str(nullptr,10,r.value);residues.emplace_back(s);flint_free(s);}raw_lifts.push_back(residues);}
         detail::save(result.directory/"progress.json",{{"schema","DiffExp3.ModularProgress/v1"},{"identity",identity},{"stage","CRT-and-validation"},{"reconstruction_primes",pi},{"samples_per_prime",probes.size()},{"residues",raw_lifts},{"fresh_samples",fresh},{"reused_samples",hits},{"skipped_samples",skipped},{"candidate_validated",valid}});
-        status("modular reconstruction primes "+std::to_string(pi)+", independent validation "+(valid?"passed":"requires more primes"));
+        status("modular reconstruction primes "+std::to_string(pi)+", independent validation "+(valid?"passed":"requires more primes ("+pending+")"));
         if(!valid){foresee(pi+1);continue;}
         for(const auto& [a,row]:probes.front().rows)result.reductions.emplace(a,ibp::Relation{});
         for(std::size_t i=0;i<keys.size();++i)ibp::add(result.reductions.at(keys[i].first),keys[i].second,coefficients[i]);

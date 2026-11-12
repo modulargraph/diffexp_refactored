@@ -441,6 +441,25 @@ class Evaluator {
       basis_store_=std::make_unique<artifacts::Store>(options_.basis_cache_directory,options_.basis_cache_max_bytes);
   }
   const NumericalStatistics& statistics()const{return statistics_;}
+  // The next evaluation runs at `bits` of working precision. Every number
+  // computed so far is dropped; the exact part of the endpoint plans (series,
+  // frames, functionals, overlaps, internal bases, contour sides) is kept, so
+  // the evaluation repeats the endpoint operators, the transports and the
+  // leaf, not the exact preparation.
+  void raise_precision(slong bits) {
+    if(bits<=options_.working_bits)return;
+    if(bits>1000000)throw std::invalid_argument("recursive numerical options or finite budgets: working precision must be 64..1000000 bits");
+    options_.working_bits=bits;
+    const std::function<void(Plan&)> reset=[&](Plan& prepared) {
+      prepared.lower_operator.reset();prepared.upper_operator.reset();prepared.local_operator.reset();
+      for(auto* endpoint:{&prepared.lower,&prepared.upper}){endpoint->inverse.reset();endpoint->inverse_point.reset();}
+      if(prepared.pullback_base)reset(*prepared.pullback_base);
+    };
+    for(auto& prepared:plans_)if(prepared)reset(*prepared);
+    for(auto& value:cache_)value.reset();
+    for(auto& expression:expressions_)expression.reset();
+  }
+  slong working_bits()const{return options_.working_bits;}
   const std::vector<BasisSelection>& basis_selections()const{return basis_selections_;}
   // Snapshot a completed transform together with its immutable leaf source.
   // Copying the transform prevents a later refinement (or caller edit) from

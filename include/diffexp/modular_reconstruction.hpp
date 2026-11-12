@@ -396,13 +396,21 @@ struct Lift {
     // they share only a small part of the denominator. For the same reason
     // the factor is looked for in every vector of the reduced basis: the one
     // taken is the one that leaves the fewest coefficients large.
+    // Numerator and denominator both take part where both have large
+    // coefficients: the coefficients of one of them may all be one large
+    // integer times small ones (up to small terms), and a lattice of those
+    // alone has the same short vectors.
     // Where fewer coefficients are large than a lattice takes, it is filled
     // with others: the factor sought leaves those small as well, and the
     // lattice then singles it out as the largest one does.
     // Every round leaves fewer coefficients large: that ends the loop.
     while(!large.empty()) {
       std::vector<std::size_t> used;
-      for(std::size_t j=0,count=std::min(most,large.size());j<count;++j)used.push_back(large[j*large.size()/count]);
+      {const auto split=static_cast<std::size_t>(std::lower_bound(large.begin(),large.end(),ansatz.numerator.size())-large.begin());
+        const std::size_t above=split,below=large.size()-split;
+        std::size_t lower=std::min(below,most/2);const std::size_t upper=std::min(above,most-lower);lower=std::min(below,most-upper);
+        for(std::size_t j=0;j<upper;++j)used.push_back(large[j*above/upper]);
+        for(std::size_t j=0;j<lower;++j)used.push_back(large[split+j*below/lower]);}
       if(used.size()<most){std::vector<std::size_t> others;
         for(std::size_t i=0;i<residues.size();++i)if(!fmpz_is_zero(scaled[i].value)&&std::find(used.begin(),used.end(),i)==used.end())others.push_back(i);
         for(std::size_t j=0,count=std::min(most-used.size(),others.size());j<count;++j)used.push_back(others[j*others.size()/count]);}

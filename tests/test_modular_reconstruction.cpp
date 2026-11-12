@@ -1,5 +1,6 @@
 #include "diffexp/modular_reconstruction.hpp"
 #include <iostream>
+#include <algorithm>
 using namespace diffexp;
 int main(){try{
   ExactField f({"x","eps","unused"});Exact x(f,"x"),e(f,"eps");
@@ -9,6 +10,59 @@ int main(){try{
   for(bool compact:{false,true})for(std::size_t k=0;k<functions.size();++k){auto image=modular::discover(samples[0],k,2,6,modular::prime(1));if(!image)throw std::runtime_error("shape discovery failed");if(compact)image=modular::compact_support(*image);modular::Lift lift(*image,modular::prime(1));
     for(unsigned pi=2;pi<=3;++pi){auto next=modular::fit(samples[pi-1],k,image->ansatz,modular::prime(pi),true);if(!next)throw std::runtime_error("independent image failed");lift.append(*next,modular::prime(pi));}
     auto reconstructed=lift.reconstruct(x,{0,1});if(!reconstructed||*reconstructed!=functions[k])throw std::runtime_error("rational reconstruction differs from independent exact function");}
+  // Denominators as products of factors over the rationals: found from one
+  // prime where their coefficients are small, from two where they are not;
+  // a further prime then fits the numerators alone, and a denominator that
+  // is not the function's leaves no numerator.
+  {const Exact small=(x.constant(3)*x-x.constant(2))*(x.constant(5)*e+x.constant(1)),mixed=x.constant(12)*x*e-x.constant(6)*x-x.constant(9)*e+x.constant(4);
+    const Exact large=x.parse("40461214945536*x^2*eps-77850415710912*x+50195401621057");
+    for(const bool two:{false,true}){
+      std::vector<Exact> rational={(x*x*e+x.constant(7))/(small*small*mixed),(x.constant(5)*e*e-x)/(mixed*(two?large:x-x.constant(1))),(x+e)/small,x*x*x-e};
+      std::vector<std::vector<modular::Sample>> points(4);
+      for(unsigned pi=1;pi<=4;++pi)for(unsigned i=0;i<60;++i){auto p=modular::point(3,pi,i);modular::Sample s{{p[0],p[1]},{}};for(const auto& fn:rational)s.coefficients.push_back(modular::evaluate(fn,p,modular::prime(pi)));points[pi-1].push_back(s);}
+      std::vector<modular::Image> first,second;
+      for(std::size_t k=0;k<rational.size();++k){auto image=modular::discover(points[0],k,2,7,modular::prime(1));if(!image)throw std::runtime_error("shape discovery failed for a factored denominator");first.push_back(modular::compact_support(*image));
+        auto next=modular::fit(points[1],k,first.back().ansatz,modular::prime(2),true);if(!next)throw std::runtime_error("second image of a factored denominator failed");second.push_back(*next);}
+      auto factors=modular::DenominatorFactors::find(first,2,modular::prime(1));
+      if(!factors||factors->lifted()==two)throw std::runtime_error("denominator factors are not lifted from the primes their coefficients need");
+      if(two&&(!factors->absorb(second,modular::prime(2))||!factors->lifted()))throw std::runtime_error("denominator factors are not lifted from two primes");
+      for(unsigned pi=1;pi<=4;++pi){modular::DenominatorFactors::At at(*factors,modular::prime(pi));
+        for(std::size_t k=0;k<rational.size();++k){
+          const auto complete=modular::fit(points[pi-1],k,first[k].ansatz,modular::prime(pi),true);const auto denominator=at.denominator(k,first[k].ansatz);
+          if(!complete||!denominator||!std::equal(denominator->begin(),denominator->end(),complete->coefficients.begin()+first[k].ansatz.numerator.size()))throw std::runtime_error("denominator factors do not predict the denominator of a further prime");
+          const modular::Samples few(points[pi-1].data(),first[k].ansatz.numerator.size()+3);
+          const auto numerator=modular::fit_numerator(few,k,first[k].ansatz,*denominator,modular::prime(pi));
+          if(!numerator||numerator->coefficients!=complete->coefficients)throw std::runtime_error("the fit of a numerator with its known denominator differs from the complete fit");
+          auto wrong=*denominator;wrong.back()=wrong.back()+1==modular::prime(pi)?1:wrong.back()+1;
+          if(first[k].ansatz.denominator.size()>1&&modular::fit_numerator(few,k,first[k].ansatz,wrong,modular::prime(pi)))throw std::runtime_error("a wrong denominator was fitted a numerator");}}
+    }
+    // A denominator that is no product of the first prime's factors at another prime is refused.
+    std::vector<Exact> one={(x+e)/small},other={(x+e)/(small+x*x)};std::vector<modular::Image> images[2];
+    for(unsigned which=0;which<2;++which){std::vector<modular::Sample> at;const auto& fn=(which?other:one)[0];
+      for(unsigned i=0;i<40;++i){auto p=modular::point(3,which+1,i);at.push_back({{p[0],p[1]},{modular::evaluate(fn,p,modular::prime(which+1))}});}
+      auto image=modular::discover(at,0,2,6,modular::prime(which+1));if(!image)throw std::runtime_error("shape discovery failed");images[which].push_back(modular::compact_support(*image));}
+    auto factors=modular::DenominatorFactors::find(images[0],2,modular::prime(1));
+    if(!factors||factors->absorb(images[1],modular::prime(2)))throw std::runtime_error("other denominators were taken for the same factors");
+  }
+  // Coefficients next to each other in the ansatz (one power of x, successive
+  // powers of eps) that are one large integer times small ones: the lift
+  // takes the primes the integers need, not more.
+  {const Exact den=x.parse("123456789012345678901234567890123456789012345678901234567891");
+    std::string large="987654321098765432109876543210987654321098765432109876543210987654321";
+    Exact numerator=x.constant(0);Exact power=x.constant(1);
+    for(int i=0;i<14;++i){std::rotate(large.begin(),large.begin()+5,large.end());if(large.front()=='0')large.front()='7';
+      numerator=numerator+power*x.parse(large)*(x.constant(i+2)*e*e+x.constant(3*i+1)*e+x.constant(i+5));power=power*x;}
+    const Exact function=numerator/(x*x*e+x.constant(977)*e-den);
+    std::optional<modular::Lift> lift;modular::Ansatz ansatz;unsigned primes=0;std::optional<Exact> lifted;
+    for(unsigned pi=1;pi<=12&&!lifted;++pi){std::vector<modular::Sample> at;
+      for(unsigned i=0;i<70;++i){auto p=modular::point(3,pi,i);at.push_back({{p[0],p[1]},{modular::evaluate(function,p,modular::prime(pi))}});}
+      if(pi==1){modular::Ansatz box;for(unsigned a=0;a<=13;++a)for(unsigned b=0;b<=2;++b)box.numerator.push_back({a,b});for(unsigned a=0;a<=2;++a)for(unsigned b=0;b<=1;++b)box.denominator.push_back({a,b});
+        auto image=modular::fit_with_holdouts(at,0,box,modular::prime(1));if(!image)throw std::runtime_error("box fit failed");auto compact=modular::compact_support(*image);ansatz=compact.ansatz;lift.emplace(compact,modular::prime(1));}
+      else{auto image=modular::fit(at,0,ansatz,modular::prime(pi),true);if(!image)throw std::runtime_error("box fit failed at a further prime");lift->append(*image,modular::prime(pi));}
+      primes=pi;lifted=lift->reconstruct(x,{0,1});if(lifted&&*lifted!=function)lifted.reset();}
+    // Numerators of 235 bits over a denominator of 197: 64-bit primes, (235+16)*12/11 bits.
+    if(!lifted||primes>5)throw std::runtime_error("a function with structured coefficients takes "+std::to_string(primes)+" primes, more than its integers need");
+  }
   auto corrupt=samples[0];corrupt.back().coefficients[2]^=1;
   if(modular::discover(corrupt,2,2,2,modular::prime(1)))throw std::runtime_error("corrupted held-out point accepted");
   bool pole=false;try{modular::evaluate(x/e,{1,0,3},modular::prime(1));}catch(const std::domain_error&){pole=true;}

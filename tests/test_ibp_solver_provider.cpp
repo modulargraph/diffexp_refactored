@@ -5,7 +5,51 @@
 #include <iostream>
 using namespace diffexp;
 void require(bool v,const char* s){if(!v)throw std::runtime_error(s);}
+// A batch of points eliminated together against each of them eliminated
+// alone: the same residues wherever the batch does not mark a lane.
+template<unsigned K> void batch_agrees(const ::ibp::FormRows& rows,std::size_t columns,std::size_t forms,const std::vector<::ibp::Column>& targets,
+    ::ibp::Word prime,bool complete_rows,std::uint64_t seed,std::uint64_t expected_failures,const char* what) {
+  ::ibp::Field field(prime);::ibp::Program program;program.integrals.resize(columns);program.target_columns=targets;
+  std::vector<std::uint32_t> all(rows.size());std::iota(all.begin(),all.end(),0);
+  std::vector<::ibp::Word> block(forms*K);std::vector<std::vector<::ibp::Word>> values(K,std::vector<::ibp::Word>(forms));
+  for(unsigned k=0;k<K;++k)for(std::size_t f=0;f<forms;++f){seed=modular::mix(seed+f+1);values[k][f]=1+seed%(prime-1);block[f*K+k]=values[k][f];}
+  // Lanes that are to fail: form 0 leads the first equation and vanishes there.
+  for(unsigned k=0;k<K;++k)if(expected_failures>>k&1){values[k][0]=0;block[k]=0;}
+  ::ibp::BatchSolver<K> batch(columns,field);batch.solve(rows,block.data(),all,complete_rows);
+  typename ::ibp::BatchSolver<K>::Reduced reduced;std::vector<std::vector<::ibp::Row>> together(K,std::vector<::ibp::Row>(targets.size()));
+  for(std::size_t t=0;t<targets.size();++t){batch.reduce(targets[t],reduced);
+    for(std::size_t e=0;e<reduced.columns.size();++e)for(unsigned k=0;k<K;++k)if(const auto v=reduced.values[e*K+k])together[k][t].push_back({reduced.columns[e],v});}
+  require(batch.failed()==expected_failures,what);
+  ::ibp::SolveOptions options;options.complete_rows=complete_rows;
+  for(unsigned k=0;k<K;++k){if(expected_failures>>k&1)continue;
+    ::ibp::Solver alone(program,field,options,rows,values[k]);alone.solve(0,&all);
+    require(alone.targets(targets)==together[k],what);require(alone.statistics().rank==batch.statistics().rank,what);}
+}
+void batches() {
+  // A chain: one equation is reduced by more pivots than a word of the
+  // accumulator takes sums before it is brought back to residues.
+  {const std::size_t n=2600;::ibp::FormRows rows;for(std::uint32_t i=0;i+1<n;++i)rows.push_back({{i,i%7},{i+1,(i+3)%7},{static_cast<std::uint32_t>(n),(i+5)%7}});
+    rows.push_back({{0,5},{static_cast<std::uint32_t>(n-1),6}});rows.push_back({{1,2},{3,4},{static_cast<std::uint32_t>(n+1),1}});
+    for(const auto prime:{::ibp::Word(2305843009213693951ULL),::ibp::Word(2305843009213693921ULL),::ibp::Word(1000003)}){
+      batch_agrees<8>(rows,n+2,7,{0,5,static_cast<::ibp::Column>(n-2)},prime,false,11,0,"a batch of eight points differs from the points alone (chain)");
+      batch_agrees<16>(rows,n+2,7,{0,5},prime,true,12,0,"a batch of sixteen points differs from the points alone (chain, complete rows)");
+      batch_agrees<3>(rows,n+2,7,{0,5},prime,false,13,0,"a batch of three points differs from the points alone (chain)");}}
+  // Random sparse equations, more than their rank; a lane where the first
+  // pivot vanishes is marked and the others are unaffected.
+  for(std::uint64_t round=0;round<6;++round){const std::size_t columns=300,forms=23;::ibp::FormRows rows;std::uint64_t seed=977+round;
+    for(std::uint32_t i=0;i<280;++i){std::set<std::uint32_t> where;const unsigned terms=2+(seed=modular::mix(seed))%6;
+      while(where.size()<terms)where.insert(static_cast<std::uint32_t>((seed=modular::mix(seed))%columns));
+      auto& row=rows.emplace_back();for(auto c:where)row.push_back({c,static_cast<std::uint32_t>(1+(seed=modular::mix(seed))%(forms-1))});}
+    rows.front().front().form=0;
+    std::vector<::ibp::Column> targets;for(::ibp::Column c=0;c<columns;c+=17)targets.push_back(c);
+    const auto prime=round%2?::ibp::Word(2305843009213693951ULL):ibp_solver::prime(3+round);
+    batch_agrees<8>(rows,columns,forms,targets,prime,round%3==0,round,0,"a batch of eight points differs from the points alone");
+    batch_agrees<8>(rows,columns,forms,targets,prime,round%3==0,round,0x24,"a batch does not mark the lanes where a pivot vanishes, or lets them change the others");
+    batch_agrees<5>(rows,columns,forms,targets,prime,round%3==1,round,0x2,"a batch of five points differs from the points alone");}
+  std::cout<<"Batches of sample points eliminate as their points do alone; vanishing pivots are marked\n";
+}
 int main(int argc,char** argv){try{
+  batches();
   ExactField field({"x","d"});Exact x(field,"x"),d(field,"d");
   auto raw=diffexp::ibp::quadratic_family(feynman::banana(1,{Rational(1),Rational(2)}),d);
   raw.physical[0].constant=x;diffexp::ibp::PropagatorBasis basis(raw);

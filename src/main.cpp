@@ -608,6 +608,9 @@ int main(int argc, char** argv) {
         // other and from ordinary_seconds.
         report["timings"].as_object()["endpoint_series_seconds"]=stats.endpoint_series_seconds;
         report["timings"].as_object()["endpoint_operator_seconds"]=stats.endpoint_operator_seconds;
+        report["timings"].as_object()["endpoint_gauge_seconds"]=stats.endpoint_gauge_seconds;
+        report["timings"].as_object()["endpoint_frame_seconds"]=stats.endpoint_frame_seconds;
+        report["timings"].as_object()["endpoint_observable_seconds"]=stats.endpoint_observable_seconds;
         report["timings"].as_object()["basis_selection_seconds"]=stats.basis_selection_seconds;
         report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
         report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
@@ -622,7 +625,9 @@ int main(int argc, char** argv) {
           <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
           <<"Child-window preflights "<<stats.demand_preflights<<"; local operator reuses "<<stats.local_operator_reuses<<".\n"
           <<"Basis scans "<<stats.basis_scans<<"; selections "<<stats.basis_selections<<".\n"
-          <<"Seconds: endpoint series "<<stats.endpoint_series_seconds<<", endpoint operators "<<stats.endpoint_operator_seconds
+          <<"Seconds: endpoint gauges "<<stats.endpoint_gauge_seconds<<", endpoint series "<<stats.endpoint_series_seconds
+          <<", endpoint frames "<<stats.endpoint_frame_seconds<<", endpoint observables "<<stats.endpoint_observable_seconds
+          <<", endpoint operators "<<stats.endpoint_operator_seconds
           <<", basis selection "<<stats.basis_selection_seconds<<", leaf "<<stats.leaf_seconds<<", ordinary transport "<<stats.ordinary_seconds<<".\n"
           <<"Centered chart actions "<<conditioning.centered_charts<<"; conditioning subdivisions "<<conditioning.conditioning_subdivisions<<".\n"
           <<"Taylor recurrences: "<<diffexp::rational_circuit::compact_expansions.load()<<" on compact numbers, "

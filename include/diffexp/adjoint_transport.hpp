@@ -342,37 +342,6 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
   ExactEpsilonMatrix transpose(d,std::vector<Exact>(d,vertices[0].constant(0)));
   for(unsigned i=0;i<d;++i)for(unsigned j=0;j<d;++j)transpose[i][j]=-matrix[j][i];
   rc::PoleCache pole_cache; // the roots of the denominator factors, found once for all legs
-  // The singular points that bound a chart, of a set of exact coefficients
-  // in the variable xi: the roots of their distinct denominators.
-  const auto singular_points=[&](const std::vector<const Exact*>& coefficients) {
-    std::set<std::string> met,seen;std::vector<B> roots;
-    for(const auto* coefficient:coefficients) {
-      // Epsilon-zero denominator geometry includes poles that cancel only in
-      // the leading numerator. Such poles still affect higher coefficients.
-      auto p=coefficient->denominator();
-      if(p.is_rational() || !met.insert(p.str()).second)continue;
-      auto valuation=*exact_epsilon_valuation(p,ei);
-      if(valuation)p=p/p.variable(ei).pow(valuation);
-      p=p.substitute(exact_point(p,ei,p.constant(0)));
-      const auto& names=p.variables();auto ii=std::find(names.begin(),names.end(),"I");
-      if(ii!=names.end())p=polynomial_norm(p,ii-names.begin(),p.constant(-1));
-      if(p.is_zero())throw std::domain_error("adjoint denominator vanishes on the selected complex sheet");
-      if(p.is_rational())continue;p=p/p.constant(p.numerator_terms()[0].coefficient);
-      if(seen.insert(p.str()).second){auto found=polynomial_roots(p,xi,bits);roots.insert(roots.end(),found.begin(),found.end());}
-    }
-    return roots;
-  };
-  // Every leg is an affine image of the same connection: its singular points
-  // are those of the connection in x, found once, at the chart parameter
-  // t=(x-from)/width of the leg. (The conjugate points, which a norm over I
-  // adds for a leg off the real axis, are as far from a real t as these.)
-  std::vector<B> singular_x;
-  {
-    std::vector<const Exact*> coefficients;
-    for(const auto& row:transpose)for(const auto& entry:row)if(!entry.is_zero())coefficients.push_back(&entry);
-    for(const auto& row:forcing)for(const auto& entry:row)if(!entry.is_zero())coefficients.push_back(&entry);
-    singular_x=singular_points(coefficients);
-  }
   for(unsigned leg=first_leg;leg+1<vertices.size();++leg) {
     const auto& from=vertices[leg];const auto& to=vertices[leg+1];if(from==to)continue;
     double center=leg==first_leg?first_parameter:0;
@@ -392,20 +361,24 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
       sources.push_back({static_cast<unsigned>(i*d+j),static_cast<unsigned>(r*d),0,width*normalized.substitute(point)});
     }
     std::vector<B> roots;
-    if(const auto start=rc::gaussian(from),step=rc::gaussian(width);start && step) {
-      // Chart lengths are doubles: sixty-four bits of a singular point decide them.
-      const auto ball=[](const rc::Scalar& value){return B::from_strings(value.real.str(),value.imaginary.str());};
-      const auto origin=ball(*start),scale=ball(*step);
-      for(const auto& point:singular_x) {
-        auto mapped=(point-origin)/scale;
-        acb_set_round(mapped.raw(),mapped.raw(),64);
-        roots.push_back(std::move(mapped));
+    // The poles of the leg from the exact denominators themselves: the norm
+    // over I of every distinct one, and its roots in the leg parameter. Used
+    // only where the compiled circuits do not already hold them (below).
+    const auto isolate_roots=[&] {
+      std::set<std::string> seen;roots.clear();
+      for(const auto* entries:{&block,&sources})for(const auto& e:*entries) {
+        // Epsilon-zero denominator geometry includes poles that cancel only in
+        // the leading numerator. Such poles still affect higher coefficients.
+        auto p=e.coefficient.denominator();auto valuation=*exact_epsilon_valuation(p,ei);
+        if(valuation)p=p/p.variable(ei).pow(valuation);
+        p=p.substitute(exact_point(p,ei,p.constant(0)));
+        const auto& names=p.variables();auto ii=std::find(names.begin(),names.end(),"I");
+        if(ii!=names.end())p=polynomial_norm(p,ii-names.begin(),p.constant(-1));
+        if(p.is_zero())throw std::domain_error("adjoint denominator vanishes on the selected complex sheet");
+        if(p.is_rational())continue;p=p/p.constant(p.numerator_terms()[0].coefficient);
+        if(seen.insert(p.str()).second){auto found=polynomial_roots(p,xi,bits);roots.insert(roots.end(),found.begin(),found.end());}
       }
-    } else {
-      std::vector<const Exact*> coefficients;
-      for(const auto* entries:{&block,&sources})for(const auto& e:*entries)coefficients.push_back(&e.coefficient);
-      roots=singular_points(coefficients);
-    }
+    };
     rc::Options limits;limits.max_cells=options.max_taylor_cells;
     limits.max_terms=options.max_circuit_terms;limits.max_operations=options.max_circuit_operations;
     limits.max_dimension=static_cast<unsigned>(r*d+1);
@@ -451,6 +424,30 @@ inline LaurentRows transport_rows(const ExactEpsilonMatrix& matrix,LaurentRows i
         batch_rows=(batch_rows+1)/2;arrange();
         if(stats)++stats->circuit_batch_reductions;
       }
+    }
+    {
+      // Chart geometry: every chart keeps its distance from the poles of the
+      // denominators at epsilon zero. The compiled circuits hold these poles
+      // already, for the denominators of the entries that reach the epsilon
+      // window: the roots of their irreducible real factors in x, isolated
+      // once for all legs (PoleCache) and carried to this leg's parameter.
+      // Isolating them again from the norm of every pulled-back denominator
+      // repeats that work on polynomials of twice the degree, leg after leg.
+      bool known=true;
+      std::map<std::pair<double,double>,std::vector<std::size_t>> placed;
+      for(const auto& circuit:circuits)for(const auto& denominator:circuit.data().denominators) {
+        if(denominator.one)continue;
+        if(!denominator.majorized){known=false;break;}
+        for(const auto& pole:denominator.poles) {
+          const std::pair<double,double> key{arf_get_d(arb_midref(acb_realref(pole.root.raw())),ARF_RND_NEAR),
+            arf_get_d(arb_midref(acb_imagref(pole.root.raw())),ARF_RND_NEAR)};
+          auto& same=placed[key];bool repeated=false;
+          for(auto index:same)if(acb_equal(roots[index].raw(),pole.root.raw())){repeated=true;break;}
+          if(repeated)continue;
+          same.push_back(roots.size());roots.push_back(pole.root);
+        }
+      }
+      if(!known)isolate_roots();
     }
     // The homogeneous block alone, compiled when a chart first needs its map.
     std::optional<rc::Compiled> map_circuit;

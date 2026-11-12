@@ -37,10 +37,15 @@
 #include "diffexp/denominator_factors.hpp"
 #include "diffexp/recursion_graph.hpp"
 #include "diffexp/recursion_physical_basis.hpp"
+#include "diffexp/artifact_store.hpp"
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
 
 namespace diffexp::moving_poles {
 using Matrix = ExactEpsilonMatrix;
+struct Script;
 struct Options {
   // Steps in all, and per factor: a relation of order n takes n steps.
   std::size_t max_steps = 64, max_factor_steps = 8;
@@ -53,8 +58,18 @@ struct Options {
   // integral with a pole at the factor at its last max_positions positions.
   std::size_t max_positions = 2, max_integrals = 12;
   bool closure_rows = true;
+  // A factor whose removal leaves the connection more than this many times
+  // larger (in characters) is kept. Transport and the exact endpoint series
+  // cost in proportion to the size of the connection, and a moving pole
+  // costs a detour: a closure row in the residue field of a factor of high
+  // degree in x can multiply the size by dozens. Zero: no bound.
+  double max_growth = 4;
   // Optional restriction of the masters an integral may replace.
   std::function<bool(const ibp::Integral &, std::size_t)> admissible;
+  // The outcome of an earlier search on the same input: only its steps are
+  // tried and the factors it left in place are not attempted. The steps are
+  // applied and checked like any others; see remove_cached.
+  const Script *script = nullptr;
 };
 // A coordinate row in the ORIGINAL masters, e.g. the exact reduction of an
 // integral (then named; empty for a row that is no single integral).
@@ -78,9 +93,18 @@ struct Result {
   std::vector<Step> steps;
   // Target factors left in place: nothing tried cleared them.
   std::vector<std::string> remaining;
+  // Of those, the factors whose removal was found and undone for its size
+  // (Options::max_growth).
+  std::size_t size_refusals = 0;
   bool budget_reached = false;
   double seconds = 0;
   bool changed() const { return !steps.empty(); }
+};
+// What a completed search decided: enough to repeat it without the search.
+struct Script {
+  std::vector<Step> steps;
+  std::vector<std::string> remaining;
+  std::size_t size_refusals = 0;
 };
 inline std::size_t characters(const Matrix &matrix) {
   std::size_t count = 0;
@@ -427,6 +451,12 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
       break;
     }
     const auto f = catalogue.factors()[*factor].polynomial;
+    const auto factor_name = f.str();
+    if (options.script && std::find(options.script->remaining.begin(), options.script->remaining.end(), factor_name) !=
+                              options.script->remaining.end()) {
+      abandoned.insert(*factor);
+      continue;
+    }
     // A factor is cleared completely or not touched: steps that do not end
     // (a singular point that is not apparent, or a relation longer than the
     // step bound) are undone.
@@ -434,6 +464,10 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
     const auto steps_before = result.steps.size();
     const auto weight_before = result.after;
     const auto characters_before = result.characters;
+    const auto too_large = [&] {
+      return options.max_growth > 0 &&
+             static_cast<double>(result.characters) > options.max_growth * static_cast<double>(characters_before);
+    };
     for (std::size_t local = 0; local < options.max_factor_steps; ++local) {
       const auto [order, row] = highest(*factor);
       if (!order)
@@ -454,6 +488,15 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
       const auto attempt = [&](const std::vector<Exact> &q, std::size_t replaced, const std::string &source, bool closure,
                                const ibp::Integral &named = {}) {
         ++trials;
+        if (options.script) {
+          // Only the step the earlier search took at this point.
+          const auto index = result.steps.size();
+          if (index >= options.script->steps.size())
+            return;
+          const auto &expected = options.script->steps[index];
+          if (expected.factor != factor_name || expected.replaced != replaced || expected.source != source)
+            return;
+        }
         auto next = basis;
         replace_row(next, replaced, q, xi);
         const auto weight = weigh(next.connection);
@@ -533,12 +576,16 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
       }
       if (!best)
         break;
-      result.steps.push_back({f.str(), best->source, best->replaced, order, trials, best->integral});
+      result.steps.push_back({factor_name, best->source, best->replaced, order, trials, best->integral});
       basis = std::move(best->basis);
       result.after = best->weight;
       result.characters = best->characters;
+      if (too_large())
+        break;
     }
-    if (highest(*factor).first) {
+    if (highest(*factor).first || too_large()) {
+      if (!highest(*factor).first)
+        ++result.size_refusals;
       basis = snapshot;
       result.steps.resize(steps_before);
       result.after = weight_before;
@@ -557,6 +604,108 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
   return result;
 }
 
+// remove(), with the outcome of the search kept in `directory` (nothing is
+// kept if it is empty). The search tries a dozen exchanges per factor on the
+// whole connection, and every process that prepares the same level (each
+// epsilon sample of a family) would repeat it. A stored outcome names the
+// steps that were taken and the factors that were left in place; they are
+// applied again by the same code, so the result is the one of the search or,
+// if anything about it differs, the search is run. `tag` names what the
+// options cannot be hashed for (Options::admissible).
+inline Result remove_cached(const std::filesystem::path &directory, const std::string &tag, const Matrix &connection,
+                            std::size_t xi, std::size_t ei, const std::vector<Row> &integrals, Options options) {
+  namespace json = boost::json;
+  if (directory.empty() || options.script)
+    return remove(connection, xi, ei, integrals, options);
+  std::string text = "moving-poles-script-v1|" + tag + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," +
+                     std::to_string(options.max_steps) + "," + std::to_string(options.max_factor_steps) + "," +
+                     std::to_string(options.fixed_points) + "," + std::to_string(options.max_positions) + "," +
+                     std::to_string(options.max_integrals) + "," + std::to_string(options.closure_rows) + "," +
+                     std::to_string(options.max_growth) + "|";
+  for (const auto &name : connection.at(0).at(0).variables())
+    text += name + ",";
+  for (const auto &row : connection)
+    for (const auto &value : row)
+      text += value.is_zero() ? std::string(";") : value.str() + ";";
+  for (const auto &row : integrals) {
+    text += "|" + row.label + ":";
+    for (const auto &value : row.coordinates)
+      text += value.is_zero() ? std::string(";") : value.str() + ";";
+  }
+  const auto file = directory / (artifacts::detail::sha256(text) + ".json");
+  const auto same = [](const Result &result, const Script &script) {
+    if (result.steps.size() != script.steps.size() || result.remaining != script.remaining || result.budget_reached)
+      return false;
+    for (std::size_t i = 0; i < result.steps.size(); ++i)
+      if (result.steps[i].factor != script.steps[i].factor || result.steps[i].replaced != script.steps[i].replaced ||
+          result.steps[i].source != script.steps[i].source)
+        return false;
+    return true;
+  };
+  try {
+    std::ifstream in(file);
+    if (in) {
+      const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      const auto record = json::parse(bytes);
+      const auto &object = record.as_object();
+      Script script;
+      for (const auto &item : object.at("steps").as_array()) {
+        const auto &step = item.as_object();
+        Step value{std::string(step.at("factor").as_string()), std::string(step.at("source").as_string()),
+                   static_cast<std::size_t>(step.at("replaced").to_number<std::uint64_t>()),
+                   static_cast<unsigned>(step.at("order").to_number<std::uint64_t>()),
+                   static_cast<std::size_t>(step.at("trials").to_number<std::uint64_t>()), {}};
+        for (const auto &power : step.at("integral").as_array())
+          value.integral.push_back(static_cast<int>(power.to_number<std::int64_t>()));
+        script.steps.push_back(std::move(value));
+      }
+      for (const auto &factor : object.at("remaining").as_array())
+        script.remaining.emplace_back(factor.as_string());
+      script.size_refusals = static_cast<std::size_t>(object.at("size_refusals").to_number<std::uint64_t>());
+      auto scripted = options;
+      scripted.script = &script;
+      auto result = remove(connection, xi, ei, integrals, scripted);
+      if (same(result, script)) {
+        for (std::size_t i = 0; i < result.steps.size(); ++i)
+          result.steps[i].trials = script.steps[i].trials;
+        result.size_refusals = script.size_refusals;
+        return result;
+      }
+    }
+  } catch (const std::exception &) {
+    // An unreadable or stale record: the search decides.
+  }
+  auto result = remove(connection, xi, ei, integrals, options);
+  if (result.budget_reached)
+    return result;
+  try {
+    json::array steps, remaining;
+    for (const auto &step : result.steps) {
+      json::array integral;
+      for (int power : step.integral)
+        integral.push_back(power);
+      steps.push_back(json::object{{"factor", step.factor}, {"source", step.source}, {"replaced", step.replaced},
+                                   {"order", step.order}, {"trials", step.trials}, {"integral", std::move(integral)}});
+    }
+    for (const auto &factor : result.remaining)
+      remaining.emplace_back(factor);
+    const auto bytes = json::serialize(json::object{{"schema", "DiffExp.MovingPoleScript/v1"}, {"steps", std::move(steps)},
+                                                    {"remaining", std::move(remaining)}, {"size_refusals", result.size_refusals}});
+    std::filesystem::create_directories(directory);
+    const auto temporary = directory / (file.filename().string() + "." + std::to_string(::getpid()) + ".tmp");
+    {
+      std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+      out << bytes;
+      if (!out)
+        throw std::runtime_error("moving-pole record not written");
+    }
+    std::filesystem::rename(temporary, file);
+  } catch (const std::exception &) {
+    // The record is a convenience; the result does not depend on it.
+  }
+  return result;
+}
+
 // The internal bases of a prepared recursion in which the moving poles of
 // every level are removed, keyed by zero-based depth as
 // recursion::NumericalOptions::physical_bases expects them; levels without
@@ -565,7 +714,7 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
 // its moving poles as ordinary ones. Shift the result with shift_epsilon.
 using Report = std::function<void(std::size_t, const Result &)>;
 inline std::map<std::size_t, recursion::PhysicalBasisTransform> bases(const recursion::Graph &graph,
-    const Options &options = {}, const Report &report = {}) {
+    const Options &options = {}, const Report &report = {}, const std::filesystem::path &directory = {}) {
   if (graph.specialised)
     throw std::invalid_argument("moving poles are found before a recursion is specialised to a numeric dimension");
   const auto &names = graph.dimension.variables();
@@ -577,7 +726,8 @@ inline std::map<std::size_t, recursion::PhysicalBasisTransform> bases(const recu
     const auto &node = graph.nodes[depth];
     if (node.scalar_leaf || node.closure.matrix.empty())
       continue;
-    auto result = remove(node.closure.matrix, x - names.begin(), eps - names.begin(), cached_integrals(node.closure), options);
+    auto result = remove_cached(directory, "bases", node.closure.matrix, x - names.begin(), eps - names.begin(),
+                                cached_integrals(node.closure), options);
     if (result.changed())
       recursion::verify_physical_basis(result.transform, node.closure.matrix, x - names.begin());
     if (report)
@@ -595,7 +745,7 @@ inline std::map<std::size_t, recursion::PhysicalBasisTransform> bases(const recu
 // one transformed by an exact, verified change of basis; the IBP witnesses of
 // the old masters do not apply to it and are dropped.
 inline level::Result exchange(level::Result level, std::size_t xi, std::size_t ei, Options options = {},
-                              Result *report = nullptr) {
+                              Result *report = nullptr, const std::filesystem::path &directory = {}) {
   if (!level.success || level.matrix.empty())
     return level;
   options.closure_rows = false;
@@ -609,7 +759,15 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
   options.admissible = [&](const ibp::Integral &integral, std::size_t position) {
     return !integral.empty() && physical(integral) == physical(masters[position]);
   };
-  auto result = remove(level.matrix, xi, ei, cached_integrals(level), options);
+  // The admissible positions follow from the masters, which the record names.
+  std::string tag = "exchange";
+  for (const auto &master : masters) {
+    tag += "[";
+    for (int power : master)
+      tag += std::to_string(power) + ",";
+    tag += "]";
+  }
+  auto result = remove_cached(directory, tag, level.matrix, xi, ei, cached_integrals(level), options);
   if (result.changed()) {
     recursion::verify_physical_basis(result.transform, level.matrix, xi);
     if (!level.target_rows.empty())

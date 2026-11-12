@@ -145,6 +145,10 @@ struct NumericalStatistics {
   // Wall time of the phases that precede transport. basis_selection_seconds
   // covers discovery, screening and installation, not the original plan.
   double endpoint_series_seconds=0,endpoint_operator_seconds=0,basis_selection_seconds=0,leaf_seconds=0;
+  // The rest of an endpoint's exact preparation: the gauge to Fuchsian form,
+  // the frames (the series in the masters' coordinates), and the projection
+  // and regulated integration of every observable row.
+  double endpoint_gauge_seconds=0,endpoint_frame_seconds=0,endpoint_observable_seconds=0;
   // Local-operator coefficients below a child component's structural window:
   // rounding noise replaced by the exact zero, and (never expected) values
   // excluding zero, which are kept together with their wider child demand.
@@ -452,6 +456,35 @@ class Evaluator {
       basis_store_=std::make_unique<artifacts::Store>(options_.basis_cache_directory,options_.basis_cache_max_bytes);
   }
   const NumericalStatistics& statistics()const{return statistics_;}
+  // The next evaluation runs at `bits` of working precision. Every number
+  // computed so far is dropped; the exact part of the endpoint plans (series,
+  // frames, functionals, overlaps, internal bases, contour sides) is kept, so
+  // the evaluation repeats the endpoint operators, the transports and the
+  // leaf, not the exact preparation.
+  void raise_precision(slong bits) {
+    if(bits<=options_.working_bits)return;
+    if(bits>1000000)throw std::invalid_argument("recursive numerical options or finite budgets: working precision must be 64..1000000 bits");
+    options_.working_bits=bits;
+    drop_numbers();
+  }
+  // The next evaluation admits a Taylor tail of 2^-bits per chart.
+  void raise_tail(unsigned bits) {
+    if(bits<=options_.adjoint.truncation_bits)return;
+    options_.adjoint.truncation_bits=bits;
+    drop_numbers();
+  }
+  unsigned tail_bits()const{return options_.adjoint.truncation_bits;}
+  void drop_numbers() {
+    const std::function<void(Plan&)> reset=[&](Plan& prepared) {
+      prepared.lower_operator.reset();prepared.upper_operator.reset();prepared.local_operator.reset();
+      for(auto* endpoint:{&prepared.lower,&prepared.upper}){endpoint->inverse.reset();endpoint->inverse_point.reset();}
+      if(prepared.pullback_base)reset(*prepared.pullback_base);
+    };
+    for(auto& prepared:plans_)if(prepared)reset(*prepared);
+    for(auto& value:cache_)value.reset();
+    for(auto& expression:expressions_)expression.reset();
+  }
+  slong working_bits()const{return options_.working_bits;}
   const std::vector<BasisSelection>& basis_selections()const{return basis_selections_;}
   // Snapshot a completed transform together with its immutable leaf source.
   // Copying the transform prevents a later refinement (or caller edit) from
@@ -896,7 +929,7 @@ class Evaluator {
     return result;
   }
   Endpoint endpoint(const Matrix& matrix,const Matrix& diagonal,const Matrix& inverse_diagonal,const Node& node,bool upper,std::size_t depth,int high) {
-    auto fuchs=fuchsify::prepare(matrix,xi_,options_.fuchsification);
+    auto fuchs=[&]{Seconds timer{statistics_.endpoint_gauge_seconds};return fuchsify::prepare(matrix,xi_,options_.fuchsification);}();
     if(!fuchs.success)throw std::domain_error("recursive endpoint fuchsification unsupported: "+fuchs.reason);
     const std::string side=upper?"upper":"lower";
     // The endpoint that carries the boundary needs its fundamental series.
@@ -918,6 +951,7 @@ class Evaluator {
       Seconds timer{statistics_.endpoint_series_seconds};++statistics_.endpoint_series_built;
       return AffineFrobeniusSeries::prepare(fuchs.matrix,xi_,ei_,options_.endpoint_order,endpoint_options);
     }();
+    std::optional<Seconds> phase;phase.emplace(statistics_.endpoint_frame_seconds);
     auto physical_gauge=fuchsify::detail::multiply(diagonal,fuchs.transform);
     // P*(D*T*F)^-1*D = P*(T*F)^-1: D stays in the physical observable P and
     // is cancelled from the receiving frame before epsilon normalization and
@@ -935,6 +969,7 @@ class Evaluator {
     const auto collect=[&](const Matrix& coefficients){for(const auto& row:coefficients)for(const auto& c:row)if(!c.is_zero())result.clearance_coefficients.push_back(c);};
     collect(matrix);collect(fuchs.matrix);collect(fuchs.transform);collect(fuchs.inverse_transform);collect(physical_gauge);
     const auto x=graph_.dimension.variable(xi_);
+    phase.emplace(statistics_.endpoint_observable_seconds);
     for(std::size_t i=0;i<node.operations.size();++i) {
       const auto& op=node.operations[i];
       if(op.operation==feynman::Operation::Direct ||

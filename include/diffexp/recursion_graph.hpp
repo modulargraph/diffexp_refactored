@@ -50,13 +50,15 @@ struct Options {
   // combination of the original propagators (critical_points.hpp). It is
   // cheap, so every pair of every level is counted; where it answers, it
   // decides and count_masters is not asked.
-  // The last argument is the seconds one count may take. The first pair is
+  // The last arguments are the seconds one count may take and whether it was
+  // given up for lack of time (now or, remembered, by an earlier run) rather
+  // than failing for another reason. The first pair is
   // counted alone within selection_seconds. If it does not finish, the level
   // merges the first pair at once: the count only ranks the candidates and
   // is not worth more than that. If it does, the other pairs are counted on
   // selection_threads threads (0: one per hardware thread), each within
   // selection_seconds plus four times what the first pair took.
-  std::function<std::optional<std::size_t>(const std::vector<std::vector<Rational>>&,unsigned,unsigned,unsigned)> count_critical_points;
+  std::function<std::optional<std::size_t>(const std::vector<std::vector<Rational>>&,unsigned,unsigned,unsigned,bool&)> count_critical_points;
   unsigned selection_seconds=10,selection_threads=0;
   // Told what the selection of a level is doing and how it ended.
   std::function<void(const std::string&)> selection_progress;
@@ -394,11 +396,12 @@ inline Graph prepare(const feynman::ExampleFamily& family,
       if(pairs.size()>1) {
         const auto since=[](std::chrono::steady_clock::time_point t){return std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();};
         const auto started=std::chrono::steady_clock::now();
-        try{counts[0]=options.count_critical_points(composition,pairs[0].first,pairs[0].second,options.selection_seconds);}catch(const std::exception&){}
+        bool gave_up=false;
+        try{counts[0]=options.count_critical_points(composition,pairs[0].first,pairs[0].second,options.selection_seconds,gave_up);}catch(const std::exception&){}
         const double first=since(started);
-        // A count that fails at once is not a matter of time: as before,
-        // the eliminations below are then asked.
-        if(!counts[0] && first>=0.5*options.selection_seconds) {
+        // A count that fails for another reason is not a matter of time: as
+        // before, the eliminations below are then asked.
+        if(!counts[0] && gave_up) {
           say("the masters of the first merge were not counted within "+std::to_string(options.selection_seconds)+" s ("+std::to_string(lines)+
             " propagators); merging the first pair without comparing the other "+std::to_string(pairs.size()-1));
           // Counting by eliminations costs far more than what just failed.
@@ -410,7 +413,7 @@ inline Graph prepare(const feynman::ExampleFamily& family,
             " s each (the first pair: "+std::to_string(*counts[0])+" masters)");
           std::atomic<std::size_t> next{1};
           const auto work=[&]{for(std::size_t i;(i=next++)<pairs.size();)
-            try{counts[i]=options.count_critical_points(composition,pairs[i].first,pairs[i].second,each);}catch(const std::exception&){}};
+            try{bool late=false;counts[i]=options.count_critical_points(composition,pairs[i].first,pairs[i].second,each,late);}catch(const std::exception&){}};
           {
             std::vector<std::jthread> workers;
             for(unsigned t=1;t<threads;++t)workers.emplace_back(work);

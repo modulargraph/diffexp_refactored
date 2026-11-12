@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
               <<stats.largest_integrals<<" integrals, peak pivot fill "<<stats.peak_fill<<"; eliminations: "<<stats.full_solves<<" from nothing ("<<stats.full_solve_seconds<<" s), "
               <<stats.continued_solves<<" continued ("<<stats.continued_equations<<" equations), "<<stats.reused_solves<<" reused ("<<stats.continued_solve_seconds<<" s), "
               <<stats.selected_solves<<" of a subset ("<<stats.selected_solve_seconds<<" s), "<<stats.early_solves<<" started ahead ("<<stats.early_solves_used<<" used); probes "<<stats.probes
-              <<", trace replays "<<stats.trace_replays<<" ("<<stats.trace_replay_seconds<<" s; learning "<<stats.trace_learning_seconds<<" s), seed widenings "<<stats.seed_widenings
+              <<", trace replays "<<stats.trace_replays<<" ("<<stats.trace_replay_seconds<<" s; learning "<<stats.trace_learning_seconds<<" s; "<<stats.trace_instructions<<" instructions from "<<stats.trace_rows<<" equations), seed widenings "<<stats.seed_widenings
               <<"; process CPU "<<usage.ru_utime.tv_sec+usage.ru_stime.tv_sec<<" s, peak RSS "<<usage.ru_maxrss/1024<<" MiB\n";}ibp_statistics.full_solve_seconds+=stats.full_solve_seconds;ibp_statistics.trace_learning_seconds+=stats.trace_learning_seconds;ibp_statistics.trace_replay_seconds+=stats.trace_replay_seconds;ibp_statistics.templates+=stats.templates;ibp_statistics.full_solves+=stats.full_solves;ibp_statistics.trace_replays+=stats.trace_replays;ibp_statistics.trace_fallbacks+=stats.trace_fallbacks;ibp_statistics.probes+=stats.probes;ibp_statistics.equations+=stats.equations;ibp_statistics.generation_seconds+=stats.generation_seconds;ibp_statistics.elimination_seconds+=stats.elimination_seconds;
           ibp_statistics.selected_solves+=stats.selected_solves;ibp_statistics.selected_solve_seconds+=stats.selected_solve_seconds;ibp_statistics.selection_fallbacks+=stats.selection_fallbacks;ibp_statistics.trace_disabled+=stats.trace_disabled;
           ibp_statistics.batched_replays+=stats.batched_replays;ibp_statistics.early_solves+=stats.early_solves;ibp_statistics.early_solves_used+=stats.early_solves_used;ibp_statistics.seed_widenings+=stats.seed_widenings;
@@ -339,8 +339,8 @@ int main(int argc, char** argv) {
         // From the graph where Singular is installed: every pair, in seconds.
         if(diffexp::critical_points::available()) {
           auto physical=configuration.family.momenta;physical.lines.resize(configuration.family.physical_count);
-          options.count_critical_points=[physical,directory=cache/"critical-points"](const auto& lines,unsigned left,unsigned right,unsigned seconds) {
-            return diffexp::critical_points::count(physical,lines,left,right,directory,seconds);
+          options.count_critical_points=[physical,directory=cache/"critical-points"](const auto& lines,unsigned left,unsigned right,unsigned seconds,bool& gave_up) {
+            return diffexp::critical_points::count(physical,lines,left,right,directory,seconds,&gave_up);
           };
           options.selection_threads=ibp_threads;
           options.selection_progress=[&progress](const std::string& text){progress<<text<<"\n"<<std::flush;};

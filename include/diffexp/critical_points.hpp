@@ -151,7 +151,8 @@ inline bool available() {
 // is the time within which it did not finish: a count that was given up is
 // not waited for again by a later run unless that run allows more time.
 inline std::optional<std::size_t> count(const feynman::Family &family, const std::vector<std::vector<Rational>> &lines, unsigned left, unsigned right,
-                                        const std::filesystem::path &cache, unsigned seconds = 300) {
+                                        const std::filesystem::path &cache, unsigned seconds = 300, bool *gave_up = nullptr) {
+  if (gave_up) *gave_up = false;
   if (!available()) return std::nullopt;
   std::string text;
   try { text = script(family, lines, left, right); } catch (const std::exception &) { return std::nullopt; }
@@ -165,7 +166,10 @@ inline std::optional<std::size_t> count(const feynman::Family &family, const std
   {
     std::ifstream stored(given_up);
     unsigned tried = 0;
-    if (stored >> tried && tried >= seconds) return std::nullopt;
+    if (stored >> tried && tried >= seconds) {
+      if (gave_up) *gave_up = true;
+      return std::nullopt;
+    }
   }
   const auto began = std::chrono::steady_clock::now();
   const auto reply = run(text, cache, seconds);
@@ -173,6 +177,7 @@ inline std::optional<std::size_t> count(const feynman::Family &family, const std
     if (std::chrono::steady_clock::now() - began >= std::chrono::seconds(seconds)) {
       std::ofstream stored(given_up);
       stored << seconds << '\n';
+      if (gave_up) *gave_up = true;
     }
     return std::nullopt;
   }
@@ -185,6 +190,6 @@ inline std::optional<std::size_t> count(const feynman::Family &family, const std
 }
 #else
 inline bool available() { return false; }
-inline std::optional<std::size_t> count(const feynman::Family &, const std::vector<std::vector<Rational>> &, unsigned, unsigned, const std::filesystem::path &, unsigned = 300) { return std::nullopt; }
+inline std::optional<std::size_t> count(const feynman::Family &, const std::vector<std::vector<Rational>> &, unsigned, unsigned, const std::filesystem::path &, unsigned = 300, bool * = nullptr) { return std::nullopt; }
 #endif
 } // namespace diffexp::critical_points

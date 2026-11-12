@@ -78,6 +78,8 @@ struct Statistics {
   // The largest system eliminated: its equations and integrals, and the most
   // entries the pivot rows of one elimination held.
   std::size_t largest_system=0,largest_integrals=0,peak_fill=0;
+  // The longest arithmetic trace replayed and the most equations it came from.
+  std::size_t trace_instructions=0,trace_rows=0;
 };
 // Descending primes below 2^61; two beyond the reconstruction primes validate.
 inline constexpr unsigned prime_count=64;
@@ -366,7 +368,7 @@ class Sampler {
             catch(const std::length_error&){learned.disabled=true;}
             catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
             if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;if(options_.progress)options_.progress("arithmetic trace exceeds its budget at this prime; continuing with primal elimination");}
-            else if(learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
+            else if(stats_.trace_instructions=std::max(stats_.trace_instructions,learned.trace->instructions()),stats_.trace_rows=std::max(stats_.trace_rows,selection().size());learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
             learned.checked=false;stats_.trace_learning_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-learning_begin).count();}
         }
       }

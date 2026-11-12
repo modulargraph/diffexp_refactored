@@ -206,7 +206,7 @@ struct Lift {
   // this determinant always contains; held-out primes validate the result as
   // they do any other.
   bool together(std::vector<fmpq>& out)const {
-    constexpr std::size_t most=11;constexpr unsigned rounds=8,margin=16;
+    constexpr std::size_t most=11;constexpr unsigned margin=16;
     Integer d(1),a,half,bound,factor;fmpz_fdiv_q_2exp(half.value,modulus.value,1);
     // M^(11/12) / 2^16: what the largest lattice used always contains, less 16 bits.
     fmpz_pow_ui(bound.value,modulus.value,most);fmpz_root(bound.value,bound.value,most+1);fmpz_fdiv_q_2exp(bound.value,bound.value,margin);
@@ -218,8 +218,9 @@ struct Lift {
     // A denominator found from some coefficients need not clear the others:
     // those it leaves large give the factor that is missing.
     auto large=rescale();
-    for(unsigned round=0;!large.empty();++round) {
-      if(round==rounds)return false;
+    // Every round multiplies d by a factor above one, and d stays below
+    // the bound: that ends the loop.
+    while(!large.empty()) {
       const auto k=static_cast<slong>(std::min(most,large.size()));
       fmpz_mat_t basis;fmpz_mat_init(basis,k+1,k+1);
       for(slong j=0;j<k;++j){fmpz_set(fmpz_mat_entry(basis,j,j),modulus.value);fmpz_mod(fmpz_mat_entry(basis,k,j),scaled[large[j]].value,modulus.value);}

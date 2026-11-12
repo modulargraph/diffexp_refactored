@@ -152,7 +152,7 @@ Transport time is linear in the number of epsilon orders carried.
   of them can be exchanged and the levels below can follow. The weights
   between the levels then have no poles to cancel: the expanded four-loop
   banana carries 30.6 instead of 73.3 million products and its sample
-  keeps seven more digits, for a preparation of 15 instead of 2.4 s
+  keeps seven more digits, for a preparation of 14 instead of 1.9 s
   ([finite masters](#finite-masters)).
 - **Merge selection** (`--merge-selection auto`). Which two propagators a
   level merges decides how large the levels below become. Candidates are
@@ -325,9 +325,16 @@ level below:
   before: the double box with its three lowest levels partly exchanged
   21.0 to 33.9 million products, the banana with only its first level
   exchanged 73 to 125 million.
-- The finished connection may have no moving pole and no epsilon pole
-  beyond a diagonal shear that the level's own connection does not have.
-  Finite integrals can be linearly dependent at single points: on the
+- The finished connection may have no higher pole in epsilon than the
+  level's own, and neither may the reductions of the requested integrals.
+  Finite integrals can be linearly dependent at epsilon = 0, and then the
+  poles are in the weights: in the massive pentagon in four dimensions a
+  tadpole with two dots is epsilon times the tadpole, the finite basis has
+  simple poles in both and the rows of its first level carry the orders
+  0..8 instead of 0..3 (0.96 to 1.85 million products). Such a level keeps
+  its masters.
+- Nor may it have a moving pole that the level's own connection does not
+  have. Finite integrals can also be dependent at single points: on the
   lowest level of the double box `[5,0]`, `[3,2]`, `[3,3]` have a moving
   pole that reaches x = 1 at epsilon = 0, and that level has no endpoint
   series then. A new singular point in x alone is admitted. It is apparent
@@ -351,10 +358,10 @@ levels 1, 2, 3.
 
 | Expanded run | Products, millions | Windows | CPU s (first run) | Preparation s |
 | --- | --- | --- | --- | --- |
-| kite | 3.38 -> 1.56 | 0..5, 0..3, 0..2 -> 0..2, 0..1, 0..0 | 1.1 -> 0.9 (1.4 -> 1.1) | 0.3 -> 0.4 |
-| three-loop banana | 4.27 -> 0.74 | 0..4, -2..2 -> 0..1, 0..0 | (1.4 -> 1.8) | 0.4 -> 1.0 |
-| four-loop banana | 73.3 -> 30.6 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 20.3 -> 11.2 (22.2 -> 25.6) | 2.4 -> 14.8 |
-| four-loop banana, unequal masses | 130.4 -> 36.7 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 34.9 -> 16.3 (40.0 -> 95.2) | 5.2 -> 79.5 |
+| kite | 3.38 -> 1.56 | 0..5, 0..3, 0..2 -> 0..2, 0..1, 0..0 | 1.2 -> 0.9 (1.4 -> 1.3) | 0.4 -> 0.5 |
+| three-loop banana | 4.27 -> 1.00 | 0..4, -2..2 -> 0..1, 0..0 | (1.4 -> 1.6) | 0.2 -> 0.8 |
+| four-loop banana | 73.3 -> 30.6 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 20.2 -> 11.0 (22.2 -> 25.2) | 1.9 -> 14.3 |
+| four-loop banana, unequal masses | 130.4 -> 36.7 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 36.1 -> 16.9 (41.8 -> 96.6) | 5.8 -> 79.6 |
 
 | Sample at 1/400, 12 leaf digits | Cancellation, bits | Error at the default tail | Products, millions | CPU s |
 | --- | --- | --- | --- | --- |
@@ -369,10 +376,10 @@ instead of 3.3e-15 in the same 31 s; there the fit, not the samples,
 limits the digits. The gain is in the numerical phase: the expanded
 runs carry fewer epsilon orders, and a sample keeps seven more digits at
 the same tail and the same cost. The price is in the exact preparation,
-which reduces integrals with up to three more dots: six times as long for
-the four-loop banana and fifteen times with unequal masses, where 59 of the
-79 s are the two candidate reductions of the first level and 7 s the change
-of basis. The first run of the unequal banana is therefore slower than
+which reduces integrals with up to three more dots: seven times as long
+for the four-loop banana and fourteen times with unequal masses, where 59
+of the 80 s are the two candidate reductions of the first level and 7 s
+the change of basis. The first run of the unequal banana is therefore slower than
 before, and every later one twice as fast.
 
 The planar double box and the three-loop family are unchanged, to the last

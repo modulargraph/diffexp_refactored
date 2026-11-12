@@ -166,6 +166,16 @@ inline std::vector<ibp::Integral> convergent_integrals(const Convergence &conver
   return out;
 }
 
+// The highest pole in epsilon of the entries of a matrix (0 without one).
+inline long epsilon_pole(const moving_poles::Matrix &matrix, std::size_t ei) {
+  long pole = 0;
+  for (const auto &row : matrix)
+    for (const auto &value : row)
+      if (!value.is_zero())
+        pole = std::max(pole, -static_cast<long>(*exact_epsilon_valuation(value, ei)));
+  return pole;
+}
+
 struct Step {
   std::size_t replaced;
   ibp::Integral from, to;
@@ -173,6 +183,9 @@ struct Step {
 struct Report {
   std::size_t masters = 0, divergent_before = 0, divergent_after = 0, candidates = 0, reductions = 0;
   std::size_t characters_before = 0, characters_after = 0;
+  // The highest pole in epsilon of the connection and of the rows of the
+  // level's sources, in the level's own masters and in the chosen ones.
+  long connection_pole_before = 0, connection_pole_after = 0, source_pole_before = 0, source_pole_after = 0;
   std::vector<Step> steps;
   double seconds = 0, reduction_seconds = 0;
   bool recorded = false;
@@ -241,6 +254,12 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
     }
   };
   const bool checked = !script && guarded, guard = checked && sheared(level.matrix);
+  // Finite integrals whose values at epsilon = 0 are linearly dependent
+  // still give a connection with poles in epsilon, shearable or not, and
+  // weights with poles: such a basis carries more epsilon orders than the
+  // level's own (massive pentagon in four dimensions, where a tadpole with
+  // two dots is epsilon times the tadpole: 0.96 -> 1.85 million products).
+  const long original_pole = checked ? epsilon_pole(level.matrix, ei) : 0;
   // Unchecked and all or none: the steps are found first, without the
   // connection, and taken only if they exchange every failing master.
   const bool light = !script && !guarded && !finish_incomplete;
@@ -277,7 +296,7 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
     if (checked) {
       auto next = basis;
       moving_poles::replace_row(next, k, q, xi);
-      if ((guard && !sheared(next.connection)) || new_moving_pole(next.connection))
+      if ((guard && !sheared(next.connection)) || new_moving_pole(next.connection) || epsilon_pole(next.connection, ei) > original_pole)
         return false;
       basis = std::move(next);
     } else if (light) {
@@ -364,9 +383,10 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
 }
 
 // Whether `connection` has only the moving singular points of `original`
-// (without `apparent_points`: only its singular points in x as well) and no
-// epsilon poles beyond a diagonal shear if `original` has none: the
-// conditions exchange() imposes per step, on a finished basis.
+// (without `apparent_points`: only its singular points in x as well), no
+// epsilon poles beyond a diagonal shear if `original` has none and no higher
+// pole in epsilon: the conditions exchange() imposes per step, on a finished
+// basis.
 inline bool regular(const moving_poles::Matrix &original, const moving_poles::Matrix &connection, std::size_t xi, std::size_t ei,
                     bool apparent_points = true) {
   const auto sheared = [&](const moving_poles::Matrix &matrix) {
@@ -377,7 +397,7 @@ inline bool regular(const moving_poles::Matrix &original, const moving_poles::Ma
       return false;
     }
   };
-  if (sheared(original) && !sheared(connection))
+  if ((sheared(original) && !sheared(connection)) || epsilon_pole(connection, ei) > epsilon_pole(original, ei))
     return false;
   denominator_factors::Catalogue catalogue(xi, ei);
   std::set<std::size_t> singular;
@@ -473,7 +493,16 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
       level.target_witnesses.resize(sources.size());
     return level;
   };
+  const long connection_pole = epsilon_pole(closure.matrix, ei);
+  moving_poles::Matrix source_rows(closure.target_rows.begin(),
+                                   closure.target_rows.begin() + static_cast<std::ptrdiff_t>(std::min(sources.size(), closure.target_rows.size())));
+  const long source_pole = epsilon_pole(source_rows, ei);
   const auto finish = [&](level::Result level, std::vector<Step> steps) {
+    level = trim(std::move(level));
+    report.connection_pole_before = connection_pole;
+    report.source_pole_before = source_pole;
+    report.connection_pole_after = epsilon_pole(level.matrix, ei);
+    report.source_pole_after = epsilon_pole(level.target_rows, ei);
     report.divergent_after = failing(level);
     report.characters_after = moving_poles::characters(level.matrix);
     report.steps = std::move(steps);
@@ -483,7 +512,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
   // The record of an earlier preparation of this level.
   std::filesystem::path file;
   if (!directory.empty()) {
-    std::string text = "finite-masters-v8|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "," + std::to_string(apparent_points) + "|";
+    std::string text = "finite-masters-v9|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "," + std::to_string(apparent_points) + "|";
     for (const auto &name : closure.matrix.at(0).at(0).variables())
       text += name + ",";
     for (const std::vector<ibp::Integral> *list : std::initializer_list<const std::vector<ibp::Integral> *>{&closure.ordered_basis, &sources}) {
@@ -585,7 +614,8 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
         open_masters = left;
         return;
       }
-      if (!left && (guarded || regular(from.matrix, now.matrix, xi, ei, apparent_points))) {
+      // The rows of the sources may not get a higher pole either.
+      if (!left && (guarded || regular(from.matrix, now.matrix, xi, ei, apparent_points)) && epsilon_pole(now.target_rows, ei) <= source_pole) {
         complete = true;
         open_masters = 0;
         best_steps = std::move(steps);
@@ -594,6 +624,8 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
         return;
       }
       if (guarded) {
+        if (!left)
+          report.note = "kept: the finite masters found have higher poles in epsilon in their reductions";
         wanted.clear();
         for (const auto &master : now.ordered_basis)
           if (!convergent(master))
@@ -671,7 +703,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
   }
   if (!complete) {
     if (report.note.empty())
-      report.note = "kept: " + std::to_string(open_masters) + " masters have no finite replacement without a " + (apparent_points ? "moving pole" : "new singular point");
+      report.note = "kept: " + std::to_string(open_masters) + " masters have no finite replacement that leaves the connection without new poles";
     else if (report.note.rfind("kept: ", 0) != 0)
       report.note = "kept: " + report.note;
     best = closure;

@@ -174,6 +174,29 @@ foreach(mode remove exchange)
     message(FATAL_ERROR "--moving-poles ${mode} failed or changed a family without moving poles: ${errors} ${moved}")
   endif()
 endforeach()
+# Finite masters are chosen by default in a family without a cut: the report
+# names the exchanged level, and the masters of the reduction itself give the
+# same finite part from a cache of their own.
+string(JSON finite_mode ERROR_VARIABLE no_report GET "${resumed}" finite_masters mode)
+string(JSON finite_levels ERROR_VARIABLE no_report LENGTH "${resumed}" finite_masters levels)
+string(JSON finite_left ERROR_VARIABLE no_report GET "${resumed}" finite_masters levels 0 failing_after)
+string(JSON finite_low GET "${resumed}" epsilon_low)
+math(EXPR finite_index "0 - ${finite_low}")
+string(JSON finite_value GET "${resumed}" coefficients 0 ${finite_index} real)
+execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
+  --cache "${ibp_cache}-own" --no-numerical-cache --finite-masters off --json
+  OUTPUT_VARIABLE own ERROR_VARIABLE errors RESULT_VARIABLE status)
+string(JSON own_mode ERROR_VARIABLE no_report GET "${own}" finite_masters mode)
+string(JSON own_levels ERROR_VARIABLE no_report LENGTH "${own}" finite_masters levels)
+string(JSON own_low ERROR_VARIABLE no_report GET "${own}" epsilon_low)
+math(EXPR own_index "0 - ${own_low}")
+string(JSON own_value ERROR_VARIABLE no_report GET "${own}" coefficients 0 ${own_index} real)
+file(REMOVE_RECURSE "${ibp_cache}-own")
+if(NOT status EQUAL 0 OR NOT finite_mode STREQUAL "on" OR NOT finite_levels EQUAL 1 OR NOT finite_left EQUAL 0 OR
+    NOT own_mode STREQUAL "off" OR NOT own_levels EQUAL 0 OR
+    NOT finite_value MATCHES "^\\[2\\.236792700212646510529263626884" OR NOT own_value MATCHES "^\\[2\\.236792700212646510529263626884")
+  message(FATAL_ERROR "finite masters are not the default, not reported or change the sunrise: ${finite_value} ${own_value} ${errors} ${resumed}")
+endif()
 # The sampling strategy reproduces the expanded finite part of the sunrise.
 execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
   --cache "${ibp_cache}" --no-numerical-cache --epsilon-strategy sample --samples 8 --sample-jobs 2 --json
@@ -194,7 +217,7 @@ file(REMOVE_RECURSE "${ibp_cache}")
 
 # Numerical options are rejected before the exact preparation starts: no IBP
 # output, and not even the cache directory, may precede the error.
-foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--ordinary-order;4" "--moving-poles;sometimes")
+foreach(invalid "--precision-bits;32" "--leaf-digits;0" "--endpoint-order;0" "--ordinary-order;4" "--moving-poles;sometimes" "--finite-masters;maybe" "--finite-masters-seconds;0")
   execute_process(COMMAND "${DIFFEXP_EXECUTABLE}" ft "${DIFFEXP_SOURCE_DIR}/examples/feynman/sunrise.json"
     ${invalid} --cache "${ibp_cache}-invalid" --no-numerical-cache --json
     OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status)

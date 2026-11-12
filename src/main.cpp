@@ -413,7 +413,8 @@ int main(int argc, char** argv) {
         if(chosen.steps.empty() && !chosen.candidates){progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"\n"<<std::flush;return closure;}
         progress<<"Level "<<depth+1<<": finite masters: "<<chosen.divergent_before<<" of "<<chosen.masters<<" masters fail the convergence test at epsilon = 0 -> "
           <<chosen.divergent_after<<"; "<<chosen.candidates<<" candidate integrals reduced in "<<chosen.reductions<<" further reductions ("<<chosen.reduction_seconds
-          <<" s); connection characters "<<chosen.characters_before<<" -> "<<chosen.characters_after<<"; "<<chosen.seconds<<" s\n";
+          <<" s); connection characters "<<chosen.characters_before<<" -> "<<chosen.characters_after<<"; epsilon poles of the connection "<<chosen.connection_pole_before
+          <<" -> "<<chosen.connection_pole_after<<", of the source rows "<<chosen.source_pole_before<<" -> "<<chosen.source_pole_after<<"; "<<chosen.seconds<<" s\n";
         const auto name=[](const diffexp::ibp::Integral& a){std::string out="[";for(std::size_t i=0;i<a.size();++i)out+=(i?",":"")+std::to_string(a[i]);return out+"]";};
         boost::json::array steps;
         for(const auto& step:chosen.steps) {
@@ -962,7 +963,8 @@ Feynman-trick recursion
                                   fail a convergence test are exchanged for integrals of their sector
                                   with more dots, which removes the cancellation of epsilon poles
                                   between the levels. All masters of a level and all levels below an
-                                  exchanged one, or none; only for families without a cut (Euclidean
+                                  exchanged one, or none, and only if the connection gets no moving
+                                  pole and no higher pole in epsilon; only for families without a cut (Euclidean
                                   region) and without a stated contour; the choice is recorded beside
                                   the exact cache
   --finite-masters-seconds N      time allowed per level for reducing the candidate integrals

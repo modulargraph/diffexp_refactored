@@ -65,6 +65,15 @@ int main(){try {
     dependent.matrix=Matrix{{e("eps/x"),e("1/x")},{e("1/(x-1)"),e("2*eps/(x-1)")}};
     fm::exchange(dependent,0,1,four,steps,1);
     check(std::none_of(steps.begin(),steps.end(),[&](const fm::Step& step){return step.to==integral(2,1);}),"no step to masters that are dependent at epsilon zero");
+    // Nor one that only rescales a master by epsilon where the connection
+    // then gets a pole, although a shear would remove it.
+    auto scaled=level;scaled.target_rows[0]={e("0"),e("eps")};
+    scaled.matrix=Matrix{{e("eps/x"),e("1/x")},{e("1/(x-1)"),e("2*eps/(x-1)")}};
+    fm::exchange(scaled,0,1,four,steps,1);
+    check(steps.size()==1 && steps[0].to==integral(3,0),"no step that raises the epsilon pole of the connection");
+    const auto rescaled=fm::exchange(scaled,0,1,four,steps,1,nullptr,false);
+    check(steps.size()==2 && fm::epsilon_pole(scaled.matrix,1)==0 && fm::epsilon_pole(rescaled.matrix,1)==1 && !fm::regular(scaled.matrix,rescaled.matrix,0,1),
+      "the finished basis is checked for epsilon poles");
     // choose(): candidates are asked for, all masters or none, and the
     // choice is recorded.
     const auto directory=std::filesystem::temp_directory_path()/("diffexp-finite-masters-"+std::to_string(::getpid()));

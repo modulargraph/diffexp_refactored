@@ -53,6 +53,12 @@ struct Options {
   // integral with a pole at the factor at its last max_positions positions.
   std::size_t max_positions = 2, max_integrals = 12;
   bool closure_rows = true;
+  // A factor whose removal leaves the connection more than this many times
+  // larger (in characters) is kept. Transport and the exact endpoint series
+  // cost in proportion to the size of the connection, and a moving pole
+  // costs a detour: a closure row in the residue field of a factor of high
+  // degree in x can multiply the size by dozens. Zero: no bound.
+  double max_growth = 4;
   // Optional restriction of the masters an integral may replace.
   std::function<bool(const ibp::Integral &, std::size_t)> admissible;
 };
@@ -78,6 +84,9 @@ struct Result {
   std::vector<Step> steps;
   // Target factors left in place: nothing tried cleared them.
   std::vector<std::string> remaining;
+  // Of those, the factors whose removal was found and undone for its size
+  // (Options::max_growth).
+  std::size_t size_refusals = 0;
   bool budget_reached = false;
   double seconds = 0;
   bool changed() const { return !steps.empty(); }
@@ -434,6 +443,10 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
     const auto steps_before = result.steps.size();
     const auto weight_before = result.after;
     const auto characters_before = result.characters;
+    const auto too_large = [&] {
+      return options.max_growth > 0 &&
+             static_cast<double>(result.characters) > options.max_growth * static_cast<double>(characters_before);
+    };
     for (std::size_t local = 0; local < options.max_factor_steps; ++local) {
       const auto [order, row] = highest(*factor);
       if (!order)
@@ -537,8 +550,12 @@ inline Result remove(const Matrix &connection, std::size_t xi, std::size_t ei,
       basis = std::move(best->basis);
       result.after = best->weight;
       result.characters = best->characters;
+      if (too_large())
+        break;
     }
-    if (highest(*factor).first) {
+    if (highest(*factor).first || too_large()) {
+      if (!highest(*factor).first)
+        ++result.size_refusals;
       basis = snapshot;
       result.steps.resize(steps_before);
       result.after = weight_before;

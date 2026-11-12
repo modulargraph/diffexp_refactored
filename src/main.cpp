@@ -311,10 +311,11 @@ int main(int argc, char** argv) {
         }
         boost::json::array remaining;
         for(const auto& factor:result.remaining){progress<<"  left in place: ("<<factor<<")\n";remaining.emplace_back(factor);}
+        if(result.size_refusals)progress<<"  "<<result.size_refusals<<" of them kept for size: the basis without it has a connection more than four times as large\n";
         if(result.budget_reached)progress<<"  stopped by its step or time budget\n";
         moving_pole_levels.push_back(boost::json::object{{"level",depth+1},{"mixed_factors",result.before.factors},{"mixed_order_before",result.before.total_order},
           {"mixed_order_after",result.after.total_order},{"characters_before",result.original_characters},{"characters_after",result.characters},
-          {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
+          {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"kept_for_size",result.size_refusals},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
         progress<<std::flush;
       };
       // Each level merges the pair of propagators with the fewest masters.

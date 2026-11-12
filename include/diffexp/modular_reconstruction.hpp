@@ -5,6 +5,7 @@
 #include <flint/fmpq.h>
 #include <flint/fmpz_mat.h>
 #include <flint/fmpz_lll.h>
+#include <algorithm>
 #include <optional>
 #include <functional>
 #include <numeric>
@@ -218,18 +219,42 @@ struct Lift {
     // A denominator found from some coefficients need not clear the others:
     // those it leaves large give the factor that is missing.
     auto large=rescale();
-    // Every round multiplies d by a factor above one, and d stays below
-    // the bound: that ends the loop.
+    // The coefficients of a lattice are spread over the large ones. Those
+    // next to each other in the ansatz (one power of a variable, successive
+    // powers of the other) often are one large integer times small ones:
+    // their lattice then holds vectors far shorter than the one sought, and
+    // they share only a small part of the denominator. For the same reason
+    // the factor is looked for in every vector of the reduced basis: the one
+    // taken is the one that leaves the fewest coefficients large.
+    // Where fewer coefficients are large than a lattice takes, it is filled
+    // with others: the factor sought leaves those small as well, and the
+    // lattice then singles it out as the largest one does.
+    // Every round leaves fewer coefficients large: that ends the loop.
     while(!large.empty()) {
-      const auto k=static_cast<slong>(std::min(most,large.size()));
+      std::vector<std::size_t> used;
+      for(std::size_t j=0,count=std::min(most,large.size());j<count;++j)used.push_back(large[j*large.size()/count]);
+      if(used.size()<most){std::vector<std::size_t> others;
+        for(std::size_t i=0;i<residues.size();++i)if(!fmpz_is_zero(scaled[i].value)&&std::find(used.begin(),used.end(),i)==used.end())others.push_back(i);
+        for(std::size_t j=0,count=std::min(most-used.size(),others.size());j<count;++j)used.push_back(others[j*others.size()/count]);}
+      const auto k=static_cast<slong>(used.size());
       fmpz_mat_t basis;fmpz_mat_init(basis,k+1,k+1);
-      for(slong j=0;j<k;++j){fmpz_set(fmpz_mat_entry(basis,j,j),modulus.value);fmpz_mod(fmpz_mat_entry(basis,k,j),scaled[large[j]].value,modulus.value);}
+      for(slong j=0;j<k;++j){fmpz_set(fmpz_mat_entry(basis,j,j),modulus.value);fmpz_mod(fmpz_mat_entry(basis,k,j),scaled[used[j]].value,modulus.value);}
       fmpz_one(fmpz_mat_entry(basis,k,k));
       fmpz_lll_t context;fmpz_lll_context_init_default(context);fmpz_lll(basis,nullptr,context);
-      fmpz_abs(factor.value,fmpz_mat_entry(basis,0,k));fmpz_mat_clear(basis);
-      if(fmpz_is_zero(factor.value)||fmpz_is_one(factor.value))return false;
-      fmpz_mul(d.value,d.value,factor.value);if(fmpz_cmpabs(d.value,bound.value)>=0)return false;
-      const std::vector<std::size_t> used(large.begin(),large.begin()+k);large=rescale();
+      Integer best,candidate,product,value;std::size_t fewest=large.size();
+      for(slong row=0;row<=k;++row){
+        fmpz_abs(candidate.value,fmpz_mat_entry(basis,row,k));if(fmpz_is_zero(candidate.value)||fmpz_is_one(candidate.value))continue;
+        fmpz_mul(product.value,d.value,candidate.value);if(fmpz_cmpabs(product.value,bound.value)>=0)continue;
+        // The count stops once it cannot fall below the best so far.
+        std::size_t left=0;
+        for(const auto& old:scaled){auto* v=value.value;fmpz_mul(v,old.value,candidate.value);fmpz_mod(v,v,modulus.value);
+          if(fmpz_cmp(v,half.value)>0)fmpz_sub(v,v,modulus.value);if(fmpz_cmpabs(v,bound.value)>=0&&++left>=fewest)break;}
+        if(left<fewest){fewest=left;fmpz_set(best.value,candidate.value);}
+      }
+      fmpz_mat_clear(basis);
+      if(fmpz_is_zero(best.value))return false;
+      fmpz_set(factor.value,best.value);fmpz_mul(d.value,d.value,factor.value);
+      large=rescale();
       // A smaller lattice always contains a shorter vector: what it found
       // must be as far below that as well.
       if(static_cast<std::size_t>(k)<most){Integer small;fmpz_pow_ui(small.value,modulus.value,static_cast<ulong>(k));fmpz_root(small.value,small.value,k+1);fmpz_fdiv_q_2exp(small.value,small.value,margin);

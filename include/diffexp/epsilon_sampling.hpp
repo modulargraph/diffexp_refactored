@@ -148,6 +148,8 @@ struct Sample {
   double seconds = 0;
   // The working precision the sample ended with, if it had to raise it.
   long raised_bits = 0;
+  // The Taylor tail (as a power of two) it ended with, if it had to lower it.
+  long lowered_tail_bits = 0;
 };
 // Runs `command` + {"--epsilon-shift", Q} for every node, at most `jobs` at a
 // time, each with its standard output in `directory`. A sample that fails
@@ -162,6 +164,8 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
   // A sample that had to raise its working precision computed its numbers
   // twice. The samples started after it begin at the precision it reached.
   long precision_floor = 0;
+  // Likewise the Taylor tail a sample had to lower its own to.
+  long tail_floor = 0;
   const auto output = [&](std::size_t i, const char *suffix) {
     return directory / ("sample-" + std::to_string(getpid()) + "-" + std::to_string(i) + suffix);
   };
@@ -180,6 +184,10 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
     if (precision_floor) {
       arguments.push_back("--precision-floor");
       arguments.push_back(std::to_string(precision_floor));
+    }
+    if (tail_floor) {
+      arguments.push_back("--tail-floor");
+      arguments.push_back(std::to_string(tail_floor));
     }
     std::vector<char *> argv;
     for (auto &argument : arguments) argv.push_back(argument.data());
@@ -243,8 +251,17 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
       }
       if (const auto *precision = report.if_contains("precision"); precision && precision->is_object())
         if (const auto *raises = precision->as_object().if_contains("raises"); raises && raises->is_array() && !raises->as_array().empty()) {
-          sample.raised_bits = raises->as_array().back().as_object().at("to").to_number<long>();
+          // An entry is a precision raise (from, to) or a lowered tail
+          // (tail_from, tail_to); a run may report both.
+          for (const auto &entry : raises->as_array()) {
+            if (!entry.is_object()) continue;
+            if (const auto *to = entry.as_object().if_contains("to"))
+              sample.raised_bits = std::max(sample.raised_bits, to->to_number<long>());
+            if (const auto *to = entry.as_object().if_contains("tail_to"))
+              sample.lowered_tail_bits = std::max(sample.lowered_tail_bits, to->to_number<long>());
+          }
           precision_floor = std::max(precision_floor, sample.raised_bits);
+          tail_floor = std::max(tail_floor, sample.lowered_tail_bits);
         }
       samples[i] = std::move(sample);
       std::filesystem::remove(output(i, ".json"));

@@ -88,6 +88,10 @@ int main(int argc, char** argv) {
       // the digits (see below). --precision-floor starts higher without
       // fixing it: the samples of a fit pass on what the first ones needed.
       bool precision_given=numerical.working_bits!=diffexp::recursion::NumericalOptions{}.working_bits;long precision_floor=0;
+      // The admitted Taylor tail a run starts from, without fixing it
+      // (--tail-floor): the samples of a fit start where an earlier sample
+      // had to lower its tail to, instead of each computing its numbers twice.
+      long tail_floor=0;
       // What a sample process is started with: this command line without the
       // options that select and shape the sampling itself.
       std::vector<std::string> sample_arguments;
@@ -104,7 +108,7 @@ int main(int argc, char** argv) {
         if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;sample_arguments.push_back(option);continue;}
         if(option=="--leaf-digits")leaf_digits_given=true;
         if(option!="--epsilon-strategy" && option!="--samples" && option!="--sample-step" && option!="--sample-jobs" &&
-            option!="--sample-poles" && option!="--epsilon-order" && option!="--epsilon-shift" && option!="--precision-floor" && i+1<argc) {
+            option!="--sample-poles" && option!="--epsilon-order" && option!="--epsilon-shift" && option!="--precision-floor" && option!="--tail-floor" && i+1<argc) {
           sample_arguments.push_back(option);sample_arguments.push_back(argv[i+1]);
         }
         if(option=="--ft-transport" || option=="--ft-transport-digits")
@@ -210,6 +214,7 @@ int main(int argc, char** argv) {
           else if(option=="--ordinary-order"){if(number<8 || number>1000)throw std::invalid_argument("ordinary order must be in 8..1000");numerical.ordinary_order=number;}
           else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;precision_given=true;}
           else if(option=="--precision-floor"){if(number<64 || number>1000000)throw std::invalid_argument("precision floor must be in 64..1000000");precision_floor=number;}
+          else if(option=="--tail-floor"){if(number<16 || number>100000)throw std::invalid_argument("tail floor must be in 16..100000");tail_floor=number;}
           else if(option=="--leaf-digits"){if(number<1 || number>100000)throw std::invalid_argument("leaf digits must be in 1..100000");numerical.leaf_digits=number;}
           else if(option=="--basis-scan-seconds"){if(number>60)throw std::invalid_argument("basis scan seconds must be in 0..60");numerical.automatic_basis_scan=number!=0;if(number)numerical.basis_scan_seconds=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
@@ -465,7 +470,7 @@ int main(int argc, char** argv) {
         std::vector<std::vector<diffexp::kernel::ComplexBall>> values(done.front().values.size());
         double cpu=0;boost::json::array sample_report;
         for(const auto& sample:done) {
-          cpu+=sample.seconds;sample_report.push_back(boost::json::object{{"epsilon",sample.epsilon.str()},{"numerical_seconds",sample.seconds},{"raised_to_bits",sample.raised_bits}});
+          cpu+=sample.seconds;sample_report.push_back(boost::json::object{{"epsilon",sample.epsilon.str()},{"numerical_seconds",sample.seconds},{"raised_to_bits",sample.raised_bits},{"tail_lowered_to_bits",sample.lowered_tail_bits}});
           for(std::size_t c=0;c<values.size();++c)values[c].push_back(sample.values.at(c));
         }
         const unsigned poles=sample_poles>=0?static_cast<unsigned>(sample_poles):es::pole_order(points,values,pole_bound);
@@ -534,7 +539,10 @@ int main(int argc, char** argv) {
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         if(!precision_given && precision_floor>numerical.working_bits)numerical.working_bits=precision_floor;
-        diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
+        diffexp::recursion::Evaluator evaluator(graph,numerical);
+        if(tail_floor && !numerical.adjoint.truncation_bits)
+          evaluator.raise_tail(static_cast<unsigned>(std::min<long>(tail_floor,std::min<long>(2L*numerical.ordinary_order,static_cast<long>(numerical.working_bits)-32))));
+        auto result=evaluator.evaluate(raw_high);
         // The Taylor tails admitted per chart are estimated along the
         // transport (AdjointOptions::tail_probe) and added below, eight
         // times over. That estimate is one realisation of an error whose
@@ -691,6 +699,7 @@ int main(int argc, char** argv) {
           {"uncertainty",numerical.adjoint.uncertainty==diffexp::AdjointOptions::Uncertainty::probe?"probe":"map"}};
         report["ft_transport"].as_object()["accumulation"]=stats.weighted_levels?"weighted":"rows";
         report["ft_transport"].as_object()["weighted_levels"]=stats.weighted_levels;
+        report["ft_transport"].as_object()["cleared_epsilon_orders"]=stats.cancelled_orders;
         report["timings"].as_object()["ordinary_seconds"]=stats.ordinary_seconds;
         // Phases of numerical_seconds that precede transport. Disjoint from each
         // other and from ordinary_seconds.
@@ -850,6 +859,10 @@ Feynman-trick recursion
                                   computed again, when rounding leaves a coefficient fewer digits
                                   than --leaf-digits asks for (up to 4096 bits)
   --precision-floor N             start at N bits instead of 384 without fixing the precision
+  --tail-floor N                  start with a Taylor tail of 2^-N per chart, if that is below the
+                                  default, without fixing it (--transport-bits fixes it). The
+                                  samples of a fit pass on the tail an earlier sample had to lower
+                                  its own to
   --leaf-digits N                 1..100000 (default 28)
   --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
   --accumulation weighted|rows    how the levels are combined (adjoint method). weighted

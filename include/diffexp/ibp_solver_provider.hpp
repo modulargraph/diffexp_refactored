@@ -297,7 +297,12 @@ class Sampler {
             // Rebind ALL original rows on fallback, including those left at an
             // earlier point or prime by the preceding subset solve.
             parametric.bind(values,field,sources);solve.seconds=remaining();
-            owned=std::make_shared<Owned>(modulus,plan_->program,solve);solver=&owned->solver;
+            // A long elimination says how far it is: equations inserted of
+            // those it was given, and the entries its pivot rows hold.
+            auto telling=solve;
+            if(options_.progress)telling.progress=[this,total=sources?sources->size():program.equations.size()](const ::ibp::Statistics& s,double seconds){
+              options_.progress("elimination: "+std::to_string(s.equations)+" of "+std::to_string(total)+" equations, rank "+std::to_string(s.rank)+", pivot fill "+std::to_string(s.fill)+", longest row "+std::to_string(s.peak_row)+", "+std::to_string(static_cast<long>(seconds))+" s");};
+            owned=std::make_shared<Owned>(modulus,plan_->program,telling);solver=&owned->solver;
             solver->solve(0,sources,continued?std::move(continued->pivots):std::vector<::ibp::Pivot>{});full=solver->targets();
             if(!selected)noted(*solver);
             if(!selected&&revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,owned});
@@ -312,19 +317,29 @@ class Sampler {
         // The first complete elimination of a batch shows whether its seeds
         // contain every integral it leaves unreduced.
         if(!selected&&!plan_->contained){
-          std::vector<std::pair<unsigned,unsigned>> wider;std::string example;
+          // An integral left unreduced at the edge of seeds that were
+          // widened (as many numerators, or as many dots, as the widest seed
+          // of its sector) is no master either: seeds one step wider reduce
+          // it. Taken for a master, its derivative would lie outside the
+          // seeds again, and every planning pass would climb one step
+          // further without end.
+          std::vector<std::pair<unsigned,unsigned>> wider;std::string example;bool at_edge=false;
           if(widenings_<options_.max_seed_widenings)for(const auto column:terminals(full)){
             const auto& a=program.integrals[column];unsigned dots=0,nums=0;std::size_t mask=0;
             for(unsigned i=0;i<input_geometry_.n;++i){if(a.powers[i]>0){dots+=a.powers[i]-1;if(i<basis_.physical_count)mask|=std::size_t(1)<<i;}else nums-=a.powers[i];}
             const auto bound=sector_bounds.empty()?std::pair{seeds.dots,seeds.numerators}:sector_bounds[mask];
-            if((dots<=bound.first&&nums<=bound.second)||dots>::ibp::Integral::max_seed_power||nums>::ibp::Integral::max_seed_power)continue;
+            const bool outside=dots>bound.first||nums>bound.second;
+            const bool numerator_edge=!outside&&!widened_.empty()&&widened_[mask].second&&nums==bound.second&&nums>options_.numerators;
+            const bool dot_edge=!outside&&!widened_.empty()&&widened_[mask].first&&dots==bound.first&&dots>options_.dots;
+            const bool edge=numerator_edge||dot_edge;
+            if((!outside&&!edge)||dots>=::ibp::Integral::max_seed_power||nums>=::ibp::Integral::max_seed_power)continue;
             if(wider.empty()){wider=widened_;wider.resize(std::size_t(1)<<basis_.physical_count);}
-            if(example.empty()){example="[";for(unsigned i=0;i<input_geometry_.n;++i)example+=std::to_string(a.powers[i])+",";example.back()=']';}
-            auto& w=wider[mask];w.first=std::max(w.first,dots);w.second=std::max(w.second,nums);
+            if(example.empty()){at_edge=edge;example="[";for(unsigned i=0;i<input_geometry_.n;++i)example+=std::to_string(a.powers[i])+",";example.back()=']';}
+            auto& w=wider[mask];w.first=std::max(w.first,dots+(dot_edge?1:0));w.second=std::max(w.second,nums+(numerator_edge?1:0));
           }
           if(!wider.empty()){
             widened_=std::move(wider);++widenings_;++stats_.seed_widenings;
-            if(options_.progress)options_.progress("integral "+example+" is left unreduced outside the seeds of its sector; widening the seeds of "+std::to_string(std::count_if(widened_.begin(),widened_.end(),[](const auto& w){return w.first||w.second;}))+" sectors");
+            if(options_.progress)options_.progress("integral "+example+(at_edge?" is left unreduced at the edge of the widened seeds of its sector":" is left unreduced outside the seeds of its sector")+"; widening the seeds of "+std::to_string(std::count_if(widened_.begin(),widened_.end(),[](const auto& w){return w.first||w.second;}))+" sectors");
             auto again=limits;again.timeout_seconds=std::max(1u,static_cast<unsigned>(remaining()));
             return (*this)(requested,point,modulus,again,independent,complete);
           }

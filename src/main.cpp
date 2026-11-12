@@ -156,6 +156,11 @@ int main(int argc, char** argv) {
           else if(option=="--sample-jobs"){if(!number || number>1024)throw std::invalid_argument("--sample-jobs must be in 1..1024");sample_jobs=number;}
           else {if(number>64)throw std::invalid_argument("--sample-poles must be in 0..64");sample_poles=static_cast<int>(number);}
         }
+        else if(option=="--endpoint-series") {
+          const std::string value=option_value;
+          if(value!="truncated" && value!="exact")throw std::invalid_argument("--endpoint-series must be truncated or exact");
+          numerical.truncated_endpoint_series=value=="truncated";
+        }
         else if(option=="--moving-poles") {
           moving_poles=option_value;
           if(moving_poles!="keep" && moving_poles!="remove" && moving_poles!="exchange")throw std::invalid_argument("--moving-poles must be keep, remove or exchange");
@@ -703,6 +708,7 @@ int main(int argc, char** argv) {
         report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
         report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
+          {"endpoint_series_refinements",stats.endpoint_series_refinements},
           {"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
           {"operator_exact_zeros",stats.operator_exact_zeros},
@@ -840,6 +846,10 @@ Feynman-trick recursion
                                   2*loops). Samples ask the leaf for min(leaf digits, 16), or 12
                                   from six levels on, unless --leaf-digits is given.
   --endpoint-order N              1..1000: order of the exact series at the endpoints
+  --endpoint-series truncated|exact
+                                  coefficients of the endpoint series of an expanded run: Laurent
+                                  series in epsilon cut at the orders the operators read
+                                  (default), or exact rational functions of epsilon
   --overlap-ratio R               4..65536: the series is summed at most 1/R of the way to the
                                   nearest other singular point, where the transport starts.
                                   Defaults: R=64, N=22 (R=16, N=32 with --epsilon-shift), a

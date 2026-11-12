@@ -57,6 +57,18 @@ struct NumericalOptions {
   // to a numeric dimension, whose exact work is cheap. With only the order
   // given the ratio follows from it, between 16 and 64.
   unsigned endpoint_order=0,overlap_ratio=0;
+  // The endpoint series of an expanded recursion carry each coefficient as a
+  // truncated Laurent series in epsilon (AffineFrobeniusSeries::Options::
+  // epsilon_orders) instead of a rational function of epsilon: as many orders
+  // as the level's operators read at the requested window, and built again
+  // with more if a later stage asks for them. False keeps the exact rational
+  // functions. A recursion at a numeric dimension has no epsilon left in its
+  // series, and an endpoint that carries the level's boundary is solved
+  // exactly; both keep the exact series whatever this says.
+  bool truncated_endpoint_series=true;
+  // Epsilon orders of a truncated endpoint series beyond the window at its
+  // first build.
+  unsigned endpoint_epsilon_margin=0;
   unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
@@ -132,6 +144,9 @@ struct NumericalStatistics {
   adjoint_checkpoint::Statistics ordinary_checkpoints;
   std::size_t exact_plans=0,leaf_evaluations=0,numeric_evaluations=0,refinements=0,cache_hits=0;
   std::size_t endpoint_series_built=0;
+  // Truncated endpoint series built again because a reader needed more
+  // epsilon orders (counted in endpoint_series_built as well).
+  std::size_t endpoint_series_refinements=0;
   std::size_t direct_endpoints=0;
   std::size_t adjoint_selections=0,factored_selections=0;
   // Levels transported as weighted rows, and evaluations that asked for
@@ -337,7 +352,23 @@ class Evaluator {
     explicit PrecisionScope(slong bits):previous(B::precision()){B::set_precision(bits);}
     ~PrecisionScope(){B::set_precision(previous);}
   };
+  // What an endpoint is built from, kept so that a truncated series can be
+  // built again with more epsilon orders.
+  struct EndpointSource {
+    Matrix matrix,diagonal;
+    fuchsify::Result fuchs;
+    const Node* node=nullptr;
+    bool upper=false;
+    std::size_t depth=0;
+    unsigned inverse_pole_order=0;
+  };
   struct Endpoint {
+    std::shared_ptr<const EndpointSource> source;
+    // Epsilon orders of the truncated series; zero for exact coefficients.
+    unsigned epsilon_orders=0;
+    // Where the plan put this endpoint's domain constraints, and their names.
+    std::vector<std::size_t> constraint_slots;
+    std::vector<std::string> constraint_names;
     std::optional<AffineFrobeniusSeries> series;
     Expansion matching_frame;
     std::vector<std::optional<Expansion>> functionals;
@@ -939,8 +970,71 @@ class Evaluator {
       report(depth,side+" direct endpoint functionals; no fundamental series",high);
       return std::move(*result);
     }
-    report(depth,side+" exact endpoint series",high);
+    // Samples have no epsilon in the series; the boundary map is solved exactly.
+    const bool truncate=options_.truncated_endpoint_series && !graph_.specialised && !boundary;
+    auto source=std::make_shared<EndpointSource>(EndpointSource{matrix,diagonal,std::move(fuchs),&node,upper,depth,
+      fuchsify::detail::pole_order(inverse_diagonal,xi_)});
+    // The first guess is the window itself; what the operators read beyond
+    // it (the poles of the functionals and of the frame) is known exactly
+    // once the series exists, and one more build supplies it.
+    unsigned orders=truncate?static_cast<unsigned>(std::max(0,high))+1+options_.endpoint_epsilon_margin:0;
+    for(unsigned attempt=0;;++attempt) {
+      auto result=series_endpoint(source,orders,high);
+      const long missing=truncate?endpoint_orders_missing(result,high):0;
+      if(missing<=0 || attempt>=4)return result;
+      orders+=static_cast<unsigned>(missing);++statistics_.endpoint_series_refinements;
+      report(depth,side+" endpoint series: "+std::to_string(missing)+" more epsilon orders for the operators",high);
+    }
+  }
+  // Epsilon orders that the operators of this endpoint would miss at the
+  // window `high`, from the same valuations they read, without the loss of a
+  // row gauge (which only the prepared inverse knows; it asks then).
+  long endpoint_orders_missing(const Endpoint& endpoint,int high)const {
+    if(!endpoint.series || !endpoint.series->truncated())return 0;
+    if(std::none_of(endpoint.functionals.begin(),endpoint.functionals.end(),[](const auto& value){return value.has_value();}))return 0;
+    const long absent=AffineFrobeniusSeries::Valuations::zero_valuation,exact=Expansion::exact_order;
+    const auto shifts=endpoint.series->valuation_metadata(endpoint.matching_frame).minimum_by_column;
+    long largest=std::numeric_limits<long>::min();
+    for(const auto shift:shifts){if(shift==absent)return 4;largest=std::max(largest,shift);}
+    const long depth=std::max(0l,static_cast<long>(constant_demand(endpoint,static_cast<unsigned>(std::max(0,high))))+largest);
+    long missing=0;
+    const auto& frame=endpoint.matching_frame;
+    for(unsigned i=0;i<frame.rows;++i)for(unsigned c=0;c<frame.columns;++c)if(frame.truncation(i,c)<exact)
+      missing=std::max(missing,shifts[c]+depth+1-frame.truncation(i,c));
+    for(const auto& functional:endpoint.functionals)if(functional)
+      for(unsigned i=0;i<functional->rows;++i)for(unsigned c=0;c<functional->columns;++c)if(functional->truncation(i,c)<exact)
+        missing=std::max(missing,static_cast<long>(high)+shifts[c]+1-functional->truncation(i,c));
+    return missing;
+  }
+  // A truncated endpoint built again with `missing` more epsilon orders, in
+  // place: the plan keeps its shape, so the domain constraints must be the
+  // ones it was built with.
+  void refine_endpoint(Endpoint& endpoint,long missing,int high) {
+    if(!endpoint.source || !endpoint.epsilon_orders || missing<=0)throw std::logic_error("an exact endpoint series was asked for epsilon orders");
+    const auto& source=*endpoint.source;
+    const std::string side=source.upper?"upper":"lower";
+    ++statistics_.endpoint_series_refinements;
+    report(source.depth,side+" endpoint series: "+std::to_string(missing)+" more epsilon orders for the operators",high);
+    auto fresh=series_endpoint(endpoint.source,endpoint.epsilon_orders+static_cast<unsigned>(missing),high);
+    bool same=fresh.pending_constraints.size()==endpoint.constraint_slots.size();
+    for(std::size_t k=0;same && k<fresh.pending_constraints.size();++k)same=fresh.pending_constraints[k].second==endpoint.constraint_names[k];
+    if(!same)throw std::runtime_error("level "+std::to_string(source.depth+1)+" "+side+
+      ": the endpoint domain constraints changed with the epsilon orders of the truncated series; use the exact endpoint series");
+    fresh.functionals.resize(endpoint.functionals.size());
+    for(std::size_t k=0;k<fresh.pending_constraints.size();++k)
+      fresh.functionals[endpoint.constraint_slots[k]]=std::move(fresh.pending_constraints[k].first);
+    fresh.pending_constraints.clear();fresh.clearance_coefficients.clear();
+    fresh.constraint_slots=std::move(endpoint.constraint_slots);fresh.constraint_names=std::move(endpoint.constraint_names);
+    endpoint=std::move(fresh);
+  }
+  Endpoint series_endpoint(const std::shared_ptr<const EndpointSource>& source,unsigned orders,int high) {
+    const auto& matrix=source->matrix;const auto& diagonal=source->diagonal;const auto& fuchs=source->fuchs;const auto& node=*source->node;
+    const bool upper=source->upper;const std::size_t depth=source->depth;
+    const std::string side=upper?"upper":"lower";
+    const bool boundary=node.boundary==(upper?BoundarySite::upper:BoundarySite::lower);
+    report(depth,side+(orders?" endpoint series through "+std::to_string(orders)+" epsilon orders":std::string(" exact endpoint series")),high);
     auto endpoint_options=options_.endpoint;
+    endpoint_options.epsilon_orders=orders;
     endpoint_options.regulate_noninteger_powers=graph_.specialised;
     const auto caller_progress=endpoint_options.column_progress;
     endpoint_options.column_progress=[&,caller_progress](unsigned completed,unsigned total){
@@ -961,10 +1055,13 @@ class Evaluator {
       matching_frame.wronskian_prefactor=series.gauged_wronskian_prefactor(fuchs.transform,fuchs.matrix,matrix);
       if(matching_frame.wronskian_prefactor)report(depth,side+" Wronskian certified from exact trace and rational factors",high);
     }
-    Endpoint result{std::move(series),std::move(matching_frame),std::vector<std::optional<Expansion>>(node.operations.size()),{}};
+    Endpoint result;
+    result.source=source;result.epsilon_orders=orders;
+    result.series=std::move(series);result.matching_frame=std::move(matching_frame);
+    result.functionals.resize(node.operations.size());
     if(boundary) {
       result.physical_frame=result.series->project(physical_gauge);
-      result.physical_inverse_pole_order=fuchsify::detail::pole_order(fuchs.inverse_transform,xi_)+fuchsify::detail::pole_order(inverse_diagonal,xi_);
+      result.physical_inverse_pole_order=fuchsify::detail::pole_order(fuchs.inverse_transform,xi_)+source->inverse_pole_order;
     }
     const auto collect=[&](const Matrix& coefficients){for(const auto& row:coefficients)for(const auto& c:row)if(!c.is_zero())result.clearance_coefficients.push_back(c);};
     collect(matrix);collect(fuchs.matrix);collect(fuchs.transform);collect(fuchs.inverse_transform);collect(physical_gauge);
@@ -988,12 +1085,12 @@ class Evaluator {
       for(const auto& constraint:domain.zero_constraints) {
         if(result.pending_constraints.size()>=options_.max_endpoint_constraints)
           throw std::length_error("recursive endpoint constraint budget exhausted");
-        result.pending_constraints.push_back({constant_expansion(Matrix{constraint.coefficients}),
+        result.pending_constraints.push_back({AffineFrobeniusSeries::constraint_functional(constraint),
           "level "+std::to_string(depth+1)+" "+side+" operation "+std::to_string(i)+
           " fixed power "+constraint.power.str()+" log degree "+std::to_string(constraint.log_degree)});
       }
       if(integral)result.functionals[i]=result.series->dr_integral_from_zero(domain.admissible);
-      else result.functionals[i]=constant_expansion(result.series->dr_endpoint_constant(domain.admissible));
+      else result.functionals[i]=result.series->dr_endpoint_functional(domain.admissible);
       }catch(const std::length_error& error) {
         throw std::length_error(side+" endpoint operation "+std::to_string(i)+": "+error.what());
       }catch(const std::domain_error& error) {
@@ -1235,6 +1332,7 @@ class Evaluator {
     std::vector<std::string> labels;
     lower.functionals.resize(node.operations.size()+constraints);upper.functionals.resize(node.operations.size()+constraints);
     for(auto* endpoint:{&lower,&upper})for(auto& [functional,label]:endpoint->pending_constraints) {
+      endpoint->constraint_slots.push_back(node.operations.size()+labels.size());endpoint->constraint_names.push_back(label);
       endpoint->functionals[node.operations.size()+labels.size()]=std::move(functional);labels.push_back(std::move(label));
     }
     lower.pending_constraints.clear();upper.pending_constraints.clear();
@@ -1484,7 +1582,18 @@ class Evaluator {
     observe_operator(depth,"composed shared-source map",expression.transform);
     expressions_[depth]=std::move(expression);cache_[depth]=std::move(result);return *cache_[depth];
   }
+  // A truncated endpoint series that is short of the epsilon orders an
+  // operator reads is built again with them, and the operator is formed anew.
   LaurentRows endpoint_operator(Endpoint& endpoint,const Rational& exact_point_value,int high) {
+    for(unsigned attempt=0;;++attempt) {
+      try {return endpoint_operator_once(endpoint,exact_point_value,high);}
+      catch(const EpsilonOrdersNeeded& demand) {
+        if(attempt>=8)throw std::runtime_error("recursive endpoint series: the demand for epsilon orders does not settle");
+        refine_endpoint(endpoint,demand.missing,high);
+      }
+    }
+  }
+  LaurentRows endpoint_operator_once(Endpoint& endpoint,const Rational& exact_point_value,int high) {
     Seconds timer(statistics_.endpoint_operator_seconds);
     if(endpoint.direct_operator) {
       auto direct=exact_laurent_rows(*endpoint.direct_operator,graph_.dimension.constant(exact_point_value),high);

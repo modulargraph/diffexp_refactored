@@ -255,6 +255,54 @@ inline Frame frame(const Matrix &r, std::size_t xi, std::size_t ei) {
   (void)inverse(out.transform);
   return out;
 }
+// A frame with the same column flag as `f` that is unimodular at epsilon = 0.
+//
+// The eigenvector frame of a residue whose exponents collide at epsilon = 0
+// (0, -eps, -2*eps, ...) is singular there: its inverse has poles, the
+// connection in it has poles, and arithmetic modulo a power of epsilon would
+// lose that many orders at every x order. Column c is reduced by the columns
+// before it until it vanishes in their pivot rows, and divided by the power of
+// epsilon it then carries; a row where it does not vanish at epsilon = 0
+// becomes its pivot. The pivot rows form a triangular minor with unit
+// diagonal, so the frame and its inverse are regular at epsilon = 0, and the
+// span of the first c columns is unchanged for every c: a residue that is
+// triangular in `f` (a Jordan form) is triangular, and regular, in the result.
+inline Matrix unimodular_frame(const Matrix &f, std::size_t ei) {
+  const unsigned d = f.size();
+  auto out = f;
+  const auto epsilon = f[0][0].variable(ei);
+  std::vector<unsigned> pivots;
+  for (unsigned c = 0; c < d; ++c) {
+    for (unsigned j = 0; j < c; ++j) {
+      const unsigned p = pivots[j];
+      if (out[p][c].is_zero())
+        continue;
+      const auto factor = out[p][c] / out[p][j];
+      for (unsigned i = 0; i < d; ++i)
+        if (!out[i][j].is_zero())
+          out[i][c] = out[i][c] - factor * out[i][j];
+    }
+    std::optional<long> lowest;
+    for (unsigned i = 0; i < d; ++i)
+      if (!out[i][c].is_zero()) {
+        const long v = fuchsify::detail::valuation(out[i][c], ei);
+        if (!lowest || v < *lowest)
+          lowest = v;
+      }
+    if (!lowest)
+      throw std::logic_error("affine residue frame is singular");
+    std::optional<unsigned> pivot;
+    for (unsigned i = 0; i < d; ++i)
+      if (!out[i][c].is_zero()) {
+        if (*lowest)
+          out[i][c] = out[i][c] / fuchsify::detail::power(epsilon, *lowest);
+        if (!pivot && fuchsify::detail::valuation(out[i][c], ei) == 0)
+          pivot = i;
+      }
+    pivots.push_back(*pivot);
+  }
+  return out;
+}
 inline Exact determinant(Matrix a) {
   auto value = a[0][0].constant(1);
   const unsigned d = a.size();
@@ -467,11 +515,23 @@ public:
     fmpq_poly_clear(d);
     normalize();
   }
-  void shift(long powers) {
-    if (!is_zero())
-      shift_ += powers;
-    if (!is_exact())
-      order_ += powers;
+  // The series in eps, rewritten as the series in t = eps/scale.
+  void multiply_variable(const fmpz_t scale) {
+    if (is_zero() || fmpz_is_one(scale))
+      return;
+    fmpq_t a;
+    fmpq_init(a);
+    fmpq_set_fmpz(a, scale);
+    fmpq_poly_rescale(u_, u_, a);
+    fmpq_pow_si(a, a, shift_);
+    fmpq_poly_scalar_mul_fmpq(u_, u_, a);
+    fmpq_clear(a);
+  }
+  void divide(unsigned long n) { fmpq_poly_scalar_div_ui(u_, u_, n); }
+  // eps^valuation() * numerator(eps)/denominator.
+  void integers(fmpz_poly_t numerator, fmpz_t denominator) const {
+    fmpq_poly_get_numerator(numerator, u_);
+    fmpz_set(denominator, fmpq_poly_denref(u_));
   }
   Rational coefficient(long exponent) const {
     fmpq_t c;
@@ -608,6 +668,135 @@ private:
     return *this;
   }
 };
+// A constant change of coordinates G(eps), with its inverse, after which the
+// residue and every Taylor coefficient in x of the connection x*A are regular
+// at epsilon = 0; nothing if none is found within `max_steps`.
+//
+// A Fuchsian form reached through Jordan frames over Q(eps) can have poles in
+// epsilon although its solutions do not: the coordinates are singular at
+// epsilon = 0. Coordinates are a lattice over the local ring of epsilon, and
+// the connection is regular in a lattice that its coefficients map into
+// itself. With x*A = P(x)/q(x), q without a moving zero, these are the
+// coefficients P_m/q_0. Starting from the given coordinates, a column of a
+// coefficient that has a pole is a vector every such lattice must contain: it
+// replaces the basis vector of the row where its pole is deepest (only its
+// principal part matters). The lattice grows at each step and stays inside
+// the smallest stable one, so the steps end if that one exists.
+inline std::optional<std::pair<Matrix, Matrix>>
+epsilon_regular_gauge(const Matrix &connection, std::size_t xi, std::size_t ei,
+                      unsigned max_steps) {
+  using namespace fuchsify::detail;
+  const unsigned d = connection.size();
+  const auto z = connection[0][0].constant(0);
+  std::pair<Matrix, Matrix> out{identity(d, z), identity(d, z)};
+  std::vector<Exact> origin;
+  for (unsigned i = 0; i < z.variable_count(); ++i)
+    origin.push_back(i == xi || i == ei ? z : z.variable(i));
+  bool analytic = true;
+  for (const auto &row : connection)
+    for (const auto &e : row)
+      analytic = analytic && (e.is_zero() || !e.denominator().substitute(origin).is_zero());
+  // Jointly analytic at (x,eps) = (0,0): every coefficient is regular already.
+  if (analytic)
+    return out;
+  auto q = z.constant(1);
+  for (const auto &row : connection)
+    for (const auto &e : row)
+      if (!e.is_zero())
+        q = q.polynomial_lcm(e.denominator());
+  const auto degree = [&](const Exact &value) {
+    unsigned result = 0;
+    for (const auto &term : value.numerator_terms())
+      result = std::max(result, static_cast<unsigned>(term.powers[xi]));
+    return result;
+  };
+  if (q.numerator_terms().size() > 4096 || degree(q) > 256)
+    return std::nullopt;
+  const auto clearing = taylor(q, xi, degree(q));
+  if (clearing.front().is_zero())
+    return std::nullopt;
+  // A zero of q that moves with epsilon: the coefficients have poles of
+  // every order, and so do the solutions.
+  for (unsigned m = 1; m < clearing.size(); ++m)
+    if (!clearing[m].is_zero() && valuation(clearing[m] / clearing.front(), ei) < 0)
+      return std::nullopt;
+  std::vector<Matrix> generators;
+  for (unsigned i = 0; i < d; ++i)
+    for (unsigned j = 0; j < d; ++j) {
+      if (connection[i][j].is_zero())
+        continue;
+      const auto numerator = q * connection[i][j];
+      const unsigned top = degree(numerator);
+      if (top > 256)
+        return std::nullopt;
+      const auto coefficients = taylor(numerator, xi, top);
+      if (generators.size() <= top)
+        generators.resize(top + 1, zeros(d, d, z));
+      for (unsigned m = 0; m <= top; ++m)
+        if (!coefficients[m].is_zero())
+          generators[m][i][j] = coefficients[m] / clearing.front();
+    }
+  auto &gauge = out.first;
+  auto &back = out.second;
+  std::vector<Exact> h(d, z), column(d, z);
+  for (unsigned step = 0;; ++step) {
+    long deepest = 0;
+    unsigned at = 0, pivot = 0, source = 0;
+    for (unsigned l = 0; l < generators.size(); ++l)
+      for (unsigned i = 0; i < d; ++i)
+        for (unsigned j = 0; j < d; ++j)
+          if (!generators[l][i][j].is_zero()) {
+            const long v = valuation(generators[l][i][j], ei);
+            if (v < deepest) {
+              deepest = v;
+              at = l;
+              pivot = i;
+              source = j;
+            }
+          }
+    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
+      std::size_t size = 0, poles = 0;
+      for (auto &g : generators) for (auto &row : g) for (auto &e : row) if (!e.is_zero()) { size += e.numerator_terms().size() + e.denominator_terms().size(); poles += valuation(e, ei) < 0; }
+      std::fprintf(stderr, "EPSDBG gauge step %u: %zu generators, deepest %ld at generator %u (%u,%u), %zu entries with poles, total terms %zu\n", step, generators.size(), deepest, at, pivot, source, poles, size);
+    }
+    if (!deepest)
+      return out;
+    if (step >= max_steps)
+      return std::nullopt;
+    // H is the identity with column `pivot` replaced by the principal part h
+    // of the chosen column; every coefficient B becomes H^-1 B H.
+    for (unsigned k = 0; k < d; ++k)
+      h[k] = EpsilonSeries(generators[at][k][source], ei, 0).exact(z, ei);
+    const auto rows = [&](Matrix &m) {
+      for (unsigned k = 0; k < d; ++k)
+        if (k != pivot && !h[k].is_zero()) {
+          const auto factor = h[k] / h[pivot];
+          for (unsigned j = 0; j < m[k].size(); ++j)
+            if (!m[pivot][j].is_zero())
+              m[k][j] = m[k][j] - factor * m[pivot][j];
+        }
+      for (auto &value : m[pivot])
+        if (!value.is_zero())
+          value = value / h[pivot];
+    };
+    const auto columns = [&](Matrix &m) {
+      for (unsigned k = 0; k < d; ++k) {
+        column[k] = z;
+        for (unsigned j = 0; j < d; ++j)
+          if (!h[j].is_zero() && !m[k][j].is_zero())
+            column[k] = column[k] + m[k][j] * h[j];
+      }
+      for (unsigned k = 0; k < d; ++k)
+        m[k][pivot] = column[k];
+    };
+    for (auto &b : generators) {
+      columns(b);
+      rows(b);
+    }
+    columns(gauge);
+    rows(back);
+  }
+}
 struct Integer {
   fmpz_t value;
   Integer() { fmpz_init(value); }
@@ -838,8 +1027,9 @@ public:
   struct Meta {
     long known = EpsilonSeries::exact_order; // absolute epsilon order known through
     int bound = -1;                          // log-degree bound; negative: exactly zero
-    void merge(const Meta &source) {
-      known = std::min(known, source.known);
+    // A source times a coefficient of valuation `gain` in epsilon.
+    void merge(const Meta &source, long gain = 0) {
+      known = std::min(known, source.known >= EpsilonSeries::exact_order ? source.known : source.known + gain);
       bound = std::max(bound, source.bound);
     }
   };
@@ -848,9 +1038,35 @@ public:
     Z unit{1};
     slong valuation = 0;
   };
-  void enable_truncation(const std::vector<Exponent> &eigen, unsigned top) {
+  // `residue` is the residue in the frame of this recurrence, which must be
+  // regular at epsilon = 0 (unimodular_frame) and leave the residue upper
+  // triangular; `seeds` are the order-zero solutions in that frame, column by
+  // column (the eigenvector frame expressed in it).
+  void enable_truncation(const std::vector<Exponent> &eigen, unsigned top,
+                         const Matrix &residue, const Matrix &seeds, std::size_t ei) {
     const unsigned d = rows_.size();
     auto t = std::make_unique<Truncation>();
+    t->seeds = seeds;
+    t->variable = ei;
+    const auto one = residue[0][0].constant(1);
+    for (unsigned row = 0; row < d; ++row) {
+      auto scale = one;
+      for (unsigned j = 0; j < d; ++j) {
+        if (j < row && !residue[row][j].is_zero())
+          throw std::logic_error("truncated Frobenius residue is not upper triangular");
+        if (j > row && !residue[row][j].is_zero()) {
+          const auto denominator = residue[row][j].denominator();
+          if (!denominator.is_one())
+            scale = scale.polynomial_lcm(denominator);
+        }
+      }
+      FrameRow coupling;
+      coupling.scale = integral(scale, ei);
+      for (unsigned j = row + 1; j < d; ++j)
+        if (!residue[row][j].is_zero())
+          coupling.entries.emplace_back(j, integral(scale * residue[row][j], ei));
+      t->couplings.push_back(std::move(coupling));
+    }
     fmpz_one(t->scale.value);
     Integer part;
     // Every resonance denominator m+s*eps with m nonzero: (s/m)*L is integral.
@@ -877,6 +1093,8 @@ public:
     for (const auto &row : rows_)
       constant(row.scale);
     for (const auto &row : frame_)
+      constant(row.scale);
+    for (const auto &row : t->couplings)
       constant(row.scale);
     fmpq_t q;
     fmpq_init(q);
@@ -909,10 +1127,27 @@ public:
       for (auto &q : row.derivative)
         q = substitute(q);
     }
-    for (auto &row : t->frame) {
-      t->frame_units.push_back(unit(row.scale));
-      for (auto &[j, coefficient] : row.entries)
-        coefficient = substitute(coefficient);
+    for (auto *rows : {&t->frame, &t->couplings})
+      for (auto &row : *rows) {
+        (rows == &t->frame ? t->frame_units : t->coupling_units).push_back(unit(row.scale));
+        for (auto &[j, coefficient] : row.entries)
+          coefficient = substitute(coefficient);
+      }
+    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
+      std::fprintf(stderr, "EPSDBG rows (scale valuation - min coefficient valuation; derivative; coupling; frame):");
+      for (unsigned r = 0; r < d; ++r) {
+        long low = 1000, dlow = 1000, clow = 1000, flow = 1000;
+        for (auto &lag : t->rows[r].lags) for (auto &[j, c] : lag) low = std::min<long>(low, c.valuation());
+        for (auto &q : t->rows[r].derivative) if (!q.zero()) dlow = std::min<long>(dlow, q.valuation());
+        for (auto &[j, c] : t->couplings[r].entries) clow = std::min<long>(clow, c.valuation());
+        for (auto &[j, c] : t->frame[r].entries) flow = std::min<long>(flow, c.valuation());
+        std::fprintf(stderr, " [%ld-%ld;%ld;%ld-%ld;%ld-%ld]", (long)t->row_units[r].valuation, low, dlow, (long)t->coupling_units[r].valuation, clow, (long)t->frame_units[r].valuation, flow);
+      }
+      std::fprintf(stderr, "\n");
+      std::fprintf(stderr, "EPSDBG eigen:"); for (auto &e : eigen) std::fprintf(stderr, " %s+%s*eps", e.power.str().c_str(), e.slope.str().c_str()); std::fprintf(stderr, "\n");
+      std::fprintf(stderr, "EPSDBG scale bits %ld; row units:", (long)fmpz_bits(t->scale.value));
+      for (auto &u : t->row_units) std::fprintf(stderr, " (len %ld val %ld c0bits %ld maxbits %ld)", (long)fmpz_poly_length(u.unit.raw()), (long)u.valuation, (long)fmpz_bits(u.unit.raw()->coeffs), (long)std::labs(fmpz_poly_max_bits(u.unit.raw())));
+      std::fprintf(stderr, "\n");
     }
     truncation_ = std::move(t);
   }
@@ -939,26 +1174,32 @@ public:
     const bool unit = fmpz_is_one(rho.value);
     std::vector<std::vector<Value>> orders(top + 1, std::vector<Value>(d));
     std::vector<std::vector<Meta>> meta(top + 1, std::vector<Meta>(d));
-    std::vector<Inverse> inverses(d);
+    std::vector<Inverse> inverses(d), coupling_inverses(d);
     Integer common(1), step, cofactor;
     Z weight;
     long pole = 0;
     for (unsigned k = 0; k <= top; ++k) {
       std::vector<Solved> solved(d);
-      for (unsigned row = d; row-- > 0;) {
+      if (!k)
+        seed(solved, successor, column, cap, structure_only);
+      for (unsigned row = k ? d : 0; row-- > 0;) {
         const Row &r = T.rows[row];
         const bool cleared = !r.derivative.empty();
         Solved value;
         const unsigned last = std::min<std::size_t>(k, r.lags.size() - 1);
         for (unsigned lag = 1; lag <= last; ++lag) {
+          // The row scale carries the epsilon poles of the whole row; a
+          // coefficient without a pole of its own brings that power back.
           for (const auto &[j, coefficient] : r.lags[lag])
             if (meta[k - lag][j].bound >= 0)
-              value.meta.merge(meta[k - lag][j]);
+              value.meta.merge(meta[k - lag][j], coefficient.valuation());
           if (cleared && !r.derivative[lag].zero() && meta[k - lag][row].bound >= 0)
-            value.meta.merge(meta[k - lag][row]);
+            value.meta.merge(meta[k - lag][row], r.derivative[lag].valuation());
         }
         if (value.meta.bound >= 0) {
-          value.meta.known = std::min(value.meta.known, cap);
+          // Dividing by the scale takes its valuation off again: keep that
+          // many orders beyond the cap until then.
+          value.meta.known = std::min(value.meta.known, cap + T.row_units[row].valuation);
           const long length = value.meta.known + pole;
           if (!structure_only && length > 0) {
             for (unsigned lag = 1; lag <= last; ++lag) {
@@ -997,20 +1238,47 @@ public:
           value.rel = T.row_units[row].valuation;
           value.meta.known -= T.row_units[row].valuation;
         }
-        if (successor[row] >= 0 && solved[successor[row]].meta.bound >= 0)
-          value = sum(value, solved[successor[row]], pole, cap, structure_only);
+        // The residue above the diagonal couples the row to the rows already
+        // solved at this order (in a Jordan frame: to its successor).
+        {
+          const auto &coupling = T.couplings[row];
+          const long valuation = T.coupling_units[row].valuation;
+          Solved extra;
+          for (const auto &[j, coefficient] : coupling.entries)
+            if (solved[j].meta.bound >= 0) {
+              extra.meta.merge(solved[j].meta, coefficient.valuation());
+              extra.rel = std::max(extra.rel, solved[j].rel);
+            }
+          if (extra.meta.bound >= 0) {
+            extra.meta.known = std::min(extra.meta.known, cap + valuation);
+            const long length = extra.meta.known + pole + extra.rel;
+            if (!structure_only && length > 0) {
+              for (const auto &[j, coefficient] : coupling.entries)
+                if (!solved[j].numerator.empty())
+                  fmpz_lcm(extra.denominator.value, extra.denominator.value, solved[j].denominator.value);
+              for (const auto &[j, coefficient] : coupling.entries) {
+                if (solved[j].numerator.empty())
+                  continue;
+                fmpz_divexact(cofactor.value, extra.denominator.value, solved[j].denominator.value);
+                fmpz_poly_scalar_mul_fmpz(weight.raw(), coefficient.raw(), cofactor.value);
+                fmpz_poly_shift_left(weight.raw(), weight.raw(), extra.rel - solved[j].rel);
+                accumulate_low(extra.numerator, weight, solved[j].numerator, 0, length);
+              }
+              trim(extra.numerator);
+              if (!extra.numerator.empty())
+                divide_unit(extra, T.coupling_units[row].unit, coupling_inverses[row], length);
+              else
+                fmpz_one(extra.denominator.value);
+            }
+            extra.rel += valuation;
+            extra.meta.known -= valuation;
+            value = sum(value, extra, pole, cap, structure_only);
+          }
+        }
         solve_low(value,
                   eigen[column].power + Rational(k) - eigen[row].power,
                   (eigen[column].slope - eigen[row].slope) * T.scale_rational,
                   pole, cap);
-        if (k == 0 && row == column) {
-          if (value.meta.bound >= 0)
-            throw std::logic_error("seeded Frobenius coefficient has a source");
-          value = Solved{};
-          value.meta.bound = 0;
-          if (!structure_only)
-            value.numerator.emplace_back(1);
-        }
         if (value.numerator.size() > ladder_bound)
           throw std::logic_error("affine Frobenius log ladder bound exceeded");
         reduce_low(value);
@@ -1026,7 +1294,9 @@ public:
         }
       for (unsigned row = 0; row < d; ++row) {
         auto &value = solved[row];
+        // What is stored is cut at the cap, whatever was exact before.
         meta[k][row] = value.meta;
+        meta[k][row].known = std::min(value.meta.known, cap);
         if (value.numerator.empty())
           continue;
         fmpz_divexact(cofactor.value, step.value, value.denominator.value);
@@ -1058,10 +1328,10 @@ public:
         Meta known;
         for (const auto &[j, coefficient] : T.frame[row].entries)
           if (meta[k][j].bound >= 0)
-            known.merge(meta[k][j]);
+            known.merge(meta[k][j], coefficient.valuation());
         if (known.bound < 0)
           continue;
-        known.known = std::min(known.known, cap);
+        known.known = std::min(known.known, cap + T.frame_units[row].valuation);
         physical.clear();
         if (!structure_only && known.known + pole > 0)
           for (const auto &[j, coefficient] : T.frame[row].entries)
@@ -1069,6 +1339,11 @@ public:
               accumulate_low(physical, coefficient, orders[k][j], 0, known.known + pole);
         trim(physical);
         emit(k, row, physical, T.frame_units[row], common.value, pole, known);
+      }
+      if (!structure_only && std::getenv("DIFFEXP_EPS_DEBUG")) {
+        long bits = 0, len = 0;
+        for (auto &v : orders[k]) for (auto &c : v) { bits = std::max<long>(bits, std::labs(fmpz_poly_max_bits(c.raw()))); len = std::max<long>(len, fmpz_poly_length(c.raw())); }
+        std::fprintf(stderr, "EPSDBG col %u k %u pole %ld common bits %ld max numerator bits %ld len %ld cap %ld\n", column, k, pole, (long)fmpz_bits(common.value), bits, len, cap);
       }
       if (k >= window_) {
         orders[k - window_] = std::vector<Value>(d);
@@ -1101,8 +1376,11 @@ private:
     Integer scale;
     Rational scale_rational;
     std::vector<Row> rows;
-    std::vector<FrameRow> frame;
-    std::vector<Unit> row_units, frame_units;
+    // The strictly upper triangle of the residue, row by row.
+    std::vector<FrameRow> frame, couplings;
+    std::vector<Unit> row_units, frame_units, coupling_units;
+    Matrix seeds;
+    std::size_t variable = 0;
   };
   std::unique_ptr<Truncation> truncation_;
   // numerator/(denominator * t^rel) relative to the shared denominator; valid
@@ -1119,6 +1397,61 @@ private:
     Integer denominator;
     slong length = 0;
   };
+  // The order-zero solution of a column in the frame of the recurrence: the
+  // seed column itself and, for a Jordan chain, log(x)^m/m! times the columns
+  // before it in the chain. All of it is exact; it is cut at the cap.
+  void seed(std::vector<Solved> &solved, const std::vector<int> &successor,
+            unsigned column, long cap, bool structure_only) const {
+    const auto &T = *truncation_;
+    const unsigned d = T.rows.size();
+    std::vector<unsigned> chain{column};
+    while (chain.back() > 0 && successor[chain.back() - 1] == static_cast<int>(chain.back()))
+      chain.push_back(chain.back() - 1);
+    Z numerator;
+    Integer denominator, factor;
+    for (unsigned row = 0; row < d; ++row) {
+      auto &value = solved[row];
+      std::vector<EpsilonSeries> logs;
+      long lowest = 0;
+      for (unsigned m = 0; m < chain.size(); ++m) {
+        const auto &entry = T.seeds[row][chain[m]];
+        if (entry.is_zero())
+          continue;
+        value.meta.bound = static_cast<int>(m);
+        if (structure_only)
+          continue;
+        logs.resize(m + 1);
+        logs[m] = EpsilonSeries(entry, T.variable, cap);
+        for (unsigned long i = 2; i <= m; ++i)
+          logs[m].divide(i);
+        logs[m].multiply_variable(T.scale.value);
+        if (!logs[m].is_zero())
+          lowest = std::min(lowest, logs[m].valuation());
+      }
+      if (value.meta.bound < 0)
+        continue;
+      value.meta.known = cap;
+      value.rel = -lowest;
+      // One integer denominator for the row.
+      for (const auto &series : logs)
+        if (!series.is_zero()) {
+          series.integers(numerator.raw(), factor.value);
+          fmpz_lcm(value.denominator.value, value.denominator.value, factor.value);
+        }
+      value.numerator.resize(logs.size());
+      for (unsigned m = 0; m < logs.size(); ++m) {
+        if (logs[m].is_zero())
+          continue;
+        logs[m].integers(numerator.raw(), denominator.value);
+        fmpz_divexact(factor.value, value.denominator.value, denominator.value);
+        fmpz_poly_scalar_mul_fmpz(numerator.raw(), numerator.raw(), factor.value);
+        fmpz_poly_shift_left(value.numerator[m].raw(), numerator.raw(), logs[m].valuation() - lowest);
+      }
+      trim(value.numerator);
+      if (value.numerator.empty())
+        fmpz_one(value.denominator.value);
+    }
+  }
   static void mul_low(fmpz_poly_struct *out, const fmpz_poly_struct *a,
                       const fmpz_poly_struct *b, long length) {
     const long full = a->length + b->length - 1;
@@ -1670,7 +2003,19 @@ private:
         throw std::domain_error("affine x order does not span the absolute "
                                 "exponent frontier; increase x order");
     }
-    auto inv = inverse(out.frame_);
+    // Truncated Laurent arithmetic needs a frame that is regular at epsilon
+    // = 0; the exact recurrence keeps the eigenvector frame itself.
+    // A connection that no constant gauge makes regular there keeps the exact
+    // rational functions, whatever was asked for.
+    bool truncated = options.epsilon_orders != 0;
+    Matrix working = out.frame_;
+    if (truncated) {
+      if (const auto regular = epsilon_regular_gauge(connection, xi, ei, 16 * d))
+        working = multiply(regular->first, unimodular_frame(multiply(regular->second, out.frame_), ei));
+      else
+        truncated = false;
+    }
+    auto inv = inverse(working);
     std::vector<std::vector<Exact>> derivative_lags(d);
     if (!options.finite_lag_recurrence) {
       // Retain the original rational Taylor convolution as a reference path.
@@ -1681,10 +2026,10 @@ private:
             g[k][i][j] = coefficients[k];
         }
       for (auto &m : g)
-        m = multiply(multiply(inv, m), out.frame_);
+        m = multiply(multiply(inv, m), working);
     } else {
-      g[0] = multiply(multiply(inv, g[0]), out.frame_);
-      connection = multiply(multiply(inv, connection), out.frame_);
+      g[0] = multiply(multiply(inv, g[0]), working);
+      connection = multiply(multiply(inv, connection), working);
       // In the constant Jordan frame, q_i(x)*theta(v_i)=sum_j p_ij(x)*v_j.
       // Its zero lag is still theta-J; all positive denominator lags involve
       // previously known coefficients and their logarithmic derivatives.
@@ -1758,11 +2103,10 @@ private:
     if (!regular_trace.denominator().substitute(origin).is_zero())
       out.expansion_.wronskian_prefactor =
           affine_frobenius_detail::determinant(out.frame_);
-    IntegerRecurrence recurrence(g, derivative_lags, out.frame_, ei);
-    const bool truncated = options.epsilon_orders != 0;
+    IntegerRecurrence recurrence(g, derivative_lags, working, ei);
     out.log_bounds_.assign(d, 0);
     if (truncated) {
-      recurrence.enable_truncation(out.eigen_, n);
+      recurrence.enable_truncation(out.eigen_, n, g[0], multiply(inv, out.frame_), ei);
       out.expansion_.epsilon_truncation.assign(d, std::vector<long>(d, Expansion::exact_order));
     }
     // Columns are independent, so they are solved on separate threads and
@@ -1887,6 +2231,14 @@ private:
     for (const auto &terms : columns) total += terms.size();
     if (total > options.max_terms)
       throw std::length_error("affine Frobenius term budget exhausted");
+    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
+      std::vector<long> low(d, 1000), high(d, -1000);
+      for (const auto &terms : columns) for (const auto &t : terms) { const long v = out.epsilon_valuation(t.coefficient); low[t.column] = std::min(low[t.column], v);
+        const long top = static_cast<long>(t.coefficient.numerator_terms().size()); high[t.column] = std::max(high[t.column], top); }
+      std::fprintf(stderr, "EPSDBG series d=%u n=%u orders=%u: per column (minval, max numerator terms, truncation):", d, n, options.epsilon_orders);
+      for (unsigned c = 0; c < d; ++c) std::fprintf(stderr, " (%ld,%ld,%ld)", low[c], high[c], truncated ? out.expansion_.epsilon_truncation[0][c] : 0l);
+      std::fprintf(stderr, "\n");
+    }
     out.expansion_.terms.reserve(total);
     for (auto &terms : columns)
       std::move(terms.begin(), terms.end(), std::back_inserter(out.expansion_.terms));

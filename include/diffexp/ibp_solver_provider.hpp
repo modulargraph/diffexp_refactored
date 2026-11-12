@@ -2,6 +2,7 @@
 #include "diffexp/fire_modular.hpp"
 #include "diffexp/scaleless_sectors.hpp"
 #include <ibp/trace.hpp>
+#include <ibp/batch.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -73,8 +74,16 @@ struct Statistics {
   // eliminations started ahead and those of them that were used. Seconds of
   // such work are summed over threads.
   std::size_t batched_replays=0,early_solves=0,early_solves_used=0;
-  // Eliminations of the selected equations served from a batch.
-  std::size_t batched_solves=0;
+  // Eliminations of the selected equations served from a batch: the points of
+  // a batch are eliminated several at a time (::ibp::BatchSolver), and by
+  // every thread. lane_fallbacks counts the points of such eliminations that
+  // were left to an elimination of their own (a pivot of the batch vanished
+  // there, or other integrals were left unreduced).
+  std::size_t batched_solves=0,lane_fallbacks=0;
+  // Modular multiplications of the eliminations of selected equations, and the
+  // terms of the selected equations that were left out of the batches because
+  // their columns neither get a pivot nor are terminal (see Plan::lean).
+  std::size_t selected_multiplications=0,pruned_terms=0;
   // Eliminations repeated with wider seeds (Options::max_seed_widenings).
   std::size_t seed_widenings=0;
   // Complete eliminations that did not start from nothing (they are not among
@@ -146,7 +155,7 @@ class Sampler {
   // the trace and the point alone, so the announced points are replayed
   // together when the first of them is requested.
   void announce(std::vector<std::vector<modular::Word>> points,modular::Word modulus) {
-    ahead_.clear();ahead_modulus_=modulus;if(threads_<2)return;
+    ahead_.clear();ahead_modulus_=modulus;
     for(auto& point:points)ahead_.push_back({std::move(point),std::nullopt,0,0,0});
   }
   // anticipate: points at which a complete elimination is likely to be
@@ -266,7 +275,7 @@ class Sampler {
       std::vector<::ibp::Row> rows;auto& learned=plan_->primes[modulus];bool replayed=false,learning_overran=false;
       // A replay that neither relearns nor is checked leaves no state behind:
       // an announced point is replayed with the announced points after it.
-      if(!independent&&learned.trace&&learned.checked)if(auto* slot=announced(point,modulus)){
+      if(!independent&&learned.trace&&learned.checked&&threads_>1)if(auto* slot=announced(point,modulus)){
         if(!slot->result||slot->state!=state_)replay_announced(requested,modulus,field,*learned.trace,program,limits);
         if(slot->result&&slot->state==state_){
           out=std::move(*slot->result);++stats_.trace_replays;++stats_.batched_replays;stats_.trace_replay_seconds+=slot->replay_seconds;
@@ -275,10 +284,10 @@ class Sampler {
         }
       }
       // Without a trace (it did not fit its budget at this prime) the
-      // announced points are eliminated together as well: each the selected
-      // equations alone, as this thread would have done one after another.
-      if(!independent&&learned.disabled&&options_.selected_source_rows&&plan_->selection&&threads_>1)if(auto* slot=announced(point,modulus)){
-        if(!slot->result||slot->state!=state_)eliminate_announced(requested,modulus,solve,limits);
+      // announced points are eliminated together as well: the selected
+      // equations alone, at several points at a time.
+      if(!independent&&learned.disabled&&options_.selected_source_rows&&plan_->selection)if(auto* slot=announced(point,modulus)){
+        if(!slot->result||slot->state!=state_)eliminate_announced(requested,modulus,limits);
         if(slot->result&&slot->state==state_){
           out=std::move(*slot->result);++stats_.selected_solves;++stats_.batched_solves;stats_.selected_equations+=plan_->selection->size();stats_.selected_solve_seconds+=slot->seconds;
           ++stats_.probes;stats_.generation_seconds+=std::chrono::duration<double>(generated-begin).count();stats_.elimination_seconds+=slot->seconds;
@@ -344,7 +353,7 @@ class Sampler {
             if(!selected&&revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,owned});
           }
           seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();primal_seconds=seconds;
-          if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;}
+          if(selected){++stats_.selected_solves;stats_.selected_equations+=sources->size();stats_.selected_solve_seconds+=seconds;stats_.selected_multiplications+=solver->statistics().multiplications;}
           else if(continued){++stats_.continued_solves;stats_.continued_equations+=continued->rows.size();stats_.continued_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
@@ -405,7 +414,7 @@ class Sampler {
         // A complete anchor compares against the pilot; it does not replace the
         // pilot's subset, which the reconstruction samples were drawn from.
         if(options_.selected_source_rows&&!selected&&!(complete&&plan_->selection)){
-          plan_->selection=selection();plan_->terminal_columns=terminals(full);
+          plan_->selection=selection();plan_->terminal_columns=terminals(full);plan_->lean.reset();
           // Which way the selected equations are eliminated at every sample
           // point is measured here, once: the few of the leading way, whose
           // rows keep their tails, or the more of complete rows. A level with
@@ -425,7 +434,7 @@ class Sampler {
               if(options_.progress&&(!leading||*leading>0.25))options_.progress("trial: "+std::to_string(wider.size())+" selected equations with complete rows: "+(whole?std::to_string(*whole)+" s":std::string("failed")));
               if(whole&&(!leading||*whole<*leading)){
                 if(options_.progress)options_.progress("selected equations: "+std::to_string(wider.size())+" eliminated with complete rows in "+std::to_string(*whole)+" s, against "+std::to_string(plan_->selection->size())+" by their leading columns in "+(leading?std::to_string(*leading)+" s":std::string("more than the fill budget"))+"; samples take the first");
-                plan_->complete_selection=true;plan_->selection=std::move(wider);dependencies=*plan_->selection;}
+                plan_->complete_selection=true;plan_->selection=std::move(wider);plan_->lean.reset();dependencies=*plan_->selection;}
             }
           }
           if(options_.progress)options_.progress("full IBP pilot: "+std::to_string(parametric.rows.size())+" equations, "+std::to_string(plan_->selection->size())+" original rows needed for target identities");
@@ -435,6 +444,8 @@ class Sampler {
         if(!independent){
           ++state_;
           if(replayed)learned.checked=true;
+          // A plan whose trace did not pay at one prime does not try another.
+          else if(plan_->untraced&&!learned.disabled){learned.disabled=true;++stats_.trace_disabled;}
           else if(!learned.disabled){const auto learning_begin=std::chrono::steady_clock::now();::ibp::ArithmeticTrace::Options tracing;tracing.max_fill=solve.max_fill;
             // A trace pays where it is learned in about the time of an
             // elimination: a replay then beats eliminating the selected
@@ -455,7 +466,7 @@ class Sampler {
               if(options_.progress&&!plan_->trace_told){plan_->trace_told=true;options_.progress("arithmetic trace: "+std::to_string(learned.trace->instructions())+" instructions, "+std::to_string(learned.trace->registers())+" registers, from "+std::to_string(selection().size())+" equations and "+std::to_string(program.target_columns.size())+" targets");}}
             catch(const std::length_error&){learned.disabled=true;}
             catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
-            if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;
+            if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;plan_->untraced=true;
               if(options_.progress&&!plan_->trace_told){plan_->trace_told=true;options_.progress("no arithmetic trace (learning one takes longer than eliminating the "+std::to_string(selection().size())+" selected equations a few times, or it does not fit its memory); samples eliminate them at every point");}}
             else if(stats_.trace_instructions=std::max(stats_.trace_instructions,learned.trace->instructions()),stats_.trace_rows=std::max(stats_.trace_rows,selection().size());learned.trace->evaluate_inputs(values,field,learned.workspace)!=rows)throw std::runtime_error("IBP parametric trace disagrees with primal learning reduction");
             learned.checked=false;stats_.trace_learning_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-learning_begin).count();}
@@ -489,8 +500,12 @@ class Sampler {
   using Corners=std::vector<std::pair<unsigned,unsigned>>;
   struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
   // `system` names the generated equations: plans that differ in targets alone share it.
-  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0,terms=0;std::vector<std::pair<unsigned,unsigned>> bounds;std::vector<Corners> corners;bool contained=false,trace_told=false,complete_selection=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
-    std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;};
+  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0,terms=0;std::vector<std::pair<unsigned,unsigned>> bounds;std::vector<Corners> corners;bool contained=false,trace_told=false,untraced=false,complete_selection=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
+    std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;
+    // The selected equations, in order, without the terms of the columns
+    // that neither get a pivot from them nor are terminal
+    // (eliminate_announced), and their indices 0, 1, ...
+    std::optional<::ibp::FormRows> lean;std::vector<std::uint32_t> lean_order;};
   static bool same_equations(const ::ibp::ParametricProgram& a,const ::ibp::ParametricProgram& b) {
     if(a.input_count!=b.input_count||a.constant_inputs!=b.constant_inputs||a.program.integrals!=b.program.integrals||a.rows.size()!=b.rows.size())return false;
     for(std::size_t i=0;i<a.rows.size();++i){const auto& x=a.rows[i];const auto& y=b.rows[i];if(x.size()!=y.size())return false;
@@ -507,32 +522,76 @@ class Sampler {
     if(it==ahead_.end())return nullptr;ahead_.erase(ahead_.begin(),it);return &ahead_.front();
   }
   // Eliminates the selected equations at a bounded stretch of announced
-  // points, the requested one first, each worker with its own equations and
-  // solver. A point whose elimination fails, or leaves other integrals
-  // unreduced than the pilot did, keeps no result: its own request then takes
-  // the serial path, which falls back to all equations and reports failures.
-  void eliminate_announced(const std::vector<ibp::Integral>& requested,modular::Word modulus,const ::ibp::SolveOptions& probe,const fire::Options& limits) {
+  // points, the requested one first, `lanes` points at a time
+  // (::ibp::BatchSolver), each worker with its own solver. A point whose
+  // elimination fails, where a pivot of its batch vanishes, or which leaves
+  // other integrals unreduced than the pilot did, keeps no result: its own
+  // request then takes the serial path, which eliminates at that point alone,
+  // falls back to all equations and reports failures.
+  //
+  // The first batch of a plan also finds the columns of the selected equations
+  // that get no pivot from them and are not terminal either. Such a column
+  // is never a pivot, so its entries enter no other column; in the reduced
+  // targets its entries are zero (the terminal integrals are all that is
+  // left). Later batches leave these columns out (Plan::lean). What that
+  // assumes, that those entries of the targets vanish at every point as they
+  // do at the points of the first batch, is what the serial path checks at
+  // the first sample of every prime and every held-out elimination at its
+  // point: both eliminate with all columns and compare the integrals left.
+  static constexpr unsigned lanes=8;
+  using Batch=::ibp::BatchSolver<lanes>;
+  void eliminate_announced(const std::vector<ibp::Integral>& requested,modular::Word modulus,const fire::Options& limits) {
     using clock=std::chrono::steady_clock;auto since=[](clock::time_point t){return std::chrono::duration<double>(clock::now()-t).count();};
-    std::vector<Ahead*> batch;const std::size_t stretch=4*threads_;
+    std::vector<Ahead*> batch;const std::size_t stretch=4*lanes*threads_;
     for(auto& slot:ahead_){if(batch.size()==stretch)break;if(!slot.result||slot.state!=state_){slot.result.reset();batch.push_back(&slot);}}
-    const auto began=clock::now();std::atomic<std::size_t> next{0};
+    const auto began=clock::now();std::atomic<std::size_t> next{0},multiplications{0},failures{0};
     const auto& parametric=*plan_->program;const auto& program=parametric.program;const auto& selected=*plan_->selection;const auto& terminal=plan_->terminal_columns;
-    auto work=[&]{
-      ::ibp::Field field(modulus);std::vector<::ibp::Word> forms;std::optional<::ibp::Solver> solver;
-      for(;;){const auto i=next.fetch_add(1);if(i>=batch.size()||since(began)>=limits.timeout_seconds)break;auto& slot=*batch[i];const auto start=clock::now();
-        try{std::vector<::ibp::Word> values;for(const auto& input:inputs_)values.push_back(modular::evaluate(input,slot.point,modulus));
-          forms=parametric.evaluate_forms(values,field);
-          if(!solver){auto solve=probe;solve.complete_rows=plan_->complete_selection;solve.progress={};solve.seconds=std::max(1.0,limits.timeout_seconds-since(began));solver.emplace(program,field,solve,parametric.rows,forms);}
-          solver->restart(std::max(1.0,limits.timeout_seconds-since(began)));solver->solve(0,&selected);auto rows=solver->targets(program.target_columns);
-          std::set<::ibp::Column> found;for(const auto& row:rows)for(const auto& entry:row)found.insert(entry.column);
-          if(found!=terminal)continue;
-          fire::Result reduced;emit(reduced,rows,program,requested);slot.seconds=since(start);slot.state=state_;slot.result=std::move(reduced);
-        }catch(...){}
+    const bool complete_rows=plan_->complete_selection;
+    // A batch holds 8 bytes a lane and 4 for the column of every entry.
+    Batch::Limits bounds;bounds.max_fill=std::max<std::size_t>(1,limits.memory_bytes/3/threads_/(8*lanes+4));
+    const std::vector<bool> is_terminal=[&]{std::vector<bool> out(program.integrals.size());for(auto column:terminal)out[column]=true;return out;}();
+    auto work=[&](bool first){
+      ::ibp::Field field(modulus);std::vector<::ibp::Word> forms(parametric.forms.size()*lanes),values;Batch solver(program.integrals.size(),field);Batch::Reduced reduced;
+      std::vector<std::vector<::ibp::Row>> rows(lanes,std::vector<::ibp::Row>(program.target_columns.size()));
+      for(;;){const auto i=next.fetch_add(lanes);if(i>=batch.size()||since(began)>=limits.timeout_seconds)break;const auto start=clock::now();
+        const std::size_t count=std::min<std::size_t>(lanes,batch.size()-i);std::uint64_t bad=0;
+        try{
+          // A batch that is not full repeats its last point.
+          for(unsigned k=0;k<lanes;++k){const auto& point=batch[i+std::min<std::size_t>(k,count-1)]->point;
+            try{values.clear();for(const auto& input:inputs_)values.push_back(modular::evaluate(input,point,modulus));
+              for(std::size_t f=0;f<parametric.forms.size();++f)forms[f*lanes+k]=parametric.forms[f].evaluate(values,field);
+            }catch(const std::domain_error&){bad|=std::uint64_t(1)<<k;for(std::size_t f=0;f<parametric.forms.size();++f)forms[f*lanes+k]=1;}}
+          auto mine=bounds;mine.seconds=std::max(1.0,limits.timeout_seconds-since(began));
+          const bool lean=plan_->lean.has_value();
+          if(lean)solver.solve(*plan_->lean,forms.data(),plan_->lean_order,complete_rows,mine);else solver.solve(parametric.rows,forms.data(),selected,complete_rows,mine);
+          for(auto& lane:rows)for(auto& row:lane)row.clear();
+          for(std::size_t t=0;t<program.target_columns.size();++t){solver.reduce(program.target_columns[t],reduced);
+            for(std::size_t e=0;e<reduced.columns.size();++e){const auto column=reduced.columns[e];
+              for(unsigned k=0;k<lanes;++k)if(const auto value=reduced.values[e*lanes+k]){if(is_terminal[column])rows[k][t].push_back({column,value});else bad|=std::uint64_t(1)<<k;}}}
+          bad|=solver.failed();multiplications+=solver.statistics().multiplications/lanes*count;
+          if(first&&!lean){
+            // The columns without a pivot that are not terminal, if the
+            // batch was sound at some point.
+            if(bad!=(lanes==64?~std::uint64_t(0):(std::uint64_t(1)<<lanes)-1)){
+              ::ibp::FormRows kept(selected.size());std::size_t dropped=0;
+              for(std::size_t r=0;r<selected.size();++r)for(const auto& term:parametric.rows[selected[r]]){if(solver.pivot(term.column)||is_terminal[term.column])kept[r].push_back(term);else ++dropped;}
+              plan_->lean_order.resize(selected.size());std::iota(plan_->lean_order.begin(),plan_->lean_order.end(),0);plan_->lean=std::move(kept);stats_.pruned_terms+=dropped;}
+          }
+          const double seconds=since(start)/count;
+          for(std::size_t k=0;k<count;++k){auto& slot=*batch[i+k];if(bad>>k&1){++failures;continue;}
+            std::set<::ibp::Column> found;for(const auto& row:rows[k])for(const auto& entry:row)found.insert(entry.column);
+            if(found!=terminal){++failures;continue;}
+            fire::Result result;emit(result,rows[k],program,requested);slot.seconds=seconds;slot.state=state_;slot.result=std::move(result);}
+        }catch(...){failures+=count;}
+        if(first)break;
       }};
+    // The first batch of a plan is eliminated alone: the others use what it finds.
+    if(!plan_->lean)work(true);
     const auto busy=std::min<std::size_t>(running(),threads_-1);
     std::vector<std::jthread> pool;
-    try{for(std::size_t i=1;i<std::min<std::size_t>(batch.size(),threads_-busy);++i)pool.emplace_back([&]{work();flint_cleanup();});}catch(const std::system_error&){}
-    work();
+    try{for(std::size_t i=1;i<std::min<std::size_t>((batch.size()+lanes-1)/lanes,threads_-busy);++i)pool.emplace_back([&]{work(false);flint_cleanup();});}catch(const std::system_error&){}
+    work(false);pool.clear();
+    stats_.selected_multiplications+=multiplications;stats_.lane_fallbacks+=failures;
   }
   // Replays a bounded stretch of announced points, the requested one first,
   // each worker in its own workspace. A point that fails in any way keeps no
@@ -838,8 +897,8 @@ class Session {
     out.sample_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits);};
     out.validation_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true);};
     if(anchored)out.anchor_provider=[sampler](const auto& r,const auto& p,auto m,const auto& limits){return (*sampler)(r,p,m,limits,true,true);};
+    out.upcoming_samples=[sampler](const auto& points,auto m){sampler->announce(points,m);};
     if(sampler->works_ahead()){
-      out.upcoming_samples=[sampler](const auto& points,auto m){sampler->announce(points,m);};
       out.upcoming_validation=[sampler,selected=o.selected_source_rows,anchor=o.complete_validation_anchor](const auto& points,double seconds){sampler->anticipate(complete(selected,anchor,points),seconds);};
     }
     return out;

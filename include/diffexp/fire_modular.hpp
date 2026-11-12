@@ -386,16 +386,38 @@ class Session {
       if(options_.sparse_lifting)for(auto& image:images)image=modular::compact_support(image);
       std::size_t lifting_samples=probes.size();
       if(options_.sparse_lifting){lifting_samples=8;for(const auto& image:images)lifting_samples=std::max(lifting_samples,image.coefficients.size()+2);lifting_samples=std::min(lifting_samples,probes.size());}
+      // What sets the samples of the further primes: the coefficient with
+      // the most terms, and how they divide between numerator and denominator.
+      {std::size_t most=0,numerator=0,denominator=0,all_n=0,most_n=0;std::array<unsigned,2> nx{0,0},dx{0,0};
+        for(const auto& image:images){all_n+=image.ansatz.numerator.size();most_n=std::max(most_n,image.ansatz.numerator.size());
+          if(image.coefficients.size()>most){most=image.coefficients.size();numerator=image.ansatz.numerator.size();denominator=image.ansatz.denominator.size();nx={0,0};dx={0,0};
+            for(const auto& t:image.ansatz.numerator)for(std::size_t v=0;v<std::min<std::size_t>(2,t.size());++v)nx[v]=std::max(nx[v],t[v]);
+            for(const auto& t:image.ansatz.denominator)for(std::size_t v=0;v<std::min<std::size_t>(2,t.size());++v)dx[v]=std::max(dx[v],t[v]);}}
+        status("samples of each further prime: "+std::to_string(lifting_samples)+"; the largest coefficient has "+std::to_string(numerator)+" numerator terms (degrees "+std::to_string(nx[0])+","+std::to_string(nx[1])+") and "+std::to_string(denominator)+" denominator terms (degrees "+std::to_string(dx[0])+","+std::to_string(dx[1])+"); the largest numerator "+std::to_string(most_n)+" terms");}
       std::vector<modular::Lift> lifts;for(const auto& image:images)lifts.emplace_back(image,options_.modulus(1));
+      // A coefficient lifted to a rational function is kept while it takes
+      // the values of the samples of every further prime: it is then what
+      // lifting it again from more primes would give, at none of the cost
+      // (the lattice reductions of all coefficients, repeated at every prime,
+      // took as long as the eliminations). The coefficient that failed last
+      // is tried first: while it fails, no other is lifted.
+      std::vector<std::optional<Exact>> lifted(keys.size());std::size_t hardest=0;
       for(unsigned pi=2;pi<=options_.max_primes;++pi) {
         std::vector<detail::Probe> next;acquire(pi,lifting_samples,next);
         auto samples=flatten(next);std::vector<modular::Image> next_images;
         for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,options_.modulus(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
         for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));
-        std::vector<Exact> coefficients;for(const auto& lift:lifts){auto c=lift.reconstruct(dimension_,active);if(!c)break;coefficients.push_back(*c);}
-        bool valid=coefficients.size()==keys.size();std::vector<std::string> validation_files;
+        for(std::size_t i=0;i<keys.size();++i)if(lifted[i]){bool same=true;
+          try{for(std::size_t j=0;j<std::min<std::size_t>(2,next.size())&&same;++j)same=modular::evaluate(*lifted[i],next[j].point,options_.modulus(pi))==detail::coefficient(next[j],keys[i]);}
+          catch(const std::domain_error&){same=false;}
+          if(!same)lifted[i].reset();}
+        const auto lift=[&](std::size_t i){remaining();if(!lifted[i])lifted[i]=lifts[i].reconstruct(dimension_,active);return lifted[i].has_value();};
+        bool valid=keys.empty()||lift(hardest);
+        for(std::size_t i=0;i<keys.size()&&valid;++i)if(!lift(i)){hardest=i;valid=false;}
+        std::vector<Exact> coefficients;if(valid)for(const auto& c:lifted)coefficients.push_back(*c);
+        std::vector<std::string> validation_files;
         // Why a candidate is not accepted yet, for the progress line.
-        std::string pending=valid?"":std::to_string(keys.size()-coefficients.size())+" or fewer coefficients are not rational numbers within the modulus yet";
+        std::string pending=valid?"":std::to_string(std::count_if(lifted.begin(),lifted.end(),[](const auto& c){return !c;}))+" or fewer coefficients are not rational numbers within the modulus yet";
         if(valid)for(unsigned check_prime=pi+1;check_prime<=pi+ordinals::validation_primes&&valid;++check_prime)for(std::size_t j=0;j<ordinals::validation_points&&valid;++j) {
           const auto ordinal=ordinals::validation_point(pi,j);std::optional<detail::Probe> held;
           // Held-out ordinals are fixed by the completion record. An exceptional

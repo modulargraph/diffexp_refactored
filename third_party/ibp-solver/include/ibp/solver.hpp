@@ -53,7 +53,10 @@ inline Program generate(const Geometry& g,const Field& f,const SeedOptions& opti
  std::stable_sort(out.equations.begin(),out.equations.end(),[](const auto& a,const auto& b){return a.front().column==b.front().column?a.size()<b.size():a.front().column>b.front().column;});
  return out;
 }
-struct Statistics {std::size_t equations=0,rank=0,eliminations=0,fill=0,peak_row=0;double seconds=0;};
+// `eliminations` counts the pivot rows subtracted from a row under reduction,
+// `multiplications` the entries of those pivot rows: one modular
+// multiplication each.
+struct Statistics {std::size_t equations=0,rank=0,eliminations=0,multiplications=0,fill=0,peak_row=0;double seconds=0;};
 // `progress`, if set, is told the state of a long elimination every
 // `progress_seconds`: its statistics so far and the seconds it has run.
 // Two ways to store a pivot row, with the same pivot columns, the same rank
@@ -105,7 +108,7 @@ class Solver {
  void eliminate(Column column,Word factor,Column& high){eliminate(pivots_[lookup_[column]].row,factor,high);}
  void eliminate(const Row& pivot,Word factor,Column& high){
   for(const auto& e:pivot){auto& value=dense_[e.column];value=field_.sub(value,field_.mul(factor,e.value));occupied_[e.column>>6]|=std::uint64_t(1)<<(e.column&63);}
-  high=std::max(high,pivot.back().column);++stats_.eliminations;
+  high=std::max(high,pivot.back().column);++stats_.eliminations;stats_.multiplications+=pivot.size();
  }
  // The rows of the leading way, for the pivots a selection asks about.
  struct Leading {Row row;std::vector<Column> dependencies;bool known=false;};

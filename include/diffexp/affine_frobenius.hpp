@@ -1153,8 +1153,14 @@ private:
     auto coefficients=[&](const Exact& p,unsigned top){std::vector<C> result;for(const auto& c:taylor(p,xi_,top))result.emplace_back(c,ei_);trim(result);return result;};
     std::vector<std::vector<std::size_t>> columns(d_);
     for(std::size_t t=0;t<expansion_.terms.size();++t)columns[expansion_.terms[t].column].push_back(t);
-    // Each stored coefficient is converted once, on first use by any row.
-    std::vector<std::optional<C>> sources(expansion_.terms.size());
+    // Each stored coefficient is converted once for the series, not once per
+    // projection: an endpoint projects every observable row by itself, and
+    // each of those calls read the whole series again.
+    std::call_once(sources_->once,[&]{
+      sources_->values.reserve(expansion_.terms.size());
+      for(const auto& t:expansion_.terms)sources_->values.emplace_back(t.coefficient,ei_);
+    });
+    const auto& sources=sources_->values;
     std::vector<long> cutoffs(d_);
     for(unsigned i=0;i<rows.size();++i){
       const long valuation=out.row_x_valuations[i];
@@ -1184,8 +1190,8 @@ private:
         for(const auto index:columns[c]){
           const auto& t=expansion_.terms[index];
           const auto k=static_cast<unsigned long>(integer_value(t.power-eigen_[c].power));if(k>cutoff||numerator[t.row].empty())continue;
-          auto& value=sources[index];if(!value)value.emplace(t.coefficient,ei_);
-          for(unsigned lag=0;lag<numerator[t.row].size()&&k+lag<=cutoff;++lag)if(!numerator[t.row][lag].is_zero())rhs[t.log_degree][k+lag]+=multiply(*value,numerator[t.row][lag]);
+          const auto& value=sources[index];
+          for(unsigned lag=0;lag<numerator[t.row].size()&&k+lag<=cutoff;++lag)if(!numerator[t.row][lag].is_zero())rhs[t.log_degree][k+lag]+=multiply(value,numerator[t.row][lag]);
         }
         for(unsigned l=0;l<=log_high;++l)for(unsigned k=0;k<=cutoff;++k){
           auto& value=rhs[l][k];for(unsigned lag=1;lag<denominator.size()&&lag<=k;++lag)if(!denominator[lag].is_zero()&&!rhs[l][k-lag].is_zero())value-=multiply(denominator[lag],rhs[l][k-lag]);
@@ -1408,6 +1414,9 @@ public:
 
 private:
   Exact zero_;
+  // The coefficients of expansion_ as univariate fractions (project_impl).
+  struct Sources { std::once_flag once; std::vector<UnivariateRational> values; };
+  std::shared_ptr<Sources> sources_ = std::make_shared<Sources>();
   unsigned d_ = 0, n_ = 0, finite_lag_rows_ = 0;
   std::size_t xi_ = 0, ei_ = 0;
   Options options_;

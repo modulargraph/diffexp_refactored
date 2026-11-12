@@ -22,6 +22,7 @@
 #include "diffexp/critical_points.hpp"
 #include "diffexp/epsilon_sampling.hpp"
 #include "diffexp/moving_poles.hpp"
+#include "diffexp/finite_masters.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -80,6 +81,7 @@ int main(int argc, char** argv) {
       bool fire_given=false,fire_prime_given=false;
       auto cache=std::filesystem::temp_directory_path()/"diffexp-exact-cache";
       std::string henn_basis,epsilon_shift,moving_poles;
+      std::string finite_masters="off";
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
       unsigned ibp_max_degree=0;std::string merge_selection="auto",boundary="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
@@ -159,6 +161,10 @@ int main(int argc, char** argv) {
           if(option=="--samples"){if(number<4 || number>200 || number%2)throw std::invalid_argument("--samples must be even, 4..200");samples=number;}
           else if(option=="--sample-jobs"){if(!number || number>1024)throw std::invalid_argument("--sample-jobs must be in 1..1024");sample_jobs=number;}
           else {if(number>64)throw std::invalid_argument("--sample-poles must be in 0..64");sample_poles=static_cast<int>(number);}
+        }
+        else if(option=="--finite-masters") {
+          finite_masters=option_value;
+          if(finite_masters!="on" && finite_masters!="off")throw std::invalid_argument("--finite-masters must be on or off");
         }
         else if(option=="--moving-poles") {
           moving_poles=option_value;
@@ -368,6 +374,31 @@ int main(int argc, char** argv) {
       options.endpoint_refused=[&progress](unsigned level,bool upper,const std::string& reason) {
         progress<<"Level "<<level<<": boundary not taken at x = "<<(upper?1:0)<<": "<<reason<<"\n"<<std::flush;
       };
+      // Masters that are finite at epsilon = 0 where the level has such
+      // integrals (finite_masters.hpp).
+      boost::json::array finite_master_levels;double finite_master_seconds=0;
+      if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& sources,unsigned depth,const auto& reduce) {
+        diffexp::finite_masters::Report chosen;
+        closure=diffexp::finite_masters::choose(merged,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
+          std::move(closure),sources,0,reduce,chosen);
+        finite_master_seconds+=chosen.seconds;
+        if(!chosen.divergent_before)return closure;
+        progress<<"Level "<<depth+1<<": finite masters: "<<chosen.divergent_before<<" of "<<chosen.masters<<" masters fail the convergence test at epsilon = 0 -> "
+          <<chosen.divergent_after<<"; "<<chosen.candidates<<" candidate integrals reduced in "<<chosen.reductions<<" further reductions ("<<chosen.reduction_seconds
+          <<" s); connection characters "<<chosen.characters_before<<" -> "<<chosen.characters_after<<"; "<<chosen.seconds<<" s\n";
+        const auto name=[](const diffexp::ibp::Integral& a){std::string out="[";for(std::size_t i=0;i<a.size();++i)out+=(i?",":"")+std::to_string(a[i]);return out+"]";};
+        boost::json::array steps;
+        for(const auto& step:chosen.steps) {
+          progress<<"  master "<<step.replaced<<" "<<name(step.from)<<" replaced by "<<name(step.to)<<"\n";
+          steps.push_back(boost::json::object{{"replaced_master",step.replaced},{"from",name(step.from)},{"by",name(step.to)}});
+        }
+        if(!chosen.note.empty())progress<<"  "<<chosen.note<<"\n";
+        finite_master_levels.push_back(boost::json::object{{"level",depth+1},{"masters",chosen.masters},{"failing_before",chosen.divergent_before},{"failing_after",chosen.divergent_after},
+          {"candidates",chosen.candidates},{"reductions",chosen.reductions},{"reduction_seconds",chosen.reduction_seconds},
+          {"characters_before",chosen.characters_before},{"characters_after",chosen.characters_after},{"steps",std::move(steps)},{"note",chosen.note},{"seconds",chosen.seconds}});
+        progress<<std::flush;
+        return closure;
+      };
       // exchange: a level swaps masters for cached integrals of the same sector
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
@@ -428,6 +459,7 @@ int main(int argc, char** argv) {
         {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings},
         {"continued_solves",ibp_statistics.continued_solves},{"continued_equations",ibp_statistics.continued_equations},{"reused_solves",ibp_statistics.reused_solves},{"continued_solve_seconds",ibp_statistics.continued_solve_seconds},{"seeds",ibp_seeds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
+      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"seconds",finite_master_seconds}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
       };

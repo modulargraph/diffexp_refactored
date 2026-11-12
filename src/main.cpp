@@ -387,7 +387,16 @@ int main(int argc, char** argv) {
       // finite_masters::revoke.
       struct FiniteLadderBroken {unsigned depth;};
       std::vector<std::filesystem::path> finite_master_records;bool finite_masters_withdrawn=false;
-      if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& exact_field,const auto& sources,unsigned depth,const auto& reduce) {
+      // Only for a family without a cut and without a stated contour. Finite
+      // masters can have apparent singular points that the level's own
+      // masters do not show, and elsewhere every real singular point needs a
+      // causal side: that of a point the integrals do not have cannot always
+      // be derived (sunrise below threshold at timelike momentum, where the
+      // exchanged masters stopped the run at x = 1/2).
+      bool finite_masters_apply=false;
+      if(finite_masters=="on" && (!numerical.causal_prescription || (numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty())))
+        try{finite_masters_apply=diffexp::causal::euclidean(configuration.family);}catch(const std::exception&){}
+      if(finite_masters_apply)options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& exact_field,const auto& sources,unsigned depth,const auto& reduce) {
         if(finite_masters_withdrawn)return closure;
         diffexp::finite_masters::Report chosen;
         closure=diffexp::finite_masters::choose(merged,exact_field,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
@@ -484,7 +493,7 @@ int main(int argc, char** argv) {
         {"threads",ibp_threads},{"batched_replays",ibp_statistics.batched_replays},{"early_solves",ibp_statistics.early_solves},{"early_solves_used",ibp_statistics.early_solves_used},{"seed_widenings",ibp_statistics.seed_widenings},
         {"continued_solves",ibp_statistics.continued_solves},{"continued_equations",ibp_statistics.continued_equations},{"reused_solves",ibp_statistics.reused_solves},{"continued_solve_seconds",ibp_statistics.continued_solve_seconds},{"seeds",ibp_seeds}};
       report["timings"]=boost::json::object{{"preparation_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count()}};
-      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"withdrawn",finite_masters_withdrawn},{"seconds",finite_master_seconds}};
+      report["finite_masters"]=boost::json::object{{"mode",finite_masters},{"levels",finite_master_levels},{"euclidean_family",finite_masters_apply},{"withdrawn",finite_masters_withdrawn},{"seconds",finite_master_seconds}};
       const auto report_moving_poles=[&] {
         if(moving_poles!="keep")report["moving_poles"]=boost::json::object{{"mode",moving_poles},{"levels",moving_pole_levels},{"seconds",moving_pole_seconds}};
       };
@@ -953,7 +962,9 @@ Feynman-trick recursion
                                   fail a convergence test are exchanged for integrals of their sector
                                   with more dots, which removes the cancellation of epsilon poles
                                   between the levels. All masters of a level and all levels below an
-                                  exchanged one, or none; the choice is recorded beside the exact cache
+                                  exchanged one, or none; only for families without a cut (Euclidean
+                                  region) and without a stated contour; the choice is recorded beside
+                                  the exact cache
   --finite-masters-seconds N      time allowed per level for reducing the candidate integrals
                                   (default 120); a level that needs longer keeps its masters
   --moving-poles keep|remove|exchange

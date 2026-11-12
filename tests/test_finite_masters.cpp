@@ -55,6 +55,10 @@ int main(){try {
     pole.target_rows[0]={e("x"),e("(eps+1)/(x-3)")};
     fm::exchange(pole,0,1,four,steps,1);
     check(steps.size()==2,"an apparent singular point in x is admitted");
+    fm::exchange(pole,0,1,four,steps,1,nullptr,true,true,false);
+    check(steps.size()==1 && steps[0].to==integral(3,0),"but not where every real singular point needs a causal side");
+    const auto apparent=fm::exchange(pole,0,1,four,steps,1,nullptr,false);
+    check(fm::regular(pole.matrix,apparent.matrix,0,1) && !fm::regular(pole.matrix,apparent.matrix,0,1,false),"the finished basis is checked for it too");
     // Nor one whose connection has an epsilon pole no shear removes: J=[2,1]
     // defined with a coefficient that vanishes at epsilon = 0 at its master.
     auto dependent=level;dependent.target_rows[0]={e("1"),e("eps")};

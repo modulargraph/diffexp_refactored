@@ -194,7 +194,7 @@ struct Report {
 // offered to it again.
 inline level::Result exchange(level::Result level, std::size_t xi, std::size_t ei, const Convergence &convergent,
                               std::vector<Step> &steps, std::size_t sources, const std::vector<Step> *script = nullptr,
-                              bool guarded = true, bool finish_incomplete = true) {
+                              bool guarded = true, bool finish_incomplete = true, bool apparent_points = true) {
   steps.clear();
   if (!level.success || level.matrix.empty())
     return level;
@@ -248,9 +248,13 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
   // with epsilon and that it did not have: finite integrals can be dependent
   // at single points, and a moving pole that meets an endpoint at epsilon = 0
   // leaves the level without an endpoint series (planar double box, lowest
-  // level). A new singular point in x alone is admitted: it is an apparent
-  // one, which the paths pass like any other (the finite masters of the
-  // four-loop banana have one on each of the two upper levels).
+  // level). A new singular point in x alone is an apparent one, which the
+  // paths pass like any other (the finite masters of the four-loop banana
+  // have one on each of the two upper levels). It is admitted with
+  // `apparent_points`, which is for families without a cut: elsewhere every
+  // real singular point needs a causal side, and that of a point the
+  // integrals do not have cannot always be derived (sunrise below threshold
+  // at timelike momentum, where a new point at x = 1/2 stopped the run).
   denominator_factors::Catalogue catalogue(xi, ei);
   std::set<std::size_t> singular;
   if (checked)
@@ -264,7 +268,8 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
       for (const auto &value : matrix_row)
         if (!value.is_zero())
           for (const auto &[factor, power] : catalogue.split(value.denominator()))
-            if (catalogue.factors()[factor].kind == denominator_factors::Kind::mixed && !singular.count(factor))
+            if (!singular.count(factor) && (catalogue.factors()[factor].kind == denominator_factors::Kind::mixed ||
+                                            (!apparent_points && catalogue.factors()[factor].kind == denominator_factors::Kind::parameter)))
               return true;
     return false;
   };
@@ -332,7 +337,7 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
   }
   if (light) {
     const auto planned = steps;
-    return exchange(std::move(level), xi, ei, convergent, steps, sources, &planned);
+    return exchange(std::move(level), xi, ei, convergent, steps, sources, &planned, true, true, apparent_points);
   }
   recursion::verify_physical_basis(basis, level.matrix, xi);
   level.requested_integrals.resize(std::min(sources, level.requested_integrals.size()));
@@ -358,10 +363,12 @@ inline level::Result exchange(level::Result level, std::size_t xi, std::size_t e
   return level;
 }
 
-// Whether `connection` has only the moving singular points of `original` and
-// no epsilon poles beyond a diagonal shear if `original` has none: the
+// Whether `connection` has only the moving singular points of `original`
+// (without `apparent_points`: only its singular points in x as well) and no
+// epsilon poles beyond a diagonal shear if `original` has none: the
 // conditions exchange() imposes per step, on a finished basis.
-inline bool regular(const moving_poles::Matrix &original, const moving_poles::Matrix &connection, std::size_t xi, std::size_t ei) {
+inline bool regular(const moving_poles::Matrix &original, const moving_poles::Matrix &connection, std::size_t xi, std::size_t ei,
+                    bool apparent_points = true) {
   const auto sheared = [&](const moving_poles::Matrix &matrix) {
     try {
       (void)epsilon_diagonal_gauge(matrix, ei);
@@ -383,7 +390,8 @@ inline bool regular(const moving_poles::Matrix &original, const moving_poles::Ma
     for (const auto &value : matrix_row)
       if (!value.is_zero())
         for (const auto &[factor, power] : catalogue.split(value.denominator()))
-          if (catalogue.factors()[factor].kind == denominator_factors::Kind::mixed && !singular.count(factor))
+          if (!singular.count(factor) && (catalogue.factors()[factor].kind == denominator_factors::Kind::mixed ||
+                                          (!apparent_points && catalogue.factors()[factor].kind == denominator_factors::Kind::parameter)))
             return false;
   return true;
 }
@@ -429,7 +437,7 @@ inline ibp::Integral integral_from(const boost::json::value &value) {
 inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField &field, std::size_t loops,
                             const Rational &dimension_at_zero, level::Result closure, const std::vector<ibp::Integral> &sources, std::size_t xi, std::size_t ei,
                             const std::function<level::Result(const std::vector<ibp::Integral> &, double)> &reduce, Report &report,
-                            const std::filesystem::path &directory = {}, double seconds = 120) {
+                            const std::filesystem::path &directory = {}, double seconds = 120, bool apparent_points = true) {
   namespace json = boost::json;
   const auto start = std::chrono::steady_clock::now();
   const auto elapsed = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
@@ -475,7 +483,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
   // The record of an earlier preparation of this level.
   std::filesystem::path file;
   if (!directory.empty()) {
-    std::string text = "finite-masters-v7|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "|";
+    std::string text = "finite-masters-v8|" + std::to_string(loops) + "|" + dimension_at_zero.str() + "|" + std::to_string(xi) + "," + std::to_string(ei) + "," + std::to_string(seconds) + "," + std::to_string(apparent_points) + "|";
     for (const auto &name : closure.matrix.at(0).at(0).variables())
       text += name + ",";
     for (const std::vector<ibp::Integral> *list : std::initializer_list<const std::vector<ibp::Integral> *>{&closure.ordered_basis, &sources}) {
@@ -566,7 +574,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
   const auto attempt = [&](const level::Result &from) {
     for (const bool guarded : {false, true}) {
       std::vector<Step> steps;
-      auto now = exchange(from, xi, ei, convergent, steps, sources.size(), nullptr, guarded, false);
+      auto now = exchange(from, xi, ei, convergent, steps, sources.size(), nullptr, guarded, false, apparent_points);
       const auto left = failing(now);
       if (left && !guarded) {
         // More candidates are needed whatever the check says.
@@ -577,7 +585,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
         open_masters = left;
         return;
       }
-      if (!left && (guarded || regular(from.matrix, now.matrix, xi, ei))) {
+      if (!left && (guarded || regular(from.matrix, now.matrix, xi, ei, apparent_points))) {
         complete = true;
         open_masters = 0;
         best_steps = std::move(steps);
@@ -663,7 +671,7 @@ inline level::Result choose(const ibp::PropagatorBasis &merged, const ExactField
   }
   if (!complete) {
     if (report.note.empty())
-      report.note = "kept: " + std::to_string(open_masters) + " masters have no finite replacement without a moving pole";
+      report.note = "kept: " + std::to_string(open_masters) + " masters have no finite replacement without a " + (apparent_points ? "moving pole" : "new singular point");
     else if (report.note.rfind("kept: ", 0) != 0)
       report.note = "kept: " + report.note;
     best = closure;

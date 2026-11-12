@@ -3,6 +3,8 @@
 #include <flint/nmod_mat.h>
 #include <flint/nmod.h>
 #include <flint/fmpq.h>
+#include <flint/fmpz_mat.h>
+#include <flint/fmpz_lll.h>
 #include <optional>
 #include <functional>
 #include <numeric>
@@ -192,6 +194,50 @@ inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigne
 }
 struct Lift {
   Ansatz ansatz;std::vector<Integer> residues;Integer modulus;
+  // The coefficients of one rational function share a denominator d (the
+  // integer its normalising coefficient stands for). Reconstructed one by
+  // one, each needs a modulus beyond 2*|a|*d, twice the bits of the integers
+  // themselves. Together they need little more than those bits: (d*r_1 mod
+  // M, ..., d*r_k mod M, d) is a short vector of the lattice spanned by
+  // M*e_1, ..., M*e_k and (r_1, ..., r_k, 1), of length about 2^H where the
+  // lattice has determinant M^k, so that M beyond 2^(H(k+1)/k) singles it
+  // out. The d found from k coefficients is accepted only if it makes every
+  // coefficient of the function that small, 16 bits below what a lattice of
+  // this determinant always contains; held-out primes validate the result as
+  // they do any other.
+  bool together(std::vector<fmpq>& out)const {
+    constexpr std::size_t most=11;constexpr unsigned rounds=8,margin=16;
+    Integer d(1),a,half,bound,factor;fmpz_fdiv_q_2exp(half.value,modulus.value,1);
+    // M^(11/12) / 2^16: what the largest lattice used always contains, less 16 bits.
+    fmpz_pow_ui(bound.value,modulus.value,most);fmpz_root(bound.value,bound.value,most+1);fmpz_fdiv_q_2exp(bound.value,bound.value,margin);
+    std::vector<Integer> scaled(residues.size());
+    const auto rescale=[&]{std::vector<std::size_t> large;
+      for(std::size_t i=0;i<residues.size();++i){auto* v=scaled[i].value;fmpz_mul(v,residues[i].value,d.value);fmpz_mod(v,v,modulus.value);
+        if(fmpz_cmp(v,half.value)>0)fmpz_sub(v,v,modulus.value);if(fmpz_cmpabs(v,bound.value)>=0)large.push_back(i);}
+      return large;};
+    // A denominator found from some coefficients need not clear the others:
+    // those it leaves large give the factor that is missing.
+    auto large=rescale();
+    for(unsigned round=0;!large.empty();++round) {
+      if(round==rounds)return false;
+      const auto k=static_cast<slong>(std::min(most,large.size()));
+      fmpz_mat_t basis;fmpz_mat_init(basis,k+1,k+1);
+      for(slong j=0;j<k;++j){fmpz_set(fmpz_mat_entry(basis,j,j),modulus.value);fmpz_mod(fmpz_mat_entry(basis,k,j),scaled[large[j]].value,modulus.value);}
+      fmpz_one(fmpz_mat_entry(basis,k,k));
+      fmpz_lll_t context;fmpz_lll_context_init_default(context);fmpz_lll(basis,nullptr,context);
+      fmpz_abs(factor.value,fmpz_mat_entry(basis,0,k));fmpz_mat_clear(basis);
+      if(fmpz_is_zero(factor.value)||fmpz_is_one(factor.value))return false;
+      fmpz_mul(d.value,d.value,factor.value);if(fmpz_cmpabs(d.value,bound.value)>=0)return false;
+      const std::vector<std::size_t> used(large.begin(),large.begin()+k);large=rescale();
+      // A smaller lattice always contains a shorter vector: what it found
+      // must be as far below that as well.
+      if(static_cast<std::size_t>(k)<most){Integer small;fmpz_pow_ui(small.value,modulus.value,static_cast<ulong>(k));fmpz_root(small.value,small.value,k+1);fmpz_fdiv_q_2exp(small.value,small.value,margin);
+        if(fmpz_cmpabs(factor.value,small.value)>=0)return false;
+        for(auto i:used)if(fmpz_cmpabs(scaled[i].value,small.value)>=0)return false;}
+    }
+    for(std::size_t i=0;i<residues.size();++i)fmpq_set_fmpz_frac(&out[i],scaled[i].value,d.value);
+    return true;
+  }
   explicit Lift(const Image& image,Word p):ansatz(image.ansatz),modulus(p){for(auto c:image.coefficients)residues.emplace_back(c);}
   void append(const Image& image,Word p) {
     if(image.ansatz.numerator!=ansatz.numerator||image.ansatz.denominator!=ansatz.denominator||image.ansatz.pivot!=ansatz.pivot||image.coefficients.size()!=residues.size()||fmpz_fdiv_ui(modulus.value,p)==0)
@@ -204,10 +250,9 @@ struct Lift {
   std::optional<Exact> reconstruct(const Exact& sample,const std::vector<std::size_t>& active)const {
     struct Rationals {std::vector<fmpq> q;fmpz_t scale;explicit Rationals(std::size_t n):q(n){for(auto& v:q)fmpq_init(&v);fmpz_init_set_ui(scale,1);}
       ~Rationals(){for(auto& v:q)fmpq_clear(&v);fmpz_clear(scale);}Rationals(const Rationals&)=delete;}values(residues.size());
-    for(std::size_t i=0;i<residues.size();++i) {
+    if(!together(values.q))for(std::size_t i=0;i<residues.size();++i)
       if(!fmpq_reconstruct_fmpz(&values.q[i],residues[i].value,modulus.value))return std::nullopt;
-      fmpz_lcm(values.scale,values.scale,fmpq_denref(&values.q[i]));
-    }
+    for(std::size_t i=0;i<residues.size();++i)fmpz_lcm(values.scale,values.scale,fmpq_denref(&values.q[i]));
     std::vector<std::vector<unsigned long>> powers(residues.size(),std::vector<unsigned long>(sample.variable_count()));
     std::vector<Exact::IntegerTerm> n,d;
     for(std::size_t i=0;i<residues.size();++i) {

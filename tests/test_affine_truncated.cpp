@@ -295,6 +295,28 @@ int main() {
     }
     check(projected > 2000 && primitives > 500 && refused > 0 && operators > 4 && demands > 2,
           "the truncated projections lost their coverage");
+    {
+      // Nilpotent coefficients whose kernels have echelon bases with poles at
+      // eps=0 (eps*v2+v3=0 gives (0,-1/eps,1)): Jordan chains that are regular
+      // with a regular inverse exist, and are found.
+      using fuchsify::detail::multiply;
+      for (const auto &n : {matrix(field, {{"0", "eps", "1"}, {"0", "0", "0"}, {"0", "0", "0"}}),
+                            matrix(field, {{"0", "eps", "1", "0"}, {"0", "0", "0", "1+eps"}, {"0", "0", "0", "-eps-eps^2"}, {"0", "0", "0", "0"}}),
+                            matrix(field, {{"0", "1", "eps", "2"}, {"0", "0", "1", "1"}, {"0", "0", "0", "1-eps"}, {"0", "0", "0", "0"}})}) {
+        const auto plain = fuchsify::detail::nilpotent_frame(n), regular = fuchsify::detail::nilpotent_frame(n, 1);
+        check(!fuchsify::detail::unimodular(plain, 1) || plain == regular, "the echelon Jordan frame was expected to be singular at eps=0");
+        check(fuchsify::detail::unimodular(regular, 1), "no regular Jordan chains were found for a matrix of dimension " + std::to_string(n.size()) + " with entry " + n[0][1].str());
+        const auto jordan = multiply(fuchsify::detail::inverse(regular), multiply(n, regular));
+        for (unsigned i = 0; i < jordan.size(); ++i)
+          for (unsigned j = 0; j < jordan.size(); ++j)
+            check(jordan[i][j].is_zero() || (j == i + 1 && jordan[i][j] == e("1")), "regular chains are not Jordan chains");
+      }
+      // A connection with a pole at eps=0 is answered with exact coefficients.
+      Series::Options options;
+      options.epsilon_orders = 5;
+      check(!Series::prepare(matrix(field, {{"eps/x", "1/(eps*(1-x))"}, {"0", "(1+eps)/x"}}), 0, 1, 4, options).truncated(),
+            "a connection with poles at eps=0 was truncated");
+    }
     std::cout << "Truncated projections: " << projected << " projected and " << primitives << " integrated coefficients agree, "
               << refused << " refusals shared, " << operators << " operators within the exact enclosures after " << demands << " demands\n";
     std::cout << "Truncated epsilon series: " << compared << " coefficients agree with the exact rational functions ("

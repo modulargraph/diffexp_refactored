@@ -2,6 +2,18 @@
 
 ## 2.2.1
 
+- Cancellation between the levels. The exact row gauge of an endpoint
+  frame takes a pivot within 2^-20 of the largest admissible one instead of
+  the first entry that is not zero: the expanded run of a three-loop family
+  with nine propagators returned radii of 1e+1301 at any working precision
+  and now has 30 digits at 384 bits. Weighted rows drop the epsilon orders
+  that cancelled to rounding (`NumericalOptions::clear_cancelled_orders`,
+  `cleared_epsilon_orders` in the JSON report): unchanged values with 17 to
+  31 per cent fewer products in the expanded runs of the bananas and of
+  that family. A fit no longer fails on a sample that lowered its admitted
+  Taylor tail, and later samples start at that tail (`--tail-floor`).
+  [performance.md](docs/performance.md) has the measurements of where the
+  cancellation comes from.
 - Numerical phase, counted work. A moving pole is kept when its removal
   would leave the level's connection more than four times larger
   (`moving_poles::Options::max_growth`), and the outcome of the moving-pole

@@ -1,6 +1,7 @@
 # Laptop comparison with AMFlow 2.0
 
-DiffExp 2.1 is faster on the accepted small-integral comparisons below. These are
+DiffExp 2.1 was faster on the accepted small-integral comparisons below (measured
+with 2.1.1; not repeated for 2.2). These are
 end-to-end measurements at a common **20 decimal digit validation threshold**,
 not a universal ranking of differential-equation solvers. The bubble uses
 DiffExp's specialized certified leaf; the other cases use generic FT recursion.

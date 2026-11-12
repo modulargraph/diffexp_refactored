@@ -90,7 +90,7 @@ expression/preparation layer before considering replacement of FLINT.
 
 ## Reproduce
 
-From a configured DiffExp 2.1 checkout with FLINT and Boost JSON installed:
+From a configured DiffExp checkout with FLINT and Boost JSON installed:
 
 ```sh
 python3 tools/performance/literature/chess/run_benchmark.py /tmp/chess-reproduction

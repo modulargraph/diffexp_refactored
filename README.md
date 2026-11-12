@@ -22,13 +22,16 @@ IBP reduction included, 28 requested digits) on a 4-core Linux machine:
 | Integral family | Time |
 | --- | ---: |
 | One-loop box, pentagon | 0.1 s, 0.7 s |
-| Two-loop sunrise, box-bubble | 0.2 s, 0.5 s |
-| One-loop pentagon with masses | 1.4 s |
-| Two-loop box-triangle | 2.1 s |
-| Three-loop banana, equal / unequal masses | 1.8 s / 2.5 s |
-| Two-loop kite | 4.6 s |
-| Two-loop planar double box | 14 s |
-| Four-loop banana, equal / four masses | 48 s / 87 s |
+| Two-loop sunrise, box-bubble | 0.2 s, 0.4 s |
+| One-loop pentagon with masses | 2.4 s |
+| Two-loop box-triangle | 0.9 s |
+| Three-loop banana, equal / unequal masses | 2.3 s / 2.9 s |
+| Two-loop kite | 1.6 s |
+| Two-loop planar double box | 6.5 s |
+| Four-loop banana, equal / four masses | 26 s / 104 s (9 s / 13 s with a warm cache) |
+
+The first run of a family also reduces its finite-master candidates; later
+runs read them from the cache.
 
 Transport of a supplied system: 13 one-loop canonical integrals through
 epsilon^4 in 3.9 s; the equal-mass banana system at 60 digits in 4.0 s.

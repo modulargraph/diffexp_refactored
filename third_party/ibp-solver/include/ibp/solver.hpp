@@ -109,7 +109,10 @@ class Solver {
  }
  // The rows of the leading way, for the pivots a selection asks about.
  struct Leading {Row row;std::vector<Column> dependencies;bool known=false;};
- std::vector<Leading> leading_;std::vector<std::uint32_t> mark_;std::uint32_t generation_=0;
+ // Their entries count against the same fill budget as the pivot rows: the
+ // tails they keep are what a complete elimination avoids, and for a large
+ // selection they outgrow it.
+ std::vector<Leading> leading_;std::vector<std::uint32_t> mark_;std::uint32_t generation_=0;std::size_t leading_fill_=0;
  using Fetch=std::function<Row(std::uint32_t)>;
  Word dimension_=0;
  Row source_row(std::uint32_t source)const{Row row;
@@ -151,6 +154,8 @@ class Solver {
    }
    if(row.empty()||row.front().column!=own)throw std::logic_error("leading row does not end at its pivot column");
    const auto inverse=field_.inv(row.front().value);for(auto& entry:row)entry.value=field_.mul(entry.value,inverse);
+   row.shrink_to_fit();leading_fill_+=row.size();
+   if(stats_.fill+leading_fill_>options_.max_fill)throw std::length_error("pivot fill budget exceeded by the leading rows of the selected equations");
    out.row=std::move(row);out.known=true;leading_[p]=std::move(out);stack.pop_back();
   }
  }
@@ -166,7 +171,7 @@ class Solver {
  // `kept` continues an elimination: pivots of a subsystem of this program,
  // in this program's columns and equation indices. With them, `selected`
  // names the equations that subsystem did not contain.
- void solve(Word dimension,const std::vector<std::uint32_t>* selected=nullptr,std::vector<Pivot> kept={}){started_=std::chrono::steady_clock::now();told_=0;pivots_=std::move(kept);leading_.clear();dimension_=dimension;std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};
+ void solve(Word dimension,const std::vector<std::uint32_t>* selected=nullptr,std::vector<Pivot> kept={}){started_=std::chrono::steady_clock::now();told_=0;pivots_=std::move(kept);leading_.clear();leading_fill_=0;dimension_=dimension;std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};
   for(std::size_t i=0;i<pivots_.size();++i){const auto& row=pivots_[i].row;if(row.empty()||row.front().column>=lookup_.size()||lookup_[row.front().column]>=0)throw std::invalid_argument("kept pivots are not an echelon basis of this program");lookup_[row.front().column]=i;stats_.fill+=row.size();++stats_.rank;}
   auto insert=[&](std::uint32_t source){if((stats_.equations++&127)==0)budget();Row row=source_row(source);std::vector<Column> dependencies;
    if(options_.complete_rows){
@@ -211,7 +216,7 @@ class Solver {
  // and its pivots.
  std::vector<Row> targets(const std::vector<Column>& columns,std::vector<Column>* touched=nullptr){std::vector<Row> out;for(auto column:columns)out.push_back(reduce({{column,1}},touched));return out;}
  void restart(double seconds){options_.seconds=seconds;started_=std::chrono::steady_clock::now();told_=0;}
- std::vector<Pivot> release(){std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};leading_.clear();return std::move(pivots_);}
+ std::vector<Pivot> release(){std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};leading_.clear();leading_fill_=0;return std::move(pivots_);}
  bool complete_rows()const{return options_.complete_rows;}
  // The equations that reproduce the reductions of the given columns when
  // eliminated alone, in order, the leading way: those of the pivots the

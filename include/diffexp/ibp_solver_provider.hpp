@@ -406,6 +406,28 @@ class Sampler {
         // pilot's subset, which the reconstruction samples were drawn from.
         if(options_.selected_source_rows&&!selected&&!(complete&&plan_->selection)){
           plan_->selection=selection();plan_->terminal_columns=terminals(full);
+          // Which way the selected equations are eliminated at every sample
+          // point is measured here, once: the few of the leading way, whose
+          // rows keep their tails, or the more of complete rows. A level with
+          // high numerators took 6 s a sample the first way.
+          if(!plan_->complete_selection&&solver->complete_rows()){
+            const auto forms=parametric.evaluate_forms(values,field);
+            auto trial=[&](const std::vector<std::uint32_t>& chosen,bool complete_rows)->std::optional<double>{
+              auto way=solve;way.complete_rows=complete_rows;way.progress={};way.seconds=remaining();
+              ::ibp::Solver test(program,field,way,parametric.rows,forms);const auto began=std::chrono::steady_clock::now();
+              try{test.solve(0,&chosen);if(terminals(test.targets(program.target_columns))!=plan_->terminal_columns)return std::nullopt;}
+              catch(const std::length_error&){return std::nullopt;}
+              return std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();};
+            const auto leading=trial(*plan_->selection,false);
+            if(options_.progress&&(!leading||*leading>0.25))options_.progress("trial: "+std::to_string(plan_->selection->size())+" selected equations by leading columns: "+(leading?std::to_string(*leading)+" s":std::string("failed")));
+            if(!leading||*leading>0.25){
+              solver->restart(remaining());auto wider=solver->complete_selection(program.target_columns);const auto whole=trial(wider,true);
+              if(options_.progress&&(!leading||*leading>0.25))options_.progress("trial: "+std::to_string(wider.size())+" selected equations with complete rows: "+(whole?std::to_string(*whole)+" s":std::string("failed")));
+              if(whole&&(!leading||*whole<*leading)){
+                if(options_.progress)options_.progress("selected equations: "+std::to_string(wider.size())+" eliminated with complete rows in "+std::to_string(*whole)+" s, against "+std::to_string(plan_->selection->size())+" by their leading columns in "+(leading?std::to_string(*leading)+" s":std::string("more than the fill budget"))+"; samples take the first");
+                plan_->complete_selection=true;plan_->selection=std::move(wider);dependencies=*plan_->selection;}
+            }
+          }
           if(options_.progress)options_.progress("full IBP pilot: "+std::to_string(parametric.rows.size())+" equations, "+std::to_string(plan_->selection->size())+" original rows needed for target identities");
         }
         if(replayed&&rows!=full){learned.trace.reset();++stats_.trace_fallbacks;replayed=false;}

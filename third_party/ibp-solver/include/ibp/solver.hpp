@@ -230,8 +230,14 @@ class Solver {
   for(auto root:roots)need(root);std::size_t steps=0;
   while(!stack.empty()){const auto p=stack.back();stack.pop_back();if((steps++&1023)==0)budget();
    for(const auto& entry:source_row(pivots_[p].source))need(entry.column);for(const auto& entry:pivots_[p].row)need(entry.column);}
-  std::vector<std::uint32_t> result;for(std::size_t p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);std::sort(result.begin(),result.end());return result;
+  std::vector<std::uint32_t> result;for(std::size_t p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);return result;
  }
+ // Selections name their equations in the order of the pivots, which is the
+ // order this elimination inserted them in (after a continued elimination
+ // not that of their indices): eliminated alone in that order they meet the
+ // rows they met here. In the order of their indices the selected equations
+ // of a widened system took seconds a sample where this order takes a
+ // fraction of one.
  // The equations that reproduce the reductions of the given columns when
  // eliminated alone, in order, the leading way: those of the pivots the
  // reductions meet and of the pivots their equations were reduced by. After
@@ -267,7 +273,7 @@ class Solver {
    }
    while(!stack.empty()){const auto p=stack.back();stack.pop_back();for(auto column:leading_[p].dependencies)need(column);}
   }
-  std::vector<std::uint32_t> result;for(std::size_t p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);std::sort(result.begin(),result.end());return result;
+  std::vector<std::uint32_t> result;for(std::size_t p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);return result;
  }
  const Statistics& statistics()const{return stats_;}
  std::vector<Column> free_columns()const {std::vector<Column> result;for(unsigned i=0;i<lookup_.size();++i)if(lookup_[i]<0)result.push_back(i);return result;}

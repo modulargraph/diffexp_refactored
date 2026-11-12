@@ -2,6 +2,15 @@
 
 ## 2.2.1
 
+- Fixed: a chart centre of few bits deep below the binary point (the first
+  charts next to an endpoint) had the coefficient polynomials of degree
+  above ten rounded while they were shifted to it, at a precision that did
+  not follow the working precision. Their relative radius of about 2^-300
+  was harmless at 384 bits and exhausted the conditioning halvings from
+  about 640 bits on ("adjoint arithmetic-conditioning step budget
+  exhausted", four-loop banana with `--precision-bits 640
+  --transport-bits 180`). The shift is exact again.
+
 - The scalar leaf of a recursion around a shifted epsilon is expanded at
   the shifted dimension itself (`CertifiedDeepestBetaOptions::epsilon_shift`,
   `feynman::tadpole_branch` with a shift), through the requested order,

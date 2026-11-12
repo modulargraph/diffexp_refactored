@@ -722,7 +722,18 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
       detail::set_exact(acb_imagref(coefficients[n].raw()),p[n].imaginary,out.precision);
       exact=std::max<slong>(exact,acb_bits(coefficients[n].raw())+64);
     }
-    exact+=static_cast<slong>(p.size())*(acb_bits(center.raw())+2);
+    // A product with the centre lengthens a number by the bits of the
+    // centre, and its sum with the next coefficient by the depth of the
+    // centre's lowest bit below the binary point: a centre 59/2^14 has six
+    // bits and reaches fourteen places down at every power. Bits plus
+    // |exponent| covers both. (With the bits alone a polynomial of degree
+    // above ten was rounded here, at a precision that does not follow the
+    // working precision: its coefficients then carried a relative radius of
+    // some 2^-300 whatever the precision.)
+    slong span=0;
+    for(const auto* part:{arb_midref(acb_realref(center.raw())),arb_midref(acb_imagref(center.raw()))})
+      if(!arf_is_zero(part))span=std::max<slong>(span,arf_bits(part)+std::abs(arf_abs_bound_lt_2exp_si(part)));
+    exact+=static_cast<slong>(p.size())*(span+2);
     // Horner shift p(center+t): every intermediate fits in `exact` bits.
     for (std::size_t i=p.size();i-->1;)
       for (std::size_t j=i-1;j+1<p.size();++j)

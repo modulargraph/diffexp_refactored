@@ -19,7 +19,9 @@ class ArithmeticTrace {
  std::size_t nodes_=0,registers_=0,inversions_=0,input_count_=0;
  std::vector<std::pair<Id,Word>> constant_inputs_;
  public:
- struct Options {std::size_t max_nodes=4000000,max_fill=12000000;double seconds=120;bool cse=true;};
+ // complete_rows: as SolveOptions::complete_rows. The default, the leading
+ // way, computes least for the few equations a trace is learned from.
+ struct Options {std::size_t max_nodes=4000000,max_fill=12000000;double seconds=120;bool cse=true;bool complete_rows=false;};
  struct Workspace {std::vector<Word> values;};
  struct DeviceProgram {
   Word prime;std::uint32_t registers;
@@ -65,20 +67,44 @@ class ArithmeticTrace {
    }return row;
   };
   std::vector<int> lookup(program.integrals.size(),-1);std::vector<TraceRow> pivots;std::size_t fill=0;
+  // As in Solver: a row is reduced completely by the pivots before it, in a
+  // dense vector of node ids with one bit per occupied column.
+  std::vector<Id> dense(program.integrals.size(),zero);std::vector<std::uint64_t> occupied((program.integrals.size()+63)/64,0);std::size_t steps=0;
+  auto reduce=[&](TraceRow& row){
+   if(row.empty())return;Column low=row.front().column,high=low;
+   for(const auto& e:row){low=std::min(low,e.column);high=std::max(high,e.column);dense[e.column]=e.id;occupied[e.column>>6]|=std::uint64_t(1)<<(e.column&63);}
+   row.clear();
+   for(Column column=low;column<=high;++column){
+    std::size_t w=column>>6;std::uint64_t word=occupied[w]&(~std::uint64_t(0)<<(column&63));
+    while(!word&&++w<=(high>>6))word=occupied[w];
+    if(!word)break;column=static_cast<Column>((w<<6)+std::countr_zero(word));if(column>high)break;
+    const Id id=dense[column];dense[column]=zero;occupied[column>>6]&=~(std::uint64_t(1)<<(column&63));
+    const auto pivot=lookup[column];if(pivot<0){row.push_back({column,id});continue;}
+    if((++steps&1023)==0)budget();
+    // The pivot's own column: id - id*1, zero by construction.
+    for(const auto& e:pivots[pivot])if(e.column!=column){
+     const Id next=operation(Op::sub,dense[e.column],operation(Op::mul,id,e.id));
+     if(nonzero(next)){dense[e.column]=next;occupied[e.column>>6]|=std::uint64_t(1)<<(e.column&63);high=std::max(high,e.column);}
+     else{dense[e.column]=zero;occupied[e.column>>6]&=~(std::uint64_t(1)<<(e.column&63));}
+    }
+   }
+  };
   for(auto source:selection){budget();if(source>=program.equations.size())throw std::invalid_argument("trace source out of range");TraceRow row;
    for(std::size_t j=0;j<program.equations[source].size();++j){auto e=program.equations[source][j];Id id;
-    if(parametric){const auto& c=parametric->coefficients.at(source).at(j);id=constant(f.integer(c.constant));for(auto [slot,k]:c.terms)id=operation(Op::add,id,operation(Op::mul,constant(f.integer(k)),input_ids.at(slot)));}
+    if(parametric){const auto& c=parametric->forms.at(parametric->coefficients.at(source).at(j));id=constant(f.integer(c.constant));for(auto [slot,k]:c.terms)id=operation(Op::add,id,operation(Op::mul,constant(f.integer(k)),input_ids.at(slot)));}
     else id=operation(Op::add,constant(e.constant),operation(Op::mul,constant(e.dimension),dim));
     if(nonzero(id))row.push_back({e.column,id});}
-   while(!row.empty()&&lookup[row.front().column]>=0)row=subtract(row,pivots[lookup[row.front().column]],row.front().id);
+   if(options.complete_rows)reduce(row);
+   else while(!row.empty()&&lookup[row.front().column]>=0)row=subtract(row,pivots[lookup[row.front().column]],row.front().id);
    if(row.empty())continue;auto inv=operation(Op::inv,row.front().id);for(auto& e:row)e.id=operation(Op::mul,e.id,inv);
    // Normalization is algebraically one, even when the builder cannot simplify
    // a*inv(a). Keeping it symbolic would impede structural cancellation.
    row.front().id=one;lookup[row.front().column]=pivots.size();fill+=row.size();if(fill>options.max_fill)throw std::length_error("trace pivot fill budget exceeded");pivots.push_back(std::move(row));
   }
-  std::vector<TraceRow> results;for(auto column:program.target_columns){TraceRow row{{column,one}};std::size_t i=0;
-   while(i<row.size()){budget();auto pivot=lookup[row[i].column];if(pivot<0){++i;continue;}row=subtract(row,pivots[pivot],row[i].id);}results.push_back(std::move(row));
-  }
+  std::vector<TraceRow> results;for(auto column:program.target_columns){budget();TraceRow row{{column,one}};
+   if(options.complete_rows)reduce(row);
+   else{std::size_t i=0;while(i<row.size()){budget();auto pivot=lookup[row[i].column];if(pivot<0){++i;continue;}row=subtract(row,pivots[pivot],row[i].id);}}
+   results.push_back(std::move(row));}
   // Retain outputs and zero guards. A sample-specific cancellation must never
   // silently become a symbolic identity. Nonzero pivot guards are inv checks.
   std::vector<bool> live(nodes.size());std::vector<Id> stack=zero_guards;for(const auto& row:results)for(auto e:row)stack.push_back(e.id);

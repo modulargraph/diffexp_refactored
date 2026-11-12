@@ -57,6 +57,11 @@ struct Options {
   unsigned threads=0;
   std::optional<std::size_t> closure_parameter;
   unsigned max_planning_passes=6;
+  // How the arithmetic trace of the selected equations eliminates them
+  // (::ibp::SolveOptions::complete_rows): reducing every row completely
+  // shares, between the targets of a level, what the leading way repeats for
+  // each of them.
+  bool trace_complete_rows=false;
   std::function<void(const std::string&)> progress;
 };
 struct Statistics {
@@ -159,14 +164,14 @@ class Sampler {
   // made with, instead of finding the widening again.
   std::vector<std::array<unsigned,3>> widened()const {
     std::vector<std::array<unsigned,3>> out;
-    for(std::size_t mask=0;mask<widened_.size();++mask)if(widened_[mask].first||widened_[mask].second)out.push_back({unsigned(mask),widened_[mask].first,widened_[mask].second});
+    for(std::size_t mask=0;mask<widened_.size();++mask)for(const auto& corner:widened_[mask])out.push_back({unsigned(mask),corner.first,corner.second});
     return out;
   }
   void widen(const std::vector<ibp::Integral>& batch,const std::vector<std::array<unsigned,3>>& bounds) {
     std::vector<::ibp::Integral> targets;
     for(const auto& a:batch){fire_batch::validate_index(a,basis_);::ibp::Integral target;for(unsigned i=0;i<a.size();++i)target.powers[i]=a[i];targets.push_back(target);}
-    std::vector<std::pair<unsigned,unsigned>> wider;if(!bounds.empty())wider.resize(std::size_t(1)<<basis_.physical_count);
-    for(const auto& [mask,dots,nums]:bounds){if(mask>=wider.size()||dots>::ibp::Integral::max_seed_power||nums>::ibp::Integral::max_seed_power)throw std::invalid_argument("IBP solver widened seed bounds");wider[mask]={dots,nums};}
+    std::vector<Corners> wider;if(!bounds.empty())wider.resize(std::size_t(1)<<basis_.physical_count);
+    for(const auto& [mask,dots,nums]:bounds){if(mask>=wider.size()||dots>::ibp::Integral::max_seed_power||nums>::ibp::Integral::max_seed_power)throw std::invalid_argument("IBP solver widened seed bounds");wider[mask].push_back({dots,nums});}
     widened_=std::move(wider);widened_for_=targets;std::sort(targets.begin(),targets.end());widened_sorted_=std::move(targets);widenings_=0;
   }
   // `independent` solves by fresh primal elimination of original rows, without
@@ -217,17 +222,27 @@ class Sampler {
         if(!std::includes(sorted.begin(),sorted.end(),widened_sorted_.begin(),widened_sorted_.end()))widened_.clear();
         widened_for_=targets;widened_sorted_=std::move(sorted);widenings_=0;}
       if(!widened_.empty()&&sector_bounds.empty())sector_bounds.assign(std::size_t(1)<<basis_.physical_count,{seeds.dots,seeds.numerators});
+      // A sector's seeds are those of its starting box and of every corner
+      // it was widened to; sector_bounds becomes the box around them all.
+      const auto base_bounds=sector_bounds;const auto base_seeds=std::pair{seeds.dots,seeds.numerators};
+      const auto base_of=[&](std::size_t mask){return base_bounds.empty()?base_seeds:base_bounds[mask];};
       for(std::size_t mask=0;mask<sector_bounds.size();++mask){auto& bound=sector_bounds[mask];
-        if(!widened_.empty()){bound.first=std::max(bound.first,widened_[mask].first);bound.second=std::max(bound.second,widened_[mask].second);}
+        if(!widened_.empty())for(const auto& corner:widened_[mask]){bound.first=std::max(bound.first,corner.first);bound.second=std::max(bound.second,corner.second);}
         seeds.dots=std::max(seeds.dots,bound.first);seeds.numerators=std::max(seeds.numerators,bound.second);}
+      std::function<bool(std::size_t,unsigned,unsigned)> admitted;
+      if(!widened_.empty())admitted=[&](std::size_t mask,unsigned dots,unsigned nums){
+        const auto base=base_bounds[mask];if(dots<=base.first&&nums<=base.second)return true;
+        for(const auto& corner:widened_[mask])if(dots<=corner.first&&nums<=corner.second)return true;
+        return false;};
       seeds.max_terms=limits.memory_bytes/64;seeds.max_seeds=std::size_t(1)<<30;seeds.max_states=std::size_t(1)<<34;seeds.seconds=remaining();
       if(!seeds.max_terms)throw std::invalid_argument("IBP solver memory budget too small");
-      if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms||plan_->bounds!=sector_bounds){
-        auto fresh=std::make_unique<Plan>();fresh->program=std::make_shared<::ibp::ParametricProgram>(::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds));
-        fresh->zero_sectors=geometry.zero_sectors;fresh->dots=seeds.dots;fresh->numerators=seeds.numerators;fresh->max_terms=seeds.max_terms;fresh->bounds=sector_bounds;
+      if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms||plan_->bounds!=sector_bounds||plan_->corners!=widened_){
+        auto fresh=std::make_unique<Plan>();fresh->program=std::make_shared<::ibp::ParametricProgram>(::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds,admitted));
+        fresh->zero_sectors=geometry.zero_sectors;fresh->dots=seeds.dots;fresh->numerators=seeds.numerators;fresh->max_terms=seeds.max_terms;fresh->bounds=sector_bounds;fresh->corners=widened_;
         // New targets usually leave the generated equations as they were, and
         // with them every complete elimination started ahead.
         fresh->system=plan_&&same_equations(*plan_->program,*fresh->program)?plan_->system:++systems_;
+        for(const auto& equation:fresh->program->program.equations)fresh->terms+=equation.size();
         plan_=std::move(fresh);++state_;++stats_.templates;stats_.equations+=plan_->program->program.equations.size();
       }
       auto& parametric=*plan_->program;auto& program=parametric.program;
@@ -283,7 +298,7 @@ class Sampler {
             // Other targets are reduced here. The solver's clock has run since
             // its elimination began on the other thread: if it expires only
             // now, the elimination is repeated with a budget of its own.
-            else try{early->program.target_columns=program.target_columns;full=early->solver->targets();dependencies=early->solver->selection();}
+            else try{early->program.target_columns=program.target_columns;full=early->solver->targets();}
               catch(const std::runtime_error&){early.reset();}
             if(early){solver=&*early->solver;seconds=early->seconds;++stats_.early_solves_used;noted(*solver);
               if(revisited)keep({{modulus,point},plan_->system,solve.max_fill,plan_->zero_sectors,plan_->program,solver,early});}
@@ -301,7 +316,9 @@ class Sampler {
             parametric.bind(values,field,sources);solve.seconds=remaining();
             // A long elimination says how far it is: equations inserted of
             // those it was given, and the entries its pivot rows hold.
-            auto telling=solve;
+            // All equations: reduced completely. A few selected ones: by
+            // their leading columns alone (::ibp::SolveOptions).
+            auto telling=solve;telling.complete_rows=!selected;
             if(options_.progress)telling.progress=[this,total=sources?sources->size():program.equations.size()](const ::ibp::Statistics& s,double seconds){
               options_.progress("elimination: "+std::to_string(s.equations)+" of "+std::to_string(total)+" equations, rank "+std::to_string(s.rank)+", pivot fill "+std::to_string(s.fill)+", longest row "+std::to_string(s.peak_row)+", "+std::to_string(static_cast<long>(seconds))+" s");};
             owned=std::make_shared<Owned>(modulus,plan_->program,telling);solver=&owned->solver;
@@ -314,7 +331,17 @@ class Sampler {
           else if(continued){++stats_.continued_solves;stats_.continued_equations+=continued->rows.size();stats_.continued_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
-        auto selection=[&]()->const std::vector<std::uint32_t>&{if(!dependencies)dependencies=solver->selection(program.target_columns);return *dependencies;};
+        // After a complete elimination the selection reads the equations it
+        // needs again, at this point: the program's own coefficients may
+        // since have been bound to another one.
+        auto selection=[&]()->const std::vector<std::uint32_t>&{
+          if(!dependencies){std::optional<std::vector<::ibp::Word>> forms;
+            dependencies=solver->selection(program.target_columns,[&](std::uint32_t source){
+              if(!forms)forms=parametric.evaluate_forms(values,field);
+              ::ibp::Row row;const auto& equation=program.equations.at(source);
+              for(std::size_t j=0;j<equation.size();++j)if(const auto value=(*forms)[parametric.coefficients[source][j]])row.push_back({equation[j].column,value});
+              return row;});}
+          return *dependencies;};
         bool selected=options_.selected_source_rows&&plan_->selection.has_value()&&!complete;primal(selected);
         // The first complete elimination of a batch shows whether its seeds
         // contain every integral it leaves unreduced.
@@ -325,23 +352,32 @@ class Sampler {
           // it. Taken for a master, its derivative would lie outside the
           // seeds again, and every planning pass would climb one step
           // further without end.
-          std::vector<std::pair<unsigned,unsigned>> wider;std::string example;bool at_edge=false;
+          // A widening adds a corner (dots, numerators) to its sector: the
+          // seeds of the sector are the union of the boxes below its corners,
+          // not the box around them, which holds many times more seeds.
+          std::vector<Corners> wider;std::string example;bool at_edge=false;
           if(widenings_<options_.max_seed_widenings)for(const auto column:terminals(full)){
             const auto& a=program.integrals[column];unsigned dots=0,nums=0;std::size_t mask=0;
             for(unsigned i=0;i<input_geometry_.n;++i){if(a.powers[i]>0){dots+=a.powers[i]-1;if(i<basis_.physical_count)mask|=std::size_t(1)<<i;}else nums-=a.powers[i];}
-            const auto bound=sector_bounds.empty()?std::pair{seeds.dots,seeds.numerators}:sector_bounds[mask];
-            const bool outside=dots>bound.first||nums>bound.second;
-            const bool numerator_edge=!outside&&!widened_.empty()&&widened_[mask].second&&nums==bound.second&&nums>options_.numerators;
-            const bool dot_edge=!outside&&!widened_.empty()&&widened_[mask].first&&dots==bound.first&&dots>options_.dots;
+            const auto base=base_of(mask);static const Corners none;const Corners& corners=widened_.empty()?none:widened_[mask];
+            // The corner the integral lies under, the highest in numerators.
+            const std::pair<unsigned,unsigned>* cover=nullptr;
+            for(const auto& corner:corners)if(dots<=corner.first&&nums<=corner.second&&(!cover||std::pair{corner.second,corner.first}>std::pair{cover->second,cover->first}))cover=&corner;
+            const bool outside=!cover&&(dots>base.first||nums>base.second);
+            bool numerator_edge=!outside&&!corners.empty()&&nums>options_.numerators,dot_edge=!outside&&!corners.empty()&&dots>options_.dots;
+            for(const auto& corner:corners){if(dots<=corner.first&&nums<corner.second)numerator_edge=false;if(dots<corner.first&&nums<=corner.second)dot_edge=false;}
             const bool edge=numerator_edge||dot_edge;
             if((!outside&&!edge)||dots>=::ibp::Integral::max_seed_power||nums>=::ibp::Integral::max_seed_power)continue;
             if(wider.empty()){wider=widened_;wider.resize(std::size_t(1)<<basis_.physical_count);}
             if(example.empty()){at_edge=edge;example="[";for(unsigned i=0;i<input_geometry_.n;++i)example+=std::to_string(a.powers[i])+",";example.back()=']';}
-            auto& w=wider[mask];w.first=std::max(w.first,dots+(dot_edge?1:0));w.second=std::max(w.second,nums+(numerator_edge?1:0));
+            const std::pair<unsigned,unsigned> corner=outside?std::pair{std::max(dots,base.first),std::max(nums,base.second)}:std::pair{(cover?cover->first:dots)+(dot_edge?1u:0u),(cover?cover->second:nums)+(numerator_edge?1u:0u)};
+            auto& w=wider[mask];
+            if(std::none_of(w.begin(),w.end(),[&](const auto& c){return corner.first<=c.first&&corner.second<=c.second;})){
+              std::erase_if(w,[&](const auto& c){return c.first<=corner.first&&c.second<=corner.second;});w.push_back(corner);}
           }
           if(!wider.empty()){
             widened_=std::move(wider);++widenings_;++stats_.seed_widenings;
-            if(options_.progress)options_.progress("integral "+example+(at_edge?" is left unreduced at the edge of the widened seeds of its sector":" is left unreduced outside the seeds of its sector")+"; widening the seeds of "+std::to_string(std::count_if(widened_.begin(),widened_.end(),[](const auto& w){return w.first||w.second;}))+" sectors");
+            if(options_.progress)options_.progress("integral "+example+(at_edge?" is left unreduced at the edge of the widened seeds of its sector":" is left unreduced outside the seeds of its sector")+"; widening the seeds of "+std::to_string(std::count_if(widened_.begin(),widened_.end(),[](const auto& w){return !w.empty();}))+" sectors");
             auto again=limits;again.timeout_seconds=std::max(1u,static_cast<unsigned>(remaining()));
             return (*this)(requested,point,modulus,again,independent,complete);
           }
@@ -364,7 +400,9 @@ class Sampler {
             // The primal rows above are already a valid reduction. A trace that
             // does not fit its node, fill or time budget only costs the replay
             // shortcut: this prime continues with primal elimination alone.
-            try{learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,selection(),tracing);}
+            tracing.complete_rows=options_.trace_complete_rows;
+            try{learned.trace=::ibp::ArithmeticTrace::learn_parametric(parametric,field,values,selection(),tracing);
+              if(options_.progress&&!plan_->trace_told){plan_->trace_told=true;options_.progress("arithmetic trace: "+std::to_string(learned.trace->instructions())+" instructions, "+std::to_string(learned.trace->registers())+" registers, from "+std::to_string(selection().size())+" equations and "+std::to_string(program.target_columns.size())+" targets");}}
             catch(const std::length_error&){learned.disabled=true;}
             catch(const std::runtime_error&){learned.disabled=true;learning_overran=true;}
             if(learned.disabled){learned.trace.reset();++stats_.trace_disabled;if(options_.progress)options_.progress("arithmetic trace exceeds its budget at this prime; continuing with primal elimination");}
@@ -397,14 +435,15 @@ class Sampler {
       if(inserted)it->second.emplace(a,1);else if(it->second.size()!=1||it->second.begin()->first!=a||it->second.begin()->second!=1)throw std::runtime_error("IBP solver returned a nonterminal output basis");}
     out.success=true;fire_modular::detail::validate(residues,basis_,requested);
   }
+  using Corners=std::vector<std::pair<unsigned,unsigned>>;
   struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
   // `system` names the generated equations: plans that differ in targets alone share it.
-  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0;std::vector<std::pair<unsigned,unsigned>> bounds;bool contained=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
+  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0,terms=0;std::vector<std::pair<unsigned,unsigned>> bounds;std::vector<Corners> corners;bool contained=false,trace_told=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
     std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;};
   static bool same_equations(const ::ibp::ParametricProgram& a,const ::ibp::ParametricProgram& b) {
     if(a.input_count!=b.input_count||a.constant_inputs!=b.constant_inputs||a.program.integrals!=b.program.integrals||a.program.equations.size()!=b.program.equations.size())return false;
     for(std::size_t i=0;i<a.program.equations.size();++i){const auto& x=a.program.equations[i];const auto& y=b.program.equations[i];if(x.size()!=y.size())return false;
-      for(std::size_t j=0;j<x.size();++j)if(x[j].column!=y[j].column||a.coefficients[i][j].constant!=b.coefficients[i][j].constant||a.coefficients[i][j].terms!=b.coefficients[i][j].terms)return false;}
+      for(std::size_t j=0;j<x.size();++j)if(x[j].column!=y[j].column||!(a.coefficient(i,j)==b.coefficient(i,j)))return false;}
     return true;
   }
   // An announced ordinary sample. A result is current while state_, which
@@ -467,9 +506,11 @@ class Sampler {
   void drop_kept(const Point& at){std::erase_if(kept_,[&](const Kept& kept){return kept.at==at;});}
   void keep(Kept kept){drop_kept(kept.at);if(kept_.size()==kept_points)kept_.erase(kept_.begin());if(!room(kept_.size()+running()+1)&&!kept_.empty())kept_.erase(kept_.begin());kept_.push_back(std::move(kept));}
   // The fill of the last complete elimination predicts that of the next one
-  // of the same system; `sets` such pivot sets must fit in half the budget.
+  // of the same system. `sets` eliminations, each with its pivot rows (16
+  // bytes an entry) and, while it runs on another thread, its own copy of the
+  // equations (24 bytes a term), must fit in half the budget.
   void noted(const ::ibp::Solver& solver){last_fill_=solver.statistics().fill;stats_.peak_fill=std::max(stats_.peak_fill,last_fill_);}
-  bool room(std::size_t sets)const{return !last_fill_||!memory_||sets*last_fill_*32<=memory_;}
+  bool room(std::size_t sets)const{return !last_fill_||!memory_||2*sets*(last_fill_*16+(plan_?plan_->terms*24:0))<=memory_;}
   // What continues a kept elimination under the present equations: its pivots
   // in the present columns and equation indices, and the equations it has not
   // seen. Nothing unless every equation it eliminated is, term for term, one
@@ -494,7 +535,7 @@ class Sampler {
     for(std::size_t i=0;i<old.origins.size();++i){
       auto it=origins.find(old.origins[i]);if(it==origins.end())return std::nullopt;
       const auto j=it->second;const auto& a=old.program.equations[i];const auto& b=now.program.equations[j];if(a.size()!=b.size()||seen[j])return std::nullopt;
-      for(std::size_t t=0;t<a.size();++t)if(column[a[t].column]!=b[t].column||old.coefficients[i][t].constant!=now.coefficients[j][t].constant||old.coefficients[i][t].terms!=now.coefficients[j][t].terms)return std::nullopt;
+      for(std::size_t t=0;t<a.size();++t)if(column[a[t].column]!=b[t].column||!(old.coefficient(i,t)==now.coefficient(j,t)))return std::nullopt;
       equation[i]=j;seen[j]=true;
     }
     Continued out;for(std::uint32_t j=0;j<seen.size();++j)if(!seen[j])out.rows.push_back(j);
@@ -522,16 +563,17 @@ class Sampler {
       if(waiting>=lookahead||running()+1>=threads_||!room(kept_.size()+running()+2))break;
       std::vector<::ibp::Word> values;
       try{for(const auto& input:inputs_)values.push_back(modular::evaluate(input,expected.at.coordinates,expected.at.modulus));}catch(const std::exception&){continue;}
-      auto solve=probe;solve.seconds=std::max(solve.seconds,std::chrono::duration<double>(expected.until-std::chrono::steady_clock::now()).count());
+      auto solve=probe;solve.seconds=std::max(solve.seconds,std::chrono::duration<double>(expected.until-std::chrono::steady_clock::now()).count());solve.complete_rows=true;solve.progress={};
       auto task=std::make_shared<Elimination>(expected.at.modulus);task->system=plan_->system;task->max_fill=solve.max_fill;task->target_columns=plan_->program->program.target_columns;
       try{tasks_.emplace_back(std::jthread([task,source=std::shared_ptr<const ::ibp::ParametricProgram>(plan_->program),values=std::move(values),solve]{
           const auto started=std::chrono::steady_clock::now();bool solved=false;
           try{const auto& equations=source->program.equations;task->program.integrals.resize(source->program.integrals.size());task->program.equations.resize(equations.size());
+            const auto forms=source->evaluate_forms(values,task->field);
             for(std::size_t i=0;i<equations.size();++i){auto& row=task->program.equations[i];row.reserve(equations[i].size());
-              for(std::size_t j=0;j<equations[i].size();++j)row.push_back({equations[i][j].column,source->coefficients[i][j].evaluate(values,task->field),0});}
+              for(std::size_t j=0;j<equations[i].size();++j)row.push_back({equations[i][j].column,forms[source->coefficients[i][j]],0});}
             task->program.target_columns=task->target_columns;task->solver.emplace(task->program,task->field,solve);task->solver->solve(0);
-            std::vector<std::vector<::ibp::LinearEntry>>().swap(task->program.equations);
-            task->rows=task->solver->targets();task->selection=task->solver->selection();solved=true;
+            task->rows=task->solver->targets();task->selection=task->solver->selection();
+            std::vector<std::vector<::ibp::LinearEntry>>().swap(task->program.equations);solved=true;
           }catch(...){}
           task->seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();flint_cleanup();
           {const std::lock_guard lock(task->mutex);task->solved=solved;task->finished=true;}task->ready.notify_all();
@@ -552,8 +594,9 @@ class Sampler {
     return task->solved&&task->seconds<=seconds?task:nullptr;
   }
   ::ibp::InputGeometry input_geometry_;std::vector<Exact> inputs_;std::unique_ptr<Plan> plan_;
-  // Seed bounds per sector widened for the present batch of targets.
-  std::vector<std::pair<unsigned,unsigned>> widened_;std::vector<::ibp::Integral> widened_for_,widened_sorted_;unsigned widenings_=0;
+  // The corners each sector's seeds were widened to for the present batch of
+  // targets: none at all, or a list for every sector.
+  std::vector<Corners> widened_;std::vector<::ibp::Integral> widened_for_,widened_sorted_;unsigned widenings_=0;
   std::vector<Kept> kept_;std::size_t memory_=0,last_fill_=0;
   ibp::PropagatorBasis basis_;Exact dimension_;Options options_;Statistics stats_;
   std::vector<std::vector<ibp::Affine>> contractions_;std::vector<bool> trace_,zero_sectors_;
@@ -589,7 +632,7 @@ class Session {
     if(!options_.closure_parameter)throw std::invalid_argument("IBP master count needs a closure parameter");
     const auto parameter=*options_.closure_parameter;
     auto science=fire_batch::identity(basis_,dimension_,field_,requested,limits).json_value();
-    boost::json::object identity{{"science",science},{"parameter",parameter},{"counter","one-point-derivative-closure-v3"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+    boost::json::object identity{{"science",science},{"parameter",parameter},{"counter","one-point-derivative-closure-v4"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
     const auto key=artifacts::detail::sha256(artifacts::detail::canonical(identity));
     const auto path=options_.cache_directory/"master-counts"/(key+".json");
     if(std::filesystem::exists(path)){
@@ -616,7 +659,7 @@ class Session {
     // The stable demands are what closure planning would find: leave them as
     // its hint, so that preparing the chosen level does not plan again.
     {
-      boost::json::object plan_identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v4"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+      boost::json::object plan_identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v5"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
       const auto plan_key=artifacts::detail::sha256(artifacts::detail::canonical(plan_identity));
       const auto plan_path=options_.cache_directory/"closure-plans"/(plan_key+".json");
       if(!std::filesystem::exists(plan_path)){
@@ -636,7 +679,7 @@ class Session {
     const auto parameter=*options_.closure_parameter;
     if(parameter>=dimension_.variable_count()||!options_.max_planning_passes)throw std::invalid_argument("invalid finite-field closure planning bounds");
     auto science=fire_batch::identity(basis_,dimension_,field_,requested,limits).json_value();
-    boost::json::object identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v4"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
+    boost::json::object identity{{"science",science},{"parameter",parameter},{"planner","two-point-terminal-derivative-closure-v5"},{"dots",options_.dots},{"numerators",options_.numerators},{"dots_first",options_.dots_first},{"target_seeds",target_seeds_name(options_.target_seeds)},{"scaleless_sectors",options_.scaleless_sectors},{"seed_widenings",options_.max_seed_widenings}};
     const auto key=artifacts::detail::sha256(artifacts::detail::canonical(identity));
     const auto path=options_.cache_directory/"closure-plans"/(key+".json");
     std::set<ibp::Integral,ibp::IntegralOrder> demanded(requested.begin(),requested.end());

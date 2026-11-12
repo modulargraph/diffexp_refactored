@@ -2,6 +2,23 @@
 
 ## 2.2.1
 
+- Finite masters. In a family without a cut, a level whose requested
+  integrals are finite at epsilon = 0 exchanges the masters that fail a
+  convergence test (every scaling of a subset of Feynman parameters, from
+  the Symanzik polynomials of the level) for integrals of their sectors
+  with more dots that pass it (`finite_masters.hpp`, `--finite-masters
+  on|off`, default on; `finite_masters` in the JSON report). All masters of
+  a level and all levels below it, or none; no new moving pole; the choice
+  is recorded beside the exact cache. The epsilon poles of the masters no
+  longer cancel between the levels: products of the expanded runs 3.38 to
+  1.56 million (kite), 4.27 to 0.74 (three-loop banana), 73.3 to 30.6
+  (four-loop banana) and 130.4 to 36.7 (unequal masses), and a sample of
+  the four-loop banana at 1/400 has an error of 2.8e-21 instead of 6.7e-14
+  at the same cost. The preparation reduces integrals with more dots: 2.4
+  to 14.8 s for the four-loop banana, 5.2 to 79.5 s with unequal masses
+  (`--finite-masters-seconds` bounds it per level). Families whose integral
+  has poles (double box, the three-loop family) keep their masters and
+  their results. [performance.md](docs/performance.md#finite-masters).
 - Cancellation between the levels. The exact row gauge of an endpoint
   frame takes a pivot within 2^-20 of the largest admissible one instead of
   the first entry that is not zero: the expanded run of a three-loop family

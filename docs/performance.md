@@ -146,6 +146,14 @@ Transport time is linear in the number of epsilon orders carried.
   more on the banana and made its error five times larger, because the
   error of the levels above cancels in the result together with its parts
   in the other orders.
+- **Finite masters** (`--finite-masters on`). In a family without a cut, a
+  level whose requested integrals are finite at epsilon = 0 exchanges its
+  masters for finite integrals of the same sectors with more dots, if all
+  of them can be exchanged and the levels below can follow. The weights
+  between the levels then have no poles to cancel: the expanded four-loop
+  banana carries 30.6 instead of 73.3 million products and its sample
+  keeps seven more digits, for a preparation of 15 instead of 2.4 s
+  ([finite masters](#finite-masters)).
 - **Merge selection** (`--merge-selection auto`). Which two propagators a
   level merges decides how large the levels below become. Candidates are
   the pairs on one loop momentum, whose merged line is again an ordinary
@@ -259,16 +267,127 @@ this cancellation and nothing else. Consequences:
   between overlap ratios 4 and 256 (three-loop sample, tail 2^-90: 7e-9,
   5e-8 at the default 16, 7e-8 at 64, 3.5e-7), of 2^45.
 - Only another master basis changes it: one whose masters are as finite as
-  the integrals requested from them. No criterion that finds such a basis
-  from the reductions alone is implemented; the basis scan minimises the
-  size of the connection under the constraint of the child's window
-  (without it the same sample has an error ten times larger).
+  the integrals requested from them. Where the requested integrals are
+  finite such a basis is chosen ([finite masters](#finite-masters)); for
+  the three-loop family, whose integral has poles itself, none is known.
+  The basis scan minimises the size of the connection under the constraint
+  of the child's window (without it the same sample has an error ten times
+  larger) and does not look at the cancellation.
 - A run cannot know the amplification before it has the leaf. It starts
   with a tail ten digits below the leaf digits and computes its numbers
   again with a smaller one if the estimated error leaves fewer digits than
   asked (`precision.raises`). The samples of a fit start at the tail an
   earlier sample ended with (`--tail-floor`): 20 s of CPU a sample for the
   three-loop family instead of 29 to 51.
+
+### Finite masters
+
+The masters a reduction selects are the simplest integrals of each sector,
+and those are the most divergent ones. The four-loop banana in two
+dimensions is finite and its first level integrates the merged line
+squared, `[2,1,1,1]`; of the level's fifteen masters only that one is
+finite, and the others, with the first power of the merged line or with a
+numerator, have up to four poles. An integral of the same sector with more
+dots is finite, and a level whose masters are all finite hands down weights
+without poles.
+
+Whether an integral without numerators is finite at epsilon = 0 is decided
+from the Symanzik polynomials of the level's merged family
+(`finite_masters.hpp`): the Gamma function of its parametric representation
+has to be finite, and the integrand has to be integrable under every
+scaling in which a subset of the Feynman parameters tends to zero, i.e.
+
+    sum_S a_i + (a - (L+1) d/2) min_S U - (a - L d/2) min_S F > 0
+
+for every proper subset S of the lines, with a the sum of the powers and
+min_S the lowest degree in the parameters of S. These scalings are the
+ultraviolet subdivergences and the infrared divergences of sets of lines.
+A divergence that needs different powers for different lines (a collinear
+region) is not seen, so the test is necessary in general and sufficient for
+massive Euclidean families. It reproduces every case measured on the two
+upper levels of the banana (finite where the sampled value is of order one,
+divergent where it is 2^16 to 2^34).
+
+The exchange, per level and before its masters become the requests of the
+level below:
+
+- Only if every integral requested from the level passes the test. A level
+  whose requests have poles keeps its masters: finite masters would move
+  the poles into the weights.
+- A master that fails is replaced by a passing integral of its sector with
+  more dots whose reduction has a coefficient at that master. The
+  candidates are reduced by further reductions of the level: first the
+  lowest total powers that give one candidate per failing master, then the
+  next two per master still open.
+- All masters of a level or none, and all levels below an exchanged one or
+  none (the preparation is then repeated with every level's own masters).
+  A ladder that is finite only in part carries more epsilon orders than
+  before: the double box with its three lowest levels partly exchanged
+  21.0 to 33.9 million products, the banana with only its first level
+  exchanged 73 to 125 million.
+- The finished connection may have no moving pole and no epsilon pole
+  beyond a diagonal shear that the level's own connection does not have.
+  Finite integrals can be linearly dependent at single points: on the
+  lowest level of the double box `[5,0]`, `[3,2]`, `[3,3]` have a moving
+  pole that reaches x = 1 at epsilon = 0, and that level has no endpoint
+  series then. A new singular point in x alone is admitted. It is apparent
+  (the banana's finite masters have one on each of the two upper levels)
+  and is passed like any other point.
+- Only for families without a cut and without a stated contour. Elsewhere
+  every real singular point needs a causal side, and that of a point the
+  integrals do not have cannot always be derived (the sunrise below
+  threshold at timelike momentum stopped at a new point x = 1/2).
+- The reductions of the candidates of one level are allowed 120 s
+  (`--finite-masters-seconds`); a level that needs longer keeps its
+  masters. The choice and the exchanged closure are recorded beside the
+  exact cache (`finite-masters/`); later runs and the samples of a fit read
+  them.
+
+Measured with one thread, `--finite-masters off` against the default.
+Products are those of the transports; CPU seconds are for a run on a
+prepared cache and, in brackets, for the first run including the
+preparation; the windows are the epsilon orders of the weighted rows of
+levels 1, 2, 3.
+
+| Expanded run | Products, millions | Windows | CPU s (first run) | Preparation s |
+| --- | --- | --- | --- | --- |
+| kite | 3.38 -> 1.56 | 0..5, 0..3, 0..2 -> 0..2, 0..1, 0..0 | 1.1 -> 0.9 (1.4 -> 1.1) | 0.3 -> 0.4 |
+| three-loop banana | 4.27 -> 0.74 | 0..4, -2..2 -> 0..1, 0..0 | (1.4 -> 1.8) | 0.4 -> 1.0 |
+| four-loop banana | 73.3 -> 30.6 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 20.3 -> 11.2 (22.2 -> 25.6) | 2.4 -> 14.8 |
+| four-loop banana, unequal masses | 130.4 -> 36.7 | 0..7, -3..4, -5..2 -> 0..3, 0..1, 0..0 | 34.9 -> 16.3 (40.0 -> 95.2) | 5.2 -> 79.5 |
+
+| Sample at 1/400, 12 leaf digits | Cancellation, bits | Error at the default tail | Products, millions | CPU s |
+| --- | --- | --- | --- | --- |
+| kite | 9, 10, 9 -> 9, 10, 2 | 5.5e-21 -> 6.8e-23 | 0.47 -> 0.43 | 0.55 -> 0.51 |
+| four-loop banana | 31, 22, 9 -> 8, 3, 0 | 6.7e-14 -> 2.8e-21 | 4.80 -> 4.93 | 2.4 -> 2.2 |
+| four-loop banana, unequal masses | 30, 22, 9 -> 5, 3, 0 | 2.1e-13 -> 4.8e-21 | 11.27 -> 11.47 | 5.0 -> 5.0 |
+
+The coefficients agree within their radii in every run (the expanded
+banana to all 38 digits). A fit of the four-loop banana by sampling
+(`--epsilon-strategy sample`) returns order 0 with a radius of 8.1e-16
+instead of 3.3e-15 in the same 31 s; there the fit, not the samples,
+limits the digits. The gain is in the numerical phase: the expanded
+runs carry fewer epsilon orders, and a sample keeps seven more digits at
+the same tail and the same cost. The price is in the exact preparation,
+which reduces integrals with up to three more dots: six times as long for
+the four-loop banana and fifteen times with unequal masses, where 59 of the
+79 s are the two candidate reductions of the first level and 7 s the change
+of basis. The first run of the unequal banana is therefore slower than
+before, and every later one twice as fast.
+
+The planar double box and the three-loop family are unchanged, to the last
+digit: their requested integrals have poles. For the three-loop family the
+cancellation is of another kind. Its weights are 2^43 to 2^45 on four-line
+masters of order 2^5 and 2^15 on seven-line masters of order 2^24, every
+product is 2^50 and the result 2^21; the integral has three poles and its
+masters up to six. Exchanging masters one at a time for the integrals the
+closures already hold, so as to minimise the sum of the absolute terms
+measured in a sample, would lower the seven levels from 33, 42, 47, 47, 46,
+32, 21 bits to 30, 33, 37, 47, 42, 24, 13 (predicted from the sampled
+weights and values, not run): the worst level does not move. A basis for
+it would need masters with as few poles as the requested integral, which
+dots alone do not give for massless lines (a dot makes them more singular
+in the infrared).
 
 ## Epsilon sampling
 

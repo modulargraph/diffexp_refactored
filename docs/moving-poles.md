@@ -224,11 +224,16 @@ child's masters at the anchor combine into the level's outputs.
 
 - **Narrower windows.** They need a change of what a level asks of its
   child, so that the combinations which enter with 1/eps^k are requested as
-  such instead of being rebuilt from separately truncated masters. The
-  `exchange_masters` hook of `recursion::Options` is the place where a level's
-  public masters can change; a criterion in terms of epsilon poles is the
-  missing part. An internal basis cannot do it (the windows are invariant
-  under it, see [epsilon-demand-design.md](epsilon-demand-design.md)).
+  such instead of being rebuilt from separately truncated masters. An
+  internal basis cannot do it (the windows are invariant under it, see
+  [epsilon-demand-design.md](epsilon-demand-design.md)). For families
+  without a cut whose integrals are finite this is now done by exchanging
+  a level's masters for finite integrals
+  ([finite masters](performance.md#finite-masters)): the weighted rows of
+  the kite's three levels then carry the orders 0..2, 0..1 and 0 instead
+  of 0..5, 0..3 and 0..2, those of the four-loop banana 0..3, 0..1 and 0
+  instead of 0..7, -3..4 and -5..2. For integrals with poles a criterion
+  is still missing.
 - **Singular points in x alone.** They are many (27 factors at pentagon
   level 3) and they, not the moving poles, set the endpoint overlaps and the
   detours of the paths. `moving_poles::Options::fixed_points` (`--fixed 1` of

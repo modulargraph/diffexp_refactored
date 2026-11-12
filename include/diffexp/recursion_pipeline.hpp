@@ -67,8 +67,9 @@ struct NumericalOptions {
   // exactly; both keep the exact series whatever this says.
   bool truncated_endpoint_series=true;
   // Epsilon orders of a truncated endpoint series beyond the window at its
-  // first build.
-  unsigned endpoint_epsilon_margin=0;
+  // first build: enough to see the poles of the frame and of the functionals
+  // in most levels, from which the orders really read are then known.
+  unsigned endpoint_epsilon_margin=3;
   unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
@@ -960,7 +961,11 @@ class Evaluator {
     return result;
   }
   Endpoint endpoint(const Matrix& matrix,const Matrix& diagonal,const Matrix& inverse_diagonal,const Node& node,bool upper,std::size_t depth,int high) {
-    auto fuchs=[&]{Seconds timer{statistics_.endpoint_gauge_seconds};return fuchsify::prepare(matrix,xi_,options_.fuchsification);}();
+    // An expanded recursion keeps the Fuchsian form regular at epsilon = 0
+    // where it can: the truncated series need that.
+    auto fuchsification=options_.fuchsification;
+    if(!graph_.specialised && options_.truncated_endpoint_series && !fuchsification.regular_variable)fuchsification.regular_variable=ei_;
+    auto fuchs=[&]{Seconds timer{statistics_.endpoint_gauge_seconds};return fuchsify::prepare(matrix,xi_,fuchsification);}();
     if(!fuchs.success)throw std::domain_error("recursive endpoint fuchsification unsupported: "+fuchs.reason);
     const std::string side=upper?"upper":"lower";
     // The endpoint that carries the boundary needs its fundamental series.
@@ -996,7 +1001,18 @@ class Evaluator {
     const auto shifts=endpoint.series->valuation_metadata(endpoint.matching_frame).minimum_by_column;
     long largest=std::numeric_limits<long>::min();
     for(const auto shift:shifts){if(shift==absent)return 4;largest=std::max(largest,shift);}
-    const long depth=std::max(0l,static_cast<long>(constant_demand(endpoint,static_cast<unsigned>(std::max(0,high))))+largest);
+    // The inverse is asked through the window minus the lowest order of a
+    // functional; an entry of which nothing is known yet may start as low as
+    // its truncation order.
+    long inverse_high=high;
+    for(const auto& functional:endpoint.functionals)if(functional) {
+      auto lowest=functional->epsilon_truncation;
+      if(lowest.empty())lowest.assign(functional->rows,std::vector<long>(functional->columns,exact));
+      for(const auto& term:functional->terms)
+        lowest[term.row][term.column]=std::min(lowest[term.row][term.column],endpoint.series->epsilon_valuation(term.coefficient));
+      for(const auto& row:lowest)for(const auto order:row)if(order<exact)inverse_high=std::max(inverse_high,static_cast<long>(high)-order);
+    }
+    const long depth=std::max(0l,inverse_high+largest);
     long missing=0;
     const auto& frame=endpoint.matching_frame;
     for(unsigned i=0;i<frame.rows;++i)for(unsigned c=0;c<frame.columns;++c)if(frame.truncation(i,c)<exact)

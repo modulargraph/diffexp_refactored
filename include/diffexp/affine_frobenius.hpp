@@ -668,134 +668,23 @@ private:
     return *this;
   }
 };
-// A constant change of coordinates G(eps), with its inverse, after which the
-// residue and every Taylor coefficient in x of the connection x*A are regular
-// at epsilon = 0; nothing if none is found within `max_steps`.
-//
-// A Fuchsian form reached through Jordan frames over Q(eps) can have poles in
-// epsilon although its solutions do not: the coordinates are singular at
-// epsilon = 0. Coordinates are a lattice over the local ring of epsilon, and
-// the connection is regular in a lattice that its coefficients map into
-// itself. With x*A = P(x)/q(x), q without a moving zero, these are the
-// coefficients P_m/q_0. Starting from the given coordinates, a column of a
-// coefficient that has a pole is a vector every such lattice must contain: it
-// replaces the basis vector of the row where its pole is deepest (only its
-// principal part matters). The lattice grows at each step and stays inside
-// the smallest stable one, so the steps end if that one exists.
-inline std::optional<std::pair<Matrix, Matrix>>
-epsilon_regular_gauge(const Matrix &connection, std::size_t xi, std::size_t ei,
-                      unsigned max_steps) {
-  using namespace fuchsify::detail;
-  const unsigned d = connection.size();
+// The connection x*A is jointly analytic at (x,eps) = (0,0): its residue and
+// every Taylor coefficient in x are then regular at epsilon = 0. A Fuchsian
+// form reached through frames that are singular at epsilon = 0 has poles
+// there although its solutions do not; in such coordinates arithmetic modulo
+// a power of epsilon loses orders at every x order, and no constant change of
+// coordinates repairs it in general (the coefficients need not share a
+// lattice that they map into itself).
+inline bool epsilon_regular(const Matrix &connection, std::size_t xi, std::size_t ei) {
   const auto z = connection[0][0].constant(0);
-  std::pair<Matrix, Matrix> out{identity(d, z), identity(d, z)};
   std::vector<Exact> origin;
   for (unsigned i = 0; i < z.variable_count(); ++i)
     origin.push_back(i == xi || i == ei ? z : z.variable(i));
-  bool analytic = true;
   for (const auto &row : connection)
     for (const auto &e : row)
-      analytic = analytic && (e.is_zero() || !e.denominator().substitute(origin).is_zero());
-  // Jointly analytic at (x,eps) = (0,0): every coefficient is regular already.
-  if (analytic)
-    return out;
-  auto q = z.constant(1);
-  for (const auto &row : connection)
-    for (const auto &e : row)
-      if (!e.is_zero())
-        q = q.polynomial_lcm(e.denominator());
-  const auto degree = [&](const Exact &value) {
-    unsigned result = 0;
-    for (const auto &term : value.numerator_terms())
-      result = std::max(result, static_cast<unsigned>(term.powers[xi]));
-    return result;
-  };
-  if (q.numerator_terms().size() > 4096 || degree(q) > 256)
-    return std::nullopt;
-  const auto clearing = taylor(q, xi, degree(q));
-  if (clearing.front().is_zero())
-    return std::nullopt;
-  // A zero of q that moves with epsilon: the coefficients have poles of
-  // every order, and so do the solutions.
-  for (unsigned m = 1; m < clearing.size(); ++m)
-    if (!clearing[m].is_zero() && valuation(clearing[m] / clearing.front(), ei) < 0)
-      return std::nullopt;
-  std::vector<Matrix> generators;
-  for (unsigned i = 0; i < d; ++i)
-    for (unsigned j = 0; j < d; ++j) {
-      if (connection[i][j].is_zero())
-        continue;
-      const auto numerator = q * connection[i][j];
-      const unsigned top = degree(numerator);
-      if (top > 256)
-        return std::nullopt;
-      const auto coefficients = taylor(numerator, xi, top);
-      if (generators.size() <= top)
-        generators.resize(top + 1, zeros(d, d, z));
-      for (unsigned m = 0; m <= top; ++m)
-        if (!coefficients[m].is_zero())
-          generators[m][i][j] = coefficients[m] / clearing.front();
-    }
-  auto &gauge = out.first;
-  auto &back = out.second;
-  std::vector<Exact> h(d, z), column(d, z);
-  for (unsigned step = 0;; ++step) {
-    long deepest = 0;
-    unsigned at = 0, pivot = 0, source = 0;
-    for (unsigned l = 0; l < generators.size(); ++l)
-      for (unsigned i = 0; i < d; ++i)
-        for (unsigned j = 0; j < d; ++j)
-          if (!generators[l][i][j].is_zero()) {
-            const long v = valuation(generators[l][i][j], ei);
-            if (v < deepest) {
-              deepest = v;
-              at = l;
-              pivot = i;
-              source = j;
-            }
-          }
-    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
-      std::size_t size = 0, poles = 0;
-      for (auto &g : generators) for (auto &row : g) for (auto &e : row) if (!e.is_zero()) { size += e.numerator_terms().size() + e.denominator_terms().size(); poles += valuation(e, ei) < 0; }
-      std::fprintf(stderr, "EPSDBG gauge step %u: %zu generators, deepest %ld at generator %u (%u,%u), %zu entries with poles, total terms %zu\n", step, generators.size(), deepest, at, pivot, source, poles, size);
-    }
-    if (!deepest)
-      return out;
-    if (step >= max_steps)
-      return std::nullopt;
-    // H is the identity with column `pivot` replaced by the principal part h
-    // of the chosen column; every coefficient B becomes H^-1 B H.
-    for (unsigned k = 0; k < d; ++k)
-      h[k] = EpsilonSeries(generators[at][k][source], ei, 0).exact(z, ei);
-    const auto rows = [&](Matrix &m) {
-      for (unsigned k = 0; k < d; ++k)
-        if (k != pivot && !h[k].is_zero()) {
-          const auto factor = h[k] / h[pivot];
-          for (unsigned j = 0; j < m[k].size(); ++j)
-            if (!m[pivot][j].is_zero())
-              m[k][j] = m[k][j] - factor * m[pivot][j];
-        }
-      for (auto &value : m[pivot])
-        if (!value.is_zero())
-          value = value / h[pivot];
-    };
-    const auto columns = [&](Matrix &m) {
-      for (unsigned k = 0; k < d; ++k) {
-        column[k] = z;
-        for (unsigned j = 0; j < d; ++j)
-          if (!h[j].is_zero() && !m[k][j].is_zero())
-            column[k] = column[k] + m[k][j] * h[j];
-      }
-      for (unsigned k = 0; k < d; ++k)
-        m[k][pivot] = column[k];
-    };
-    for (auto &b : generators) {
-      columns(b);
-      rows(b);
-    }
-    columns(gauge);
-    rows(back);
-  }
+      if (!e.is_zero() && e.denominator().substitute(origin).is_zero())
+        return false;
+  return true;
 }
 struct Integer {
   fmpz_t value;
@@ -1133,22 +1022,6 @@ public:
         for (auto &[j, coefficient] : row.entries)
           coefficient = substitute(coefficient);
       }
-    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
-      std::fprintf(stderr, "EPSDBG rows (scale valuation - min coefficient valuation; derivative; coupling; frame):");
-      for (unsigned r = 0; r < d; ++r) {
-        long low = 1000, dlow = 1000, clow = 1000, flow = 1000;
-        for (auto &lag : t->rows[r].lags) for (auto &[j, c] : lag) low = std::min<long>(low, c.valuation());
-        for (auto &q : t->rows[r].derivative) if (!q.zero()) dlow = std::min<long>(dlow, q.valuation());
-        for (auto &[j, c] : t->couplings[r].entries) clow = std::min<long>(clow, c.valuation());
-        for (auto &[j, c] : t->frame[r].entries) flow = std::min<long>(flow, c.valuation());
-        std::fprintf(stderr, " [%ld-%ld;%ld;%ld-%ld;%ld-%ld]", (long)t->row_units[r].valuation, low, dlow, (long)t->coupling_units[r].valuation, clow, (long)t->frame_units[r].valuation, flow);
-      }
-      std::fprintf(stderr, "\n");
-      std::fprintf(stderr, "EPSDBG eigen:"); for (auto &e : eigen) std::fprintf(stderr, " %s+%s*eps", e.power.str().c_str(), e.slope.str().c_str()); std::fprintf(stderr, "\n");
-      std::fprintf(stderr, "EPSDBG scale bits %ld; row units:", (long)fmpz_bits(t->scale.value));
-      for (auto &u : t->row_units) std::fprintf(stderr, " (len %ld val %ld c0bits %ld maxbits %ld)", (long)fmpz_poly_length(u.unit.raw()), (long)u.valuation, (long)fmpz_bits(u.unit.raw()->coeffs), (long)std::labs(fmpz_poly_max_bits(u.unit.raw())));
-      std::fprintf(stderr, "\n");
-    }
     truncation_ = std::move(t);
   }
   // eps = scale()*t.
@@ -1340,14 +1213,9 @@ public:
         trim(physical);
         emit(k, row, physical, T.frame_units[row], common.value, pole, known);
       }
-      if (!structure_only && std::getenv("DIFFEXP_EPS_DEBUG")) {
-        long bits = 0, len = 0;
-        for (auto &v : orders[k]) for (auto &c : v) { bits = std::max<long>(bits, std::labs(fmpz_poly_max_bits(c.raw()))); len = std::max<long>(len, fmpz_poly_length(c.raw())); }
-        std::fprintf(stderr, "EPSDBG col %u k %u pole %ld common bits %ld max numerator bits %ld len %ld cap %ld\n", column, k, pole, (long)fmpz_bits(common.value), bits, len, cap);
-      }
-      if (k >= window_) {
+      // No later order reaches back further than the longest lag.
+      if (k >= window_)
         orders[k - window_] = std::vector<Value>(d);
-      }
     }
   }
 
@@ -2005,16 +1873,10 @@ private:
     }
     // Truncated Laurent arithmetic needs a frame that is regular at epsilon
     // = 0; the exact recurrence keeps the eigenvector frame itself.
-    // A connection that no constant gauge makes regular there keeps the exact
-    // rational functions, whatever was asked for.
-    bool truncated = options.epsilon_orders != 0;
-    Matrix working = out.frame_;
-    if (truncated) {
-      if (const auto regular = epsilon_regular_gauge(connection, xi, ei, 16 * d))
-        working = multiply(regular->first, unimodular_frame(multiply(regular->second, out.frame_), ei));
-      else
-        truncated = false;
-    }
+    // A connection with poles at epsilon = 0 keeps the exact rational
+    // functions, whatever was asked for.
+    const bool truncated = options.epsilon_orders != 0 && epsilon_regular(connection, xi, ei);
+    const Matrix working = truncated ? unimodular_frame(out.frame_, ei) : out.frame_;
     auto inv = inverse(working);
     std::vector<std::vector<Exact>> derivative_lags(d);
     if (!options.finite_lag_recurrence) {
@@ -2231,14 +2093,6 @@ private:
     for (const auto &terms : columns) total += terms.size();
     if (total > options.max_terms)
       throw std::length_error("affine Frobenius term budget exhausted");
-    if (std::getenv("DIFFEXP_EPS_DEBUG")) {
-      std::vector<long> low(d, 1000), high(d, -1000);
-      for (const auto &terms : columns) for (const auto &t : terms) { const long v = out.epsilon_valuation(t.coefficient); low[t.column] = std::min(low[t.column], v);
-        const long top = static_cast<long>(t.coefficient.numerator_terms().size()); high[t.column] = std::max(high[t.column], top); }
-      std::fprintf(stderr, "EPSDBG series d=%u n=%u orders=%u: per column (minval, max numerator terms, truncation):", d, n, options.epsilon_orders);
-      for (unsigned c = 0; c < d; ++c) std::fprintf(stderr, " (%ld,%ld,%ld)", low[c], high[c], truncated ? out.expansion_.epsilon_truncation[0][c] : 0l);
-      std::fprintf(stderr, "\n");
-    }
     out.expansion_.terms.reserve(total);
     for (auto &terms : columns)
       std::move(terms.begin(), terms.end(), std::back_inserter(out.expansion_.terms));

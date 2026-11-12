@@ -8,6 +8,13 @@ using Matrix = std::vector<std::vector<Exact>>;
 struct Options {
   unsigned max_steps = 24, max_dimension = 64, max_shear_candidates = 256,
            max_power = 128;
+  // A parameter at whose zero the gauge should stay regular (epsilon). A
+  // Jordan frame over the field of the parameters can be singular there
+  // although the matrix is not; the system then has poles in the parameter
+  // that its solutions do not have. Where such a frame occurs, Jordan chains
+  // that are regular with a regular inverse are used instead if they exist;
+  // nothing changes where the frame is regular already.
+  std::optional<std::size_t> regular_variable;
 };
 namespace detail {
 inline Matrix zeros(unsigned r, unsigned c, const Exact &z) {
@@ -198,9 +205,58 @@ inline std::vector<Exact> action(const Matrix &m, const std::vector<Exact> &v) {
       out[i] = out[i] + m[i][j] * v[j];
   return out;
 }
+// Echelon basis over the local ring of one parameter at zero: every vector
+// vanishes in the pivot rows of the earlier ones and is a unit (valuation
+// zero) in its own, so the vectors span a saturated lattice: what they span
+// over the field and is regular, they span over the ring.
+struct LocalEchelon {
+  std::size_t variable;
+  Matrix rows;
+  std::vector<unsigned> pivots;
+  // v minus the combination of the basis that clears its pivot rows, divided
+  // by the power of the parameter it then carries; empty inside the span.
+  std::vector<Exact> reduce(std::vector<Exact> v) const {
+    for (unsigned k = 0; k < rows.size(); ++k) {
+      const unsigned p = pivots[k];
+      if (v[p].is_zero())
+        continue;
+      const auto factor = v[p] / rows[k][p];
+      for (unsigned j = 0; j < v.size(); ++j)
+        if (!rows[k][j].is_zero())
+          v[j] = v[j] - factor * rows[k][j];
+    }
+    std::optional<long> lowest;
+    for (const auto &e : v)
+      if (!e.is_zero()) {
+        const long order = valuation(e, variable);
+        if (!lowest || order < *lowest)
+          lowest = order;
+      }
+    if (!lowest)
+      return {};
+    if (*lowest)
+      for (auto &e : v)
+        if (!e.is_zero())
+          e = e / power(e.variable(variable), *lowest);
+    return v;
+  }
+  void insert(const std::vector<Exact> &v) {
+    auto reduced = reduce(v);
+    for (unsigned i = 0; i < reduced.size(); ++i)
+      if (!reduced[i].is_zero() && valuation(reduced[i], variable) == 0) {
+        rows.push_back(std::move(reduced));
+        pivots.push_back(i);
+        return;
+      }
+  }
+};
 // Exact Jordan-chain frame of a nilpotent leading coefficient over
-// Q(parameters).
-inline Matrix nilpotent_frame(const Matrix &m) {
+// Q(parameters). With `regular`, the head of every chain is taken regular and
+// primitive at the zero of that parameter modulo the kernel below it and the
+// chains before it (a head is free up to exactly those), which gives a frame
+// that is regular with a regular inverse wherever the Jordan type at the zero
+// is the generic one.
+inline Matrix nilpotent_frame(const Matrix &m, std::optional<std::size_t> regular = std::nullopt) {
   unsigned d = m.size();
   auto z = m[0][0].constant(0);
   auto pow = identity(d, z);
@@ -221,6 +277,7 @@ inline Matrix nilpotent_frame(const Matrix &m) {
     throw std::domain_error(
         "irregular endpoint: highest-pole coefficient is not nilpotent");
   Matrix selected;
+  std::vector<unsigned> depths; // selected[i] is killed by m^depths[i]
   auto t = zeros(d, d, z), jordan = zeros(d, d, z);
   unsigned column = 0;
   for (unsigned l = index; l > 0; --l) {
@@ -229,10 +286,21 @@ inline Matrix nilpotent_frame(const Matrix &m) {
       extend(span, v);
     for (auto &v : kernels[l - 1])
       extend(span, v);
+    LocalEchelon local{regular.value_or(0), {}, {}};
+    if (regular) {
+      // A head of level l stays in the kernel of m^l: it may be changed by
+      // that kernel's vectors only, which of the longer chains are the
+      // members at most l steps above their ends.
+      for (auto &v : kernels[l - 1])
+        local.insert(v);
+      for (unsigned i = 0; i < selected.size(); ++i)
+        if (depths[i] <= l)
+          local.insert(selected[i]);
+    }
     for (auto &head : kernels[l])
       if (extend(span, head)) {
         std::vector<std::vector<Exact>> chain(l);
-        chain.back() = head;
+        chain.back() = regular ? local.reduce(head) : head;
         for (unsigned j = l - 1; j > 0; --j)
           chain[j - 1] = action(m, chain[j]);
         for (unsigned j = 0; j < l; ++j) {
@@ -244,7 +312,10 @@ inline Matrix nilpotent_frame(const Matrix &m) {
             jordan[column][column + 1] = z.constant(1);
           ++column;
           selected.push_back(chain[j]);
+          depths.push_back(j + 1);
           extend(span, chain[j]);
+          if (regular)
+            local.insert(chain[j]);
         }
       }
   }
@@ -252,6 +323,19 @@ inline Matrix nilpotent_frame(const Matrix &m) {
     throw std::logic_error("nilpotent frame certificate failed");
   (void)inverse(t);
   return t;
+}
+// No entry of the matrix or of its inverse has a pole at the zero of the parameter.
+inline bool unimodular(const Matrix &t, std::size_t variable) {
+  for (const auto *matrix : {&t})
+    for (const auto &row : *matrix)
+      for (const auto &e : row)
+        if (!e.is_zero() && valuation(e, variable) < 0)
+          return false;
+  for (const auto &row : inverse(t))
+    for (const auto &e : row)
+      if (!e.is_zero() && valuation(e, variable) < 0)
+        return false;
+  return true;
 }
 inline Matrix gauge(const Matrix &a, const Matrix &t, std::size_t xi) {
   return multiply(inverse(t), subtract(multiply(a, t), derivative(t, xi)));
@@ -377,6 +461,11 @@ inline Result prepare(const Matrix &input, std::size_t xi,
       }
       auto before = score(current, xi);
       auto frame = nilpotent_frame(leading(current, xi, before.first));
+      if (options.regular_variable && !unimodular(frame, *options.regular_variable)) {
+        auto regular = nilpotent_frame(leading(current, xi, before.first), options.regular_variable);
+        if (unimodular(regular, *options.regular_variable))
+          frame = std::move(regular);
+      }
       if (frame != identity(d, x)) {
         apply(frame);
         if (result.steps >= options.max_steps)

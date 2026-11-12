@@ -80,6 +80,17 @@ struct NumericalOptions {
   // evaluated by rows, which then costs no more.
   Accumulation accumulation=Accumulation::rows;
   unsigned weighted_max_targets=4;
+  // Weighted accumulation: the lowest epsilon orders of the weights, and of
+  // the rows a level starts its transports from, are declared from the
+  // lowest orders of the operators that made them, and most of them cancel
+  // in the sum over the masters (a three-loop family with seven levels
+  // declares weights from epsilon^-11 that start at epsilon^-5 on every
+  // level). An order of which the cancellation left only rounding is set to
+  // zero and leaves the window (Evaluator::clear_cancelled_orders), with the
+  // orders of the endpoint operators, of the transports and of the leaf that
+  // only it asked for, and so do the orders of a transport's initial rows
+  // that are exactly zero.
+  bool clear_cancelled_orders=true;
   // After an evaluation by rows, estimate the error of the requested
   // integrals by accumulating one weighted row more (LaurentBoundary::error,
   // Evaluator::estimate_rows_error); `diffexp ft` selects it. Without it the
@@ -137,6 +148,8 @@ struct NumericalStatistics {
   // Levels transported as weighted rows, and evaluations that asked for
   // weighted accumulation but were evaluated by rows.
   std::size_t weighted_levels=0,weighted_fallbacks=0;
+  // Epsilon orders of weighted rows that had cancelled and were cleared.
+  std::size_t cancelled_orders=0;
   std::size_t demand_preflights=0,local_operator_reuses=0;
   std::size_t conditioning_method_fallbacks=0;
   std::size_t endpoint_constraint_rows=0,endpoint_constraint_coefficients=0;
@@ -1936,6 +1949,53 @@ class Evaluator {
     for(auto* side:{&a,&b})side->coefficients.resize(rows,std::vector(side->columns(),std::vector<B>(side->high-side->low+1,B(0))));
     return add_laurent_rows(a,b);
   }
+  // The lowest orders of weighted rows that hold nothing but the rounding of
+  // a cancellation: set to zero, in `error` as well, and counted. An order is
+  // cleared if every coefficient of it, with its radius and its estimated
+  // error, is smaller than the first order that is kept by 2^-separation,
+  // where separation is 64 bits more than the admitted Taylor tail, at least
+  // 128: what is dropped is below the tails the transports admit anyway,
+  // whatever it would have been multiplied by. The caller tightens the
+  // window.
+  //
+  // Not cleared: an order that cancelled down to the size of the estimated
+  // error (2^-110 to 2^-145 of the leading order, with a tail of 2^-127).
+  // What it holds is the error of the levels above, and that error cancels
+  // in the result together with its parts in the orders that are kept:
+  // clearing such orders as well left the four-loop banana 33% fewer
+  // products and an error five times larger.
+  int clear_cancelled_orders(LaurentRows& rows,LaurentRows& error) {
+    if(!options_.clear_cancelled_orders || rows.coefficients.empty())return 0;
+    const int count=rows.high-rows.low+1;
+    constexpr double none=-std::numeric_limits<double>::infinity();
+    std::vector<double> size(count,none);
+    mag_t bound;mag_init(bound);
+    const auto log2=[&]{return mag_is_zero(bound)?none:mag_is_inf(bound)?std::numeric_limits<double>::infinity():mag_get_d_log2_approx(bound);};
+    for(const auto& row:rows.coefficients)for(const auto& column:row)for(int k=0;k<count;++k) {
+      acb_get_mag(bound,column[k].raw());size[k]=std::max(size[k],log2());
+    }
+    for(const auto& row:error.coefficients)for(const auto& column:row)
+      for(int k=std::max(rows.low,error.low);k<=std::min(rows.high,error.high);++k) {
+        acb_get_mag(bound,column[k-error.low].raw());size[k-rows.low]=std::max(size[k-rows.low],log2());
+      }
+    mag_clear(bound);
+    const double largest=*std::max_element(size.begin(),size.end());
+    if(!(largest>none) || !std::isfinite(largest))return 0;
+    const double separation=std::max(128.0,static_cast<double>(options_.adjoint.truncation_bits)+64.0);
+    int live=0;
+    while(size[live]<largest-separation)++live;
+    for(int k=live;k-->0;)if(size[k]>size[live]-separation)live=k;
+    int cleared=0;
+    for(int k=0;k<live;++k)if(size[k]>none) {
+      ++cleared;
+      for(auto& row:rows.coefficients)for(auto& column:row)column[k]=B(0);
+    }
+    if(!cleared)return 0;
+    for(auto& row:error.coefficients)for(auto& column:row)
+      for(int k=error.low;k<=error.high && k<rows.low+live;++k)column[k-error.low]=B(0);
+    statistics_.cancelled_orders+=static_cast<std::size_t>(cleared);
+    return cleared;
+  }
   // One level. `weights` (rows: the top-level targets, then the endpoint
   // constraints of the levels above; columns: the level's requested integrals)
   // are known through weights.high, to every order if `exact`. Returns the
@@ -1965,6 +2025,7 @@ class Evaluator {
       const auto padded=extended_weights(weights,0,checked(static_cast<long>(target)-local.low));
       auto out=linear_boundary::compose(padded,local,target);
       error=linear_boundary::compose(windowed(error,padded.low,padded.high),local,target);
+      clear_cancelled_orders(out,error);
       linear_boundary::tighten(out);
       error=windowed(error,out.low,out.high);
       observe_operator(depth,"weights on the child's integrals",out);
@@ -2025,6 +2086,16 @@ class Evaluator {
         LaurentRows& arm_error) {
       auto initial=linear_boundary::compose(extended,endpoint,high);
       arm_error=linear_boundary::compose(extended_error,endpoint,high);
+      // The transport carries every order of its window on every chart: the
+      // lowest orders that are exactly zero at the start, or cancelled, in
+      // the rows and in their estimated error, are not part of it.
+      if(options_.clear_cancelled_orders) {
+        if(const int cleared=clear_cancelled_orders(initial,arm_error))
+          report(depth,std::string(side)+" initial rows: "+std::to_string(cleared)+" cancelled epsilon orders cleared",high);
+        int first=linear_boundary::tight_low(initial);
+        if(!arm_error.coefficients.empty())first=std::min(first,std::max(initial.low,linear_boundary::tight_low(arm_error)));
+        if(first>initial.low){initial=windowed(initial,first,initial.high);arm_error=windowed(arm_error,first,initial.high);}
+      }
       // The arm of the endpoint that carries the boundary starts at the
       // matching point.
       if(vertices.size()<2)return initial;
@@ -2134,6 +2205,8 @@ class Evaluator {
     }
     if(!exact && valid<target)throw WeightedDemand{depth,checked(static_cast<long>(target)-valid)};
     if(combined.high<target)throw std::logic_error("weighted accumulation: the local window is below its target");
+    if(const int cleared=clear_cancelled_orders(combined,carried))
+      report(depth,"weights on the child's integrals: "+std::to_string(cleared)+" cancelled epsilon orders cleared",target);
     linear_boundary::tighten(combined);
     error=windowed(carried,combined.low,combined.high);
     observe_operator(depth,"estimated error of the weights",error);

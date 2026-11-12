@@ -69,7 +69,7 @@ struct NumericalOptions {
   // Epsilon orders of a truncated endpoint series beyond the window at its
   // first build: enough to see the poles of the frame and of the functionals
   // in most levels, from which the orders really read are then known.
-  unsigned endpoint_epsilon_margin=3;
+  unsigned endpoint_epsilon_margin=5;
   unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
@@ -1000,7 +1000,8 @@ class Evaluator {
       auto result=series_endpoint(source,orders,high);
       const long missing=truncate?endpoint_orders_missing(result,high):0;
       if(missing<=0 || attempt>=4)return result;
-      orders+=static_cast<unsigned>(missing);++statistics_.endpoint_series_refinements;
+      // One order to spare: what is short here is only what can be seen so far.
+      orders+=static_cast<unsigned>(missing)+1;++statistics_.endpoint_series_refinements;
       report(depth,side+" endpoint series: "+std::to_string(missing)+" more epsilon orders for the operators",high);
     }
   }
@@ -1054,6 +1055,9 @@ class Evaluator {
       fresh.functionals[endpoint.constraint_slots[k]]=std::move(fresh.pending_constraints[k].first);
     fresh.pending_constraints.clear();fresh.clearance_coefficients.clear();
     fresh.constraint_slots=std::move(endpoint.constraint_slots);fresh.constraint_names=std::move(endpoint.constraint_names);
+    // The prepared inverse holds the epsilon orders it has solved; they are
+    // the same coefficients of the same frame, and it is extended from them.
+    fresh.inverse=std::move(endpoint.inverse);fresh.inverse_point=std::move(endpoint.inverse_point);
     endpoint=std::move(fresh);
   }
   Endpoint series_endpoint(const std::shared_ptr<const EndpointSource>& source,unsigned orders,int high) {

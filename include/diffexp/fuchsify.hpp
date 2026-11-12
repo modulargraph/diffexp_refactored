@@ -25,7 +25,8 @@ inline Matrix multiply(const Matrix &a, const Matrix &b) {
     for (unsigned k = 0; k < b.size(); ++k)
       if (!a[i][k].is_zero())
         for (unsigned j = 0; j < b[0].size(); ++j)
-          c[i][j] = c[i][j] + a[i][k] * b[k][j];
+          if (!b[k][j].is_zero())
+            c[i][j] = c[i][j] + a[i][k] * b[k][j];
   return c;
 }
 inline Matrix subtract(Matrix a, const Matrix &b) {
@@ -59,13 +60,15 @@ inline std::vector<unsigned> rref(Matrix &a, unsigned columns) {
     std::swap(a[p], a[row]);
     auto q = a[row][c];
     for (auto &e : a[row])
-      e = e / q;
+      if (!e.is_zero())
+        e = e / q;
     for (unsigned i = 0; i < a.size(); ++i)
       if (i != row) {
         q = a[i][c];
         if (!q.is_zero())
           for (unsigned j = 0; j < a[i].size(); ++j)
-            a[i][j] = a[i][j] - q * a[row][j];
+            if (!a[row][j].is_zero())
+              a[i][j] = a[i][j] - q * a[row][j];
       }
     pivots.push_back(c);
     ++row;
@@ -121,7 +124,8 @@ inline Matrix leading(const Matrix &a, std::size_t xi, unsigned p) {
     replacement.push_back(i == xi ? z : z.variable(i));
   for (auto &row : out)
     for (auto &e : row)
-      e = (e * x.pow(p)).substitute(replacement);
+      if (!e.is_zero())
+        e = (e * x.pow(p)).substitute(replacement);
   return out;
 }
 inline std::pair<unsigned, unsigned> score(const Matrix &a, std::size_t xi) {
@@ -258,6 +262,23 @@ inline Matrix diagonal(const Exact &x, const std::vector<long> &s) {
     t[i][i] = power(x, s[i]);
   return t;
 }
+// gauge(a, diagonal(x, s), xi) without the matrix products: entry (i,j) is
+// multiplied by x^(s[j]-s[i]) and s[i]/x leaves the diagonal. The general
+// formula inverts the shear and multiplies three dense matrices, d^3 exact
+// operations for a result that has the entries of `a` and no others.
+inline Matrix diagonal_gauge(const Matrix &a, const std::vector<long> &s,
+                             const Exact &x) {
+  auto out = a;
+  const unsigned d = a.size();
+  for (unsigned i = 0; i < d; ++i) {
+    for (unsigned j = 0; j < d; ++j)
+      if (s[j] != s[i] && !out[i][j].is_zero())
+        out[i][j] = out[i][j] * power(x, s[j] - s[i]);
+    if (s[i])
+      out[i][i] = out[i][i] - x.constant(Rational(s[i])) / x;
+  }
+  return out;
+}
 // Difference constraints: ord(Aij)+s[j]-s[i]>=-1. Bellman-Ford either
 // constructs a complete monomial gauge or proves this coordinate ansatz fails.
 inline std::optional<std::vector<long>> valuations(const Matrix &a,
@@ -331,6 +352,15 @@ inline Result prepare(const Matrix &input, std::size_t xi,
       total = multiply(total, t);
       ++result.steps;
     };
+    // The same step for the shear diagonal(x, s).
+    auto apply_shear = [&](const std::vector<long> &s) {
+      current = diagonal_gauge(current, s, x);
+      for (auto &row : total)
+        for (unsigned j = 0; j < d; ++j)
+          if (s[j] && !row[j].is_zero())
+            row[j] = row[j] * power(x, s[j]);
+      ++result.steps;
+    };
     while (detail::pole_order(current, xi) > 1) {
       if (result.steps >= options.max_steps)
         throw std::runtime_error(
@@ -342,7 +372,7 @@ inline Result prepare(const Matrix &input, std::size_t xi,
               s < -static_cast<long>(options.max_power))
             throw std::length_error(
                 "Fuchsification shear exceeds power budget");
-        apply(diagonal(x, *shifts));
+        apply_shear(*shifts);
         continue;
       }
       auto before = score(current, xi);
@@ -358,25 +388,61 @@ inline Result prepare(const Matrix &input, std::size_t xi,
               s < -static_cast<long>(options.max_power))
             throw std::length_error(
                 "Fuchsification shear exceeds power budget");
-        apply(diagonal(x, *shifts));
+        apply_shear(*shifts);
         continue;
       }
       // Bounded block shears lower the pole/rank pair. Failure is unsupported,
       // not a claim that a nilpotent-leading system is mathematically
       // irregular.
       before = score(current, xi);
-      std::optional<Matrix> best;
+      std::optional<std::vector<long>> best;
       auto best_score = before;
       unsigned candidates = 0;
+      // The score of a candidate is its pole order and the rank of its
+      // leading coefficient. A shear moves the valuation of entry (i,j) by
+      // s[j]-s[i] and leaves its leading coefficient alone, so both follow
+      // from the valuations and leading coefficients of the current matrix,
+      // taken once for all candidates; and a candidate with a higher pole
+      // order than the best one needs no rank. Only a candidate of pole
+      // order one or less, where the term s[i]/x of the shear enters the
+      // leading coefficient, is formed and scored as a matrix.
+      std::vector<std::vector<long>> order(d, std::vector<long>(d, 0));
+      auto lead = zeros(d, d, x);
+      {
+        std::vector<Exact> origin;
+        for (unsigned i = 0; i < x.variable_count(); ++i)
+          origin.push_back(i == xi ? x.constant(0) : x.variable(i));
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            if (!current[i][j].is_zero()) {
+              order[i][j] = valuation(current[i][j], xi);
+              lead[i][j] = (current[i][j] * power(x, -order[i][j])).substitute(origin);
+            }
+      }
       auto consider = [&](const std::vector<long> &s) {
         if (candidates++ >= options.max_shear_candidates)
           return;
-        auto t = diagonal(x, s);
-        auto candidate = gauge(current, t, xi);
-        auto sc = score(candidate, xi);
+        long pole = 0;
+        for (unsigned i = 0; i < d; ++i)
+          for (unsigned j = 0; j < d; ++j)
+            if (!current[i][j].is_zero())
+              pole = std::max(pole, -(order[i][j] + s[j] - s[i]));
+        std::pair<unsigned, unsigned> sc;
+        if (pole < 2)
+          sc = score(diagonal_gauge(current, s, x), xi);
+        else {
+          if (static_cast<unsigned long>(pole) > best_score.first)
+            return;
+          auto top = zeros(d, d, x);
+          for (unsigned i = 0; i < d; ++i)
+            for (unsigned j = 0; j < d; ++j)
+              if (!current[i][j].is_zero() && order[i][j] + s[j] - s[i] == -pole)
+                top[i][j] = lead[i][j];
+          sc = {static_cast<unsigned>(pole), static_cast<unsigned>(rref(top, d).size())};
+        }
         if (sc < best_score) {
           best_score = sc;
-          best = std::move(t);
+          best = s;
         }
       };
       for (unsigned cut = 1;
@@ -399,7 +465,7 @@ inline Result prepare(const Matrix &input, std::size_t xi,
             "unsupported endpoint gauge: bounded valuation/Jordan block shears "
             "did not reduce pole rank; a general Moser reduction or supplied "
             "rational gauge is required");
-      apply(*best);
+      apply_shear(*best);
     }
     result.matrix = current;
     result.transform = total;

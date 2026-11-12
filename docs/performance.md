@@ -9,7 +9,25 @@ FLINT 3.4.0, Release build); wall times are in [timings.md](timings.md).
 A run has an exact preparation (IBP reductions per level, cached) and a
 numerical phase. In the numerical phase about three quarters is the
 transport of endpoint functionals along each level's merge parameter; the
-rest is exact endpoint work (series, projections, matching).
+rest is exact endpoint work (series, projections, matching). The JSON
+`timings` list every phase, and the phases add up to `numerical_seconds`:
+`ordinary_seconds` (transport), `endpoint_gauge_seconds` (the gauge of each
+endpoint to Fuchsian form), `endpoint_series_seconds`,
+`endpoint_frame_seconds`, `endpoint_observable_seconds` (projection and
+regulated integration of every requested row), `endpoint_operator_seconds`,
+`basis_selection_seconds` and `leaf_seconds`. For one sample of the double
+pentagon (one thread): transport 31 s, observables 10 s, series 6.5 s, basis
+scan 3 s, frames and operators 1.2 s each. In a sample of a small family the
+scalar leaf is the largest item (four-loop banana: 2.0 of 4.5 s), because it
+is still summed as a series in epsilon.
+
+A multiply-add of the Taylor recurrence is one exact coefficient times one
+working-precision value, and costs one pass over the value per limb of the
+coefficient. Expanded runs have coefficients of one or two limbs (2.4 to 5
+passes per product). In a sample the leg is complex and epsilon is a
+number, so the shifted coefficients are integers of up to seven limbs: 8 to
+18 passes per product. The working precision itself costs little (four-loop
+banana, expanded: 27, 30 and 33 s at 256, 384 and 512 bits).
 
 One transport leg costs about
 
@@ -95,7 +113,22 @@ Transport time is linear in the number of epsilon orders carried.
 - **Moving poles removed** (`--moving-poles remove`). Denominator factors
   that mix the merge parameter with epsilon are removed by exchanging a
   master. This narrows no epsilon window but shrinks the connection where
-  such a factor exists; see [moving-poles.md](moving-poles.md).
+  such a factor exists; see [moving-poles.md](moving-poles.md). A factor
+  whose removal would leave the connection more than four times larger is
+  kept (a factor of degree seven in x of a three-loop level: 706235 to
+  26971415 characters, after which one column of the level's endpoint series
+  took 110 s). The outcome of the search is recorded beside the exact cache
+  (`moving-poles/`), so that later runs and the samples of a fit apply the
+  recorded steps instead of searching again.
+- **Working precision** (`--precision-bits`, 384 by default). Every level
+  loses precision between its overlap points and its matching point: 30 to
+  140 bits a level in the samples of the large families (the transported
+  row is a small combination of solutions that grow towards the endpoint).
+  A seven-level sample can lose all 384. When rounding leaves a coefficient
+  fewer digits than `--leaf-digits` asks for, the numbers are computed
+  again with that many bits more; the exact endpoint plans are kept. A
+  precision stated on the command line or in the family file is not
+  changed, and nothing is raised beyond 4096 bits.
 - **Merge selection** (`--merge-selection auto`). Which two propagators a
   level merges decides how large the levels below become. Candidates are
   the pairs on one loop momentum, whose merged line is again an ordinary
@@ -168,8 +201,8 @@ Transport time is linear in the number of epsilon orders carried.
   the thread count. The CLI leaves cores that are busy at start-up alone;
   `OMP_NUM_THREADS` and `--ibp-threads` override.
 
-Options that do not help: a different working precision (384 bits is
-needed by the inner levels and more buys nothing), a different contour
+Options that do not help: a lower working precision (the four-loop banana
+loses about 160 bits expanded and 180 in a sample), a different contour
 height, and `--method factored`, which transports the solution map instead
 of the rows and is slower and less accurate on every family measured.
 
@@ -197,6 +230,11 @@ leaf are specialised to the numeric dimension.
   costs digits in deep recursions: samples ask the leaf for at most 16
   digits, 12 from six levels on, unless `--leaf-digits` is given.
 - One sample alone is `--epsilon-shift Q --epsilon-order 0`.
+- A sample that had to raise its working precision (see above) reports it,
+  and the samples started after it begin at that precision
+  (`--precision-floor`). For a three-loop family with nine propagators and
+  seven levels a sample has 8 digits at 384 bits and 18 at 448, where the
+  Taylor tail of 16 leaf digits takes over.
 
 Accuracy of the finite part of the four-loop equal-mass banana from samples
 at +-k/400 (reference 39.655526834297652...):
@@ -237,6 +275,13 @@ sample values are in
 [validation/henn-double-pentagon-epsilon-samples.json](validation/henn-double-pentagon-epsilon-samples.json).
 
 ## Limits
+
+- A deep recursion with many scales loses far more precision expanded than
+  sampled. The three-loop nine-propagator family above (levels of 24, 28,
+  29, 19, 12, 6, 2 masters, epsilon windows 17 to 23 orders wide) completes
+  its expanded run in about ten minutes and returns radii of 1e+1301 at 384
+  bits; no precision below 4096 bits repairs that, and none is tried. Its
+  samples take 26 to 37 s each.
 
 - The expanded recursion of the double pentagon does not finish in hours:
   levels 2 and 1 have 64 x 33 and 69-master systems with epsilon through 12.

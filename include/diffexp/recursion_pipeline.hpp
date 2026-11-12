@@ -60,6 +60,10 @@ struct NumericalOptions {
   unsigned ordinary_order=80,max_epsilon=100,max_refinements=8,max_overlap_halvings=128;
   // Most orders of the leaf's Laurent series at epsilon=0 summed beyond the
   // requested top when the recursion is expanded around a shifted epsilon.
+  // Expand the leaf of a shifted recursion at the shifted dimension itself;
+  // otherwise, and wherever that is not possible, its series at epsilon=0
+  // is summed.
+  bool direct_shifted_leaf=true;
   unsigned shifted_leaf_orders=60;
   Rational overlap{Rational("1/16")},contour_height{Rational("1/10")};
   unsigned leaf_digits=28;
@@ -76,6 +80,12 @@ struct NumericalOptions {
   // evaluated by rows, which then costs no more.
   Accumulation accumulation=Accumulation::rows;
   unsigned weighted_max_targets=4;
+  // After an evaluation by rows, estimate the error of the requested
+  // integrals by accumulating one weighted row more (LaurentBoundary::error,
+  // Evaluator::estimate_rows_error); `diffexp ft` selects it. Without it the
+  // estimates are those kept level by level, which do not see the
+  // cancellations between the rows of a level and are far too large.
+  bool rows_error_estimate=false;
   // The recursion propagates inherited uncertainty by probes (see
   // AdjointOptions::Uncertainty); the transport's own default is the map.
   AdjointOptions adjoint=[]{AdjointOptions value;value.uncertainty=AdjointOptions::Uncertainty::probe;return value;}();
@@ -135,10 +145,17 @@ struct NumericalStatistics {
   // Wall time of the phases that precede transport. basis_selection_seconds
   // covers discovery, screening and installation, not the original plan.
   double endpoint_series_seconds=0,endpoint_operator_seconds=0,basis_selection_seconds=0,leaf_seconds=0;
+  // The rest of an endpoint's exact preparation: the gauge to Fuchsian form,
+  // the frames (the series in the masters' coordinates), and the projection
+  // and regulated integration of every observable row.
+  double endpoint_gauge_seconds=0,endpoint_frame_seconds=0,endpoint_observable_seconds=0;
   // Local-operator coefficients below a child component's structural window:
   // rounding noise replaced by the exact zero, and (never expected) values
   // excluding zero, which are kept together with their wider child demand.
   std::size_t structural_zero_coefficients=0,structural_zero_conflicts=0;
+  // Leading coefficients of endpoint operators proved to vanish exactly
+  // modulo two primes (affine_operator::impose_exact_zeros).
+  std::size_t operator_exact_zeros=0;
 };
 // A boundary-independent local problem. Endpoint rows act on the
 // epsilon-gauged master vector. Each arm satisfies g'=forcing-g*connection
@@ -354,6 +371,8 @@ class Evaluator {
     std::int64_t largest_shift=0;
     EndpointGeometry geometry;
     std::optional<LaurentRows> lower_operator,upper_operator,local_operator;
+    // Estimated error of local_operator: the probe rows of its transports.
+    std::optional<LaurentRows> local_error;
     std::optional<int> adjoint_child_loss,factored_child_loss;
     bool factored_conditioning_failed=false;
     // Rational enclosures of the real singular points of the transported
@@ -437,6 +456,35 @@ class Evaluator {
       basis_store_=std::make_unique<artifacts::Store>(options_.basis_cache_directory,options_.basis_cache_max_bytes);
   }
   const NumericalStatistics& statistics()const{return statistics_;}
+  // The next evaluation runs at `bits` of working precision. Every number
+  // computed so far is dropped; the exact part of the endpoint plans (series,
+  // frames, functionals, overlaps, internal bases, contour sides) is kept, so
+  // the evaluation repeats the endpoint operators, the transports and the
+  // leaf, not the exact preparation.
+  void raise_precision(slong bits) {
+    if(bits<=options_.working_bits)return;
+    if(bits>1000000)throw std::invalid_argument("recursive numerical options or finite budgets: working precision must be 64..1000000 bits");
+    options_.working_bits=bits;
+    drop_numbers();
+  }
+  // The next evaluation admits a Taylor tail of 2^-bits per chart.
+  void raise_tail(unsigned bits) {
+    if(bits<=options_.adjoint.truncation_bits)return;
+    options_.adjoint.truncation_bits=bits;
+    drop_numbers();
+  }
+  unsigned tail_bits()const{return options_.adjoint.truncation_bits;}
+  void drop_numbers() {
+    const std::function<void(Plan&)> reset=[&](Plan& prepared) {
+      prepared.lower_operator.reset();prepared.upper_operator.reset();prepared.local_operator.reset();
+      for(auto* endpoint:{&prepared.lower,&prepared.upper}){endpoint->inverse.reset();endpoint->inverse_point.reset();}
+      if(prepared.pullback_base)reset(*prepared.pullback_base);
+    };
+    for(auto& prepared:plans_)if(prepared)reset(*prepared);
+    for(auto& value:cache_)value.reset();
+    for(auto& expression:expressions_)expression.reset();
+  }
+  slong working_bits()const{return options_.working_bits;}
   const std::vector<BasisSelection>& basis_selections()const{return basis_selections_;}
   // Snapshot a completed transform together with its immutable leaf source.
   // Copying the transform prevents a later refinement (or caller edit) from
@@ -516,6 +564,12 @@ class Evaluator {
   LaurentBoundary evaluate(unsigned desired_top=0){return evaluate(0,desired_top);}
   LaurentBoundary evaluate(std::size_t depth,unsigned desired_top) {
     auto result=evaluate_impl(depth,desired_top);
+    if(depth==0 && rows_error_pending_) {
+      rows_error_pending_=false;
+      PrecisionScope precision(options_.working_bits);
+      estimate_rows_error(desired_top);
+      result=*cache_[0];
+    }
     report(depth,"completed",desired_top);
     return result;
   }
@@ -608,6 +662,11 @@ class Evaluator {
       throw;
     }
   }
+  // The requested integrals were evaluated by rows and their error is yet to
+  // be estimated (estimate_rows_error).
+  bool rows_error_pending_=false;
+  // The requested integrals are being accumulated as weighted rows.
+  bool weighted_rows_=false;
   const Graph& graph_;NumericalOptions options_;std::size_t xi_,ei_;int d0_;
   causal::Prescription prescription_;
   mutable std::vector<std::optional<causal::Landau>> landau_;
@@ -657,14 +716,22 @@ class Evaluator {
     if(options_.ordinary_fraction_progress)options_.ordinary_fraction_progress(1);
     return result;
   }
-  // The scalar leaf is a closed form whose Laurent series at epsilon_total=0
-  // the leaf integrator provides to any order. Around a shifted point its
-  // Taylor coefficients follow by re-expansion: (shift+eps)^k contributes
-  // binomial(k,m)*shift^(k-m) to eps^m, for negative k as well. The series is
-  // cut where the retained terms have decayed below the working precision or
-  // at the epsilon budget.
+  // The scalar leaf is a closed form. Around a shifted epsilon the leaf
+  // integrator expands it there directly (CertifiedDeepestBetaOptions::
+  // epsilon_shift), through the requested order only. Where it cannot (the
+  // shift on a pole of a gamma function, or resonant with an endpoint power)
+  // the Laurent series at epsilon_total=0, which it provides to any order, is
+  // re-expanded: (shift+eps)^k contributes binomial(k,m)*shift^(k-m) to
+  // eps^m, for negative k as well, and the series is cut where the retained
+  // terms have decayed below the leaf tolerance or at the epsilon budget.
   LeafBoundary shifted_leaf(const Node& node,unsigned desired_top,const feynman::CertifiedDeepestBetaOptions& leaf) {
     if(graph_.epsilon_shift.is_zero())return evaluate_leaf(node,graph_.dimension,d0_,desired_top,leaf,options_.gaussian);
+    if(options_.direct_shifted_leaf) {
+      auto direct=leaf;direct.epsilon_shift=graph_.epsilon_shift;
+      try {return evaluate_leaf(node,graph_.dimension,d0_,desired_top,direct,options_.gaussian);}
+      catch(const std::domain_error&) {}
+      catch(const std::invalid_argument&) {}
+    }
     const auto epsilon=graph_.dimension.variable(ei_),shift=graph_.dimension.constant(graph_.epsilon_shift);
     const auto back=exact_point(graph_.dimension,ei_,epsilon-shift);
     Node unshifted=node;
@@ -862,7 +929,7 @@ class Evaluator {
     return result;
   }
   Endpoint endpoint(const Matrix& matrix,const Matrix& diagonal,const Matrix& inverse_diagonal,const Node& node,bool upper,std::size_t depth,int high) {
-    auto fuchs=fuchsify::prepare(matrix,xi_,options_.fuchsification);
+    auto fuchs=[&]{Seconds timer{statistics_.endpoint_gauge_seconds};return fuchsify::prepare(matrix,xi_,options_.fuchsification);}();
     if(!fuchs.success)throw std::domain_error("recursive endpoint fuchsification unsupported: "+fuchs.reason);
     const std::string side=upper?"upper":"lower";
     // The endpoint that carries the boundary needs its fundamental series.
@@ -884,6 +951,7 @@ class Evaluator {
       Seconds timer{statistics_.endpoint_series_seconds};++statistics_.endpoint_series_built;
       return AffineFrobeniusSeries::prepare(fuchs.matrix,xi_,ei_,options_.endpoint_order,endpoint_options);
     }();
+    std::optional<Seconds> phase;phase.emplace(statistics_.endpoint_frame_seconds);
     auto physical_gauge=fuchsify::detail::multiply(diagonal,fuchs.transform);
     // P*(D*T*F)^-1*D = P*(T*F)^-1: D stays in the physical observable P and
     // is cancelled from the receiving frame before epsilon normalization and
@@ -901,6 +969,7 @@ class Evaluator {
     const auto collect=[&](const Matrix& coefficients){for(const auto& row:coefficients)for(const auto& c:row)if(!c.is_zero())result.clearance_coefficients.push_back(c);};
     collect(matrix);collect(fuchs.matrix);collect(fuchs.transform);collect(fuchs.inverse_transform);collect(physical_gauge);
     const auto x=graph_.dimension.variable(xi_);
+    phase.emplace(statistics_.endpoint_observable_seconds);
     for(std::size_t i=0;i<node.operations.size();++i) {
       const auto& op=node.operations[i];
       if(op.operation==feynman::Operation::Direct ||
@@ -1322,6 +1391,7 @@ class Evaluator {
     // Auxiliary domain rows are never exposed as requested integrals or passed
     // to a parent. The shared-source contraction happens before this split.
     expression.transform.coefficients.resize(rows);result.values.resize(rows);
+    if(result.error.size()>rows)result.error.resize(rows);
   }
   // Composition measures the outer window against the child's stored map, a
   // materialized value against its own trimmed low. A child map produced by
@@ -1332,7 +1402,38 @@ class Evaluator {
     const auto& expression=*expressions_[child_depth];
     return std::min(child.low,checked(static_cast<long>(expression.transform.low)+expression.leaf_source->low));
   }
-  LaurentBoundary compose_child_expression(std::size_t depth,const LaurentRows& local,unsigned desired_top,const Plan* prepared=nullptr) {
+  // For every order low..top the largest modulus, over the rows, of rows
+  // applied to the transform and its source: an error carried as rows,
+  // contracted like the rows it belongs to.
+  static std::vector<double> contracted_size(const LaurentRows& rows,const LaurentRows& transform,const LaurentBoundary& source,int low,int top) {
+    std::vector<double> out(top>=low?top-low+1:0,0.0);
+    if(out.empty() || rows.coefficients.empty())return out;
+    const int source_high=source.high();
+    mag_t size;mag_init(size);
+    for(const auto& row:rows.coefficients)for(int order=low;order<=top;++order) {
+      B sum(0);
+      for(std::size_t middle=0;middle<row.size();++middle)for(int a=rows.low;a<=rows.high;++a) {
+        const auto& weight=row[middle][a-rows.low];
+        if(weight.is_zero())continue;
+        for(std::size_t column=0;column<transform.coefficients[middle].size();++column)for(int b=transform.low;b<=transform.high;++b) {
+          const long c=static_cast<long>(order)-a-b;
+          if(c<source.low || c>source_high)continue;
+          const auto& factor=transform.coefficients[middle][column][b-transform.low];
+          if(!factor.is_zero())sum+=weight*factor*source.values[column][c-source.low];
+        }
+      }
+      acb_get_mag(size,sum.raw());
+      out[order-low]=std::max(out[order-low],mag_get_d(size));
+    }
+    mag_clear(size);
+    return out;
+  }
+  // `local_error`: the estimated error of `local` as rows (the probes of its
+  // transports); every requested integral is taken to be off by as much as
+  // these combinations of all of them. The child's own estimates follow
+  // through the moduli of `local`.
+  LaurentBoundary compose_child_expression(std::size_t depth,const LaurentRows& local,unsigned desired_top,const Plan* prepared=nullptr,
+      const LaurentRows* local_error=nullptr) {
     if(depth+1>=expressions_.size() || !expressions_[depth+1] || !cache_[depth+1])
       throw std::logic_error("recursive adjoint child has no synchronized linear expression");
     const auto& child=*expressions_[depth+1];
@@ -1355,7 +1456,31 @@ class Evaluator {
       throw BoundaryDemand(checked(static_cast<long>(demand.required_high)+child.transform.low),"recursive expression requires a higher shared leaf window");
     }
     result.taylor_tail_certified=false;
+    {
+      const int top=static_cast<int>(desired_top);
+      result.error.assign(result.values.size(),std::vector<double>(result.values.empty()?0:result.values[0].size(),0.0));
+      if(local_error) {
+        const auto own=contracted_size(*local_error,child.transform,*child.leaf_source,result.low,top);
+        for(auto& row:result.error)for(std::size_t k=0;k<row.size() && k<own.size();++k)row[k]=own[k];
+      }
+      const auto& below=*cache_[depth+1];
+      if(!below.error.empty()) {
+        const int below_high=below.high();mag_t size;mag_init(size);
+        for(std::size_t i=0;i<result.error.size();++i)for(std::size_t j=0;j<local.coefficients[i].size() && j<below.error.size();++j)
+          for(int a=local.low;a<=local.high;++a) {
+            const auto& weight=local.coefficients[i][j][a-local.low];
+            if(weight.is_zero())continue;
+            acb_get_mag(size,weight.raw());const double modulus=mag_get_d(size);
+            for(int b=below.low;b<=below_high && static_cast<long>(a)+b<=top;++b)
+              if(static_cast<long>(a)+b>=result.low)result.error[i][a+b-result.low]+=modulus*below.error[j][b-below.low];
+          }
+        mag_clear(size);
+      }
+    }
     if(prepared)discharge_endpoint_constraints(depth,*prepared,expression,result);
+    // The error of the requested integrals is estimated once more, as a
+    // whole (estimate_rows_error).
+    if(!depth)rows_error_pending_=true;
     observe_operator(depth,"composed shared-source map",expression.transform);
     expressions_[depth]=std::move(expression);cache_[depth]=std::move(result);return *cache_[depth];
   }
@@ -1385,9 +1510,14 @@ class Evaluator {
     const auto& inverse=*endpoint.inverse;
     if(!inverse.success())throw std::domain_error("recursive endpoint operator inverse unsupported: "+inverse.reason);
     std::vector<std::optional<affine_operator::Operator>> operators(rows);int low=0;
+    // Weighted accumulation transports one combination of these rows: their
+    // exact zeros would not survive it, and proving them is not free.
+    auto matching=options_.matching;
+    if(weighted_rows_)matching.operator_exact_zeros=false;
     for(unsigned i=0;i<rows;++i)if(endpoint.functionals[i]) {
-      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,options_.matching);
+      operators[i]=affine_operator::compose(inverse,*endpoint.series,*endpoint.functionals[i],point,high,matching);
       if(!operators[i]->success())throw std::domain_error("recursive endpoint operator composition unsupported: "+operators[i]->reason);
+      statistics_.operator_exact_zeros+=operators[i]->exact_zero_coefficients;
       low=std::min(low,operators[i]->matrix.low);
     }
     LaurentRows result{low,high,std::vector(rows,std::vector(d,std::vector<B>(high-low+1,B(0))))};
@@ -1555,16 +1685,25 @@ class Evaluator {
         auto stage=adjoint_stage(depth,prepared,high);
         auto settings=options_.adjoint;settings.taylor_order=options_.ordinary_order;
         // What a leg cost and why: its size, path and chart counts.
-        const auto summarized=[&](const char* side,LaurentRows input,const Matrix& forcing,const std::vector<Exact>& vertices) {
+        const bool probing=settings.uncertainty==AdjointOptions::Uncertainty::probe;
+        const auto summarized=[&](const char* side,LaurentRows input,const Matrix& forcing,const std::vector<Exact>& vertices,
+            LaurentRows& arm_error) {
           const auto* stats=settings.conditioning_stats;
           const AdjointConditioningStats before=stats?*stats:AdjointConditioningStats{};
+          // The exact endpoint rows have no error to start from.
+          arm_error=LaurentRows{input.low,input.high,std::vector(1,std::vector(input.columns(),std::vector<B>(input.high-input.low+1,B(0))))};
           // The arm of the endpoint that carries the boundary starts at the
           // matching point.
           if(vertices.size()<2)return input;
           const auto rows=input.coefficients.size(),columns=input.coefficients.empty()?0:input.coefficients[0].size();
           const int low=input.low,top=input.high;
           const auto began=std::chrono::steady_clock::now();
-          auto result=ordinary_transport(stage.connection,std::move(input),forcing,vertices,settings);
+          auto carried=settings;
+          // The probes leave as rows instead of entering the radii: see
+          // compose_child_expression.
+          if(probing){arm_error.coefficients.clear();carried.error=&arm_error;}
+          auto result=ordinary_transport(stage.connection,std::move(input),forcing,vertices,carried);
+          if(!probing)arm_error=windowed(arm_error,result.low,result.high);
           std::ostringstream text;
           text<<side<<" adjoint transport done: "<<rows<<" rows x "<<columns<<" masters, epsilon "<<low<<".."<<top
               <<", "<<vertices.size()-1<<" path legs";
@@ -1573,20 +1712,26 @@ class Evaluator {
           text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
           if(stats)text<<" (compile "<<stats->compilation_seconds-before.compilation_seconds<<", prepare "
               <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds
-              <<"; "<<stats->circuit_terms-before.circuit_terms<<" products)";
+              <<"; "<<stats->circuit_terms-before.circuit_terms<<" products, probes "<<stats->probe_terms-before.probe_terms<<")";
           report(depth,text.str(),high);
           return result;
         };
-        report(depth,"lower adjoint transport",high);auto left=summarized("lower",std::move(stage.lower_endpoint),stage.lower_forcing,stage.lower_path);
+        LaurentRows left_error,right_error;
+        report(depth,"lower adjoint transport",high);auto left=summarized("lower",std::move(stage.lower_endpoint),stage.lower_forcing,stage.lower_path,left_error);
         observe_operator(depth,"lower transported operator",left);
-        report(depth,"upper adjoint transport",high);auto right=summarized("upper",std::move(stage.upper_endpoint),stage.upper_forcing,stage.upper_path);
+        report(depth,"upper adjoint transport",high);auto right=summarized("upper",std::move(stage.upper_endpoint),stage.upper_forcing,stage.upper_path,right_error);
         observe_operator(depth,"upper transported operator",right);
         auto transported=add_laurent_rows(left,right);
+        auto carried=add_error_rows(std::move(left_error),std::move(right_error));
         if(prepared.has_physical_basis) {
           const auto inverse=exact_laurent_rows(prepared.inverse_diagonal,anchor,
             std::max(0,checked(static_cast<long>(local_high)-transported.low)));
           combined=linear_boundary::compose(transported,inverse,local_high);
-        } else combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
+          carried=linear_boundary::compose(carried,inverse,local_high);
+        } else {
+          combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
+          carried=shift_laurent_columns(carried,prepared.gauge.shifts,true);
+        }
         Matrix direct(prepared.lower.functionals.size(),std::vector<Exact>(prepared.gauge.matrix.size(),sample.constant(0)));
         for(unsigned i=0;i<node.operations.size();++i)if(node.operations[i].operation==feynman::Operation::Direct)direct[i]=node.observable_rows[i];
         combined=add_laurent_rows(*combined,exact_laurent_rows(direct,anchor,combined->high));
@@ -1594,14 +1739,16 @@ class Evaluator {
           const auto map=exact_laurent_rows(*prepared.boundary_map,anchor,
             std::max(0,checked(static_cast<long>(needed_operator)-combined->low)));
           combined=linear_boundary::compose(*combined,map,needed_operator);
+          carried=linear_boundary::compose(carried,map,needed_operator);
           linear_boundary::tighten(*combined);
         } else
         if(options_.component_epsilon_demands)impose_structural_columns(depth,prepared,*combined,high);
+        prepared.local_error=windowed(carried,combined->low,combined->high);
         observe_operator(depth,"combined local operator",*combined);
       } else ++statistics_.local_operator_reuses;
       try {
         report(depth,"shared boundary application",desired_top);
-        return compose_child_expression(depth,*combined,desired_top,&prepared);
+        return compose_child_expression(depth,*combined,desired_top,&prepared,prepared.local_error?&*prepared.local_error:nullptr);
       }catch(const BoundaryDemand& request) {
         if(request.required_high<=demand)throw std::runtime_error("recursive adjoint epsilon refinement made no progress");
         demand=request.required_high;++statistics_.refinements;report(depth,"child refinement",demand);
@@ -1649,6 +1796,9 @@ class Evaluator {
             throw BoundaryDemand(checked(static_cast<long>(request.required_inner_high)+leaf_low),"component anchor map requires additional child coefficients");
           }
           factored_transport::Options settings;settings.transport=options_.adjoint;settings.transport.taylor_order=options_.ordinary_order;
+          // The factored maps are composed as balls: a tail in their radii
+          // would not cancel where the maps do.
+          settings.transport.tail_probe=false;
           settings.transport_dispatch=[this](const Matrix& a,LaurentRows input,const Matrix& b,const std::vector<Exact>& vertices,const AdjointOptions& options) {
             return ordinary_transport(a,std::move(input),b,vertices,options);
           };
@@ -1689,6 +1839,7 @@ class Evaluator {
           throw BoundaryDemand(checked(static_cast<long>(request.required_inner_high)+leaf_low),"factored anchor map requires additional child coefficients");
         }
         auto settings=factored_transport::Options{};settings.transport=options_.adjoint;settings.transport.taylor_order=options_.ordinary_order;
+        settings.transport.tail_probe=false;
         settings.transport_dispatch=[this](const Matrix& a,LaurentRows input,const Matrix& b,
             const std::vector<Exact>& vertices,const AdjointOptions& options) {
           return ordinary_transport(a,std::move(input),b,vertices,options);
@@ -1770,14 +1921,37 @@ class Evaluator {
     if(low<=0 && high>=0)for(std::size_t c=0;c<constraints;++c)out.coefficients[rows+c][columns+c][-low]=B(1);
     return out;
   }
+  // The same rows in the window low..high: orders outside it are dropped,
+  // missing ones are zero.
+  static LaurentRows windowed(const LaurentRows& rows,int low,int high) {
+    LaurentRows out{low,high,std::vector(rows.coefficients.size(),std::vector(rows.columns(),std::vector<B>(high-low+1,B(0))))};
+    for(std::size_t a=0;a<out.coefficients.size();++a)for(std::size_t i=0;i<out.coefficients[a].size();++i)
+      for(int k=std::max(low,rows.low);k<=std::min(high,rows.high);++k)
+        out.coefficients[a][i][k-low]=rows.coefficients[a][i][k-rows.low];
+    return out;
+  }
+  // Sum of two sets of error rows; the shorter set counts as zero rows.
+  static LaurentRows add_error_rows(LaurentRows a,LaurentRows b) {
+    const auto rows=std::max(a.coefficients.size(),b.coefficients.size());
+    for(auto* side:{&a,&b})side->coefficients.resize(rows,std::vector(side->columns(),std::vector<B>(side->high-side->low+1,B(0))));
+    return add_laurent_rows(a,b);
+  }
   // One level. `weights` (rows: the top-level targets, then the endpoint
   // constraints of the levels above; columns: the level's requested integrals)
   // are known through weights.high, to every order if `exact`. Returns the
   // weights on the level's masters at its matching point through `target`,
   // with the level's own constraint rows appended, or reports by how many
   // orders its input is short.
+  //
+  // `error` holds the estimated error of the weights (AdjointOptions::error):
+  // one or two rows that every linear map of the level is applied to exactly
+  // as to the weights, and to which the transports add the Taylor tails they
+  // admit. It leaves as the estimated error of the returned weights. Nothing
+  // of it enters a radius here: the weights of a level are a combination
+  // whose terms cancel, and an error that is carried as a row cancels with
+  // them, as the true one does.
   LaurentRows weighted_level(std::size_t depth,const LaurentRows& weights,bool exact,int target,
-      std::vector<std::string>& labels,unsigned desired_top) {
+      std::vector<std::string>& labels,unsigned desired_top,LaurentRows& error) {
     const auto& node=graph_.nodes[depth];const auto sample=graph_.dimension;
     const auto requested=node.operations.size();
     if(weights.columns()!=requested)throw std::logic_error("weighted accumulation: the weights do not match the level's requested integrals");
@@ -1788,8 +1962,11 @@ class Evaluator {
       const auto local=exact_laurent_rows(node.observable_rows,sample.constant(node.anchor),
         std::max(0,checked(static_cast<long>(target)-weights.low)));
       if(!exact && known+local.low<target)throw WeightedDemand{depth,checked(static_cast<long>(target)-known-local.low)};
-      auto out=linear_boundary::compose(extended_weights(weights,0,checked(static_cast<long>(target)-local.low)),local,target);
+      const auto padded=extended_weights(weights,0,checked(static_cast<long>(target)-local.low));
+      auto out=linear_boundary::compose(padded,local,target);
+      error=linear_boundary::compose(windowed(error,padded.low,padded.high),local,target);
       linear_boundary::tighten(out);
+      error=windowed(error,out.low,out.high);
       observe_operator(depth,"weights on the child's integrals",out);
       return out;
     }
@@ -1834,6 +2011,8 @@ class Evaluator {
     if(direct_rows)padded=std::max(padded,static_cast<long>(local_high)-direct_rows->low);
     const auto extended=extended_weights(weights,constraints,checked(std::max(0L,padded)));
     const auto rows=extended.coefficients.size(),s=sources.size();
+    auto extended_error=windowed(error,extended.low,extended.high);
+    for(auto& row:extended_error.coefficients)row.resize(extended.columns(),std::vector<B>(extended.high-extended.low+1,B(0)));
     const Matrix no_forcing(rows,std::vector<Exact>(d+s,sample.constant(0)));
     auto settings=options_.adjoint;settings.taylor_order=options_.ordinary_order;
     // g'=w F-g A for the combined row g=w E is the homogeneous equation of the
@@ -1842,22 +2021,31 @@ class Evaluator {
     // nonnegative epsilon valuation. Uncertainty of the weights is then
     // carried like that of any transported row, and a checkpoint is keyed by
     // the weights through its initial rows.
-    const auto arm=[&](const char* side,const LaurentRows& endpoint,const Matrix& forcing,const std::vector<Exact>& vertices) {
+    const auto arm=[&](const char* side,const LaurentRows& endpoint,const Matrix& forcing,const std::vector<Exact>& vertices,
+        LaurentRows& arm_error) {
       auto initial=linear_boundary::compose(extended,endpoint,high);
+      arm_error=linear_boundary::compose(extended_error,endpoint,high);
       // The arm of the endpoint that carries the boundary starts at the
       // matching point.
       if(vertices.size()<2)return initial;
       const int low=s?std::min(initial.low,checked(static_cast<long>(extended.low)+forcing_low)):initial.low;
-      LaurentRows wide{low,high,std::vector(rows,std::vector(d+s,std::vector<B>(high-low+1,B(0))))};
-      for(std::size_t a=0;a<rows;++a) {
-        for(std::size_t j=0;j<d;++j)for(int k=initial.low;k<=high;++k)
-          wide.coefficients[a][j][k-low]=initial.coefficients[a][j][k-initial.low];
-        for(std::size_t c=0;c<s;++c)for(int k=low;k<=high;++k) {
-          const long order=static_cast<long>(k)-forcing_low;
-          if(order>=extended.low && order<=extended.high)
-            wide.coefficients[a][d+c][k-low]=extended.coefficients[a][sources[c]][order-extended.low];
+      // The state of the transport: the row on the masters, then its weights
+      // on the forcing sources.
+      const auto widened=[&](const LaurentRows& on_masters,const LaurentRows& on_requested) {
+        LaurentRows wide{low,high,std::vector(on_masters.coefficients.size(),std::vector(d+s,std::vector<B>(high-low+1,B(0))))};
+        for(std::size_t a=0;a<wide.coefficients.size();++a) {
+          for(std::size_t j=0;j<d;++j)for(int k=on_masters.low;k<=high;++k)
+            wide.coefficients[a][j][k-low]=on_masters.coefficients[a][j][k-on_masters.low];
+          for(std::size_t c=0;c<s;++c)for(int k=low;k<=high;++k) {
+            const long order=static_cast<long>(k)-forcing_low;
+            if(order>=on_requested.low && order<=on_requested.high)
+              wide.coefficients[a][d+c][k-low]=on_requested.coefficients[a][sources[c]][order-on_requested.low];
+          }
         }
-      }
+        return wide;
+      };
+      auto wide=widened(initial,extended);
+      arm_error=widened(arm_error,extended_error);
       Matrix connection(d+s,std::vector<Exact>(d+s,sample.constant(0)));
       for(std::size_t j=0;j<d;++j)for(std::size_t k=0;k<d;++k)connection[j][k]=stage.connection[j][k];
       const auto scale=sample.variable(ei_).pow(static_cast<unsigned long>(-forcing_low));
@@ -1868,7 +2056,12 @@ class Evaluator {
       const auto* stats=settings.conditioning_stats;
       const AdjointConditioningStats before=stats?*stats:AdjointConditioningStats{};
       const auto began=std::chrono::steady_clock::now();
-      auto result=ordinary_transport(connection,std::move(wide),no_forcing,vertices,settings);
+      auto carried=settings;
+      if(carried.uncertainty==AdjointOptions::Uncertainty::probe)carried.error=&arm_error;
+      auto result=ordinary_transport(connection,std::move(wide),no_forcing,vertices,carried);
+      // Without probes nothing estimates the error added on this arm.
+      if(!carried.error)arm_error=windowed(arm_error,result.low,result.high);
+      for(auto& row:arm_error.coefficients)row.resize(d);
       std::ostringstream text;
       text<<side<<" adjoint transport done: "<<rows<<" rows x "<<d<<" masters, weighted ("<<requested<<" requested integrals, "
           <<s<<" forcing sources), epsilon "<<low<<".."<<high<<", "<<vertices.size()-1<<" path legs";
@@ -1877,19 +2070,21 @@ class Evaluator {
       text<<", "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count()<<" s";
       if(stats)text<<" (compile "<<stats->compilation_seconds-before.compilation_seconds<<", prepare "
           <<stats->preparation_seconds-before.preparation_seconds<<", recurrence "<<stats->recurrence_seconds-before.recurrence_seconds
-          <<"; "<<stats->circuit_terms-before.circuit_terms<<" products)";
+          <<"; "<<stats->circuit_terms-before.circuit_terms<<" products, probes "<<stats->probe_terms-before.probe_terms<<")";
       report(depth,text.str(),high);
       // The source components did their work.
       for(auto& row:result.coefficients)row.resize(d);
       return result;
     };
     report(depth,"lower adjoint transport",high);
-    const auto left=arm("lower",stage.lower_endpoint,stage.lower_forcing,stage.lower_path);
+    LaurentRows left_error,right_error;
+    const auto left=arm("lower",stage.lower_endpoint,stage.lower_forcing,stage.lower_path,left_error);
     observe_operator(depth,"lower transported weighted rows",left);
     report(depth,"upper adjoint transport",high);
-    const auto right=arm("upper",stage.upper_endpoint,stage.upper_forcing,stage.upper_path);
+    const auto right=arm("upper",stage.upper_endpoint,stage.upper_forcing,stage.upper_path,right_error);
     observe_operator(depth,"upper transported weighted rows",right);
     const auto transported=add_laurent_rows(left,right);
+    auto carried=add_error_rows(std::move(left_error),std::move(right_error));
     // `valid`: the order through which the result follows from the declared
     // windows alone, were the weights unknown above `known`.
     long valid=known+reach;
@@ -1898,13 +2093,16 @@ class Evaluator {
       const auto inverse=exact_laurent_rows(prepared.inverse_diagonal,anchor,
         std::max(0,checked(static_cast<long>(local_high)-transported.low)));
       combined=linear_boundary::compose(transported,inverse,local_high);
+      carried=linear_boundary::compose(carried,inverse,local_high);
       valid+=inverse.low;
     } else {
       combined=shift_laurent_columns(transported,prepared.gauge.shifts,true);
+      carried=shift_laurent_columns(carried,prepared.gauge.shifts,true);
       valid+=static_cast<long>(combined.high)-transported.high;
     }
     if(direct_rows) {
       combined=add_laurent_rows(combined,linear_boundary::compose(extended,*direct_rows,combined.high));
+      carried=add_error_rows(std::move(carried),linear_boundary::compose(extended_error,*direct_rows,carried.high));
       valid=std::min(valid,known+direct_rows->low);
     }
     if(at_endpoint) {
@@ -1913,6 +2111,7 @@ class Evaluator {
       const auto map=exact_laurent_rows(*prepared.boundary_map,anchor,
         std::max(0,checked(static_cast<long>(target)-combined.low)));
       combined=linear_boundary::compose(combined,map,target);
+      carried=linear_boundary::compose(carried,map,target);
       valid+=map.low;
     } else if(options_.component_epsilon_demands) {
       // Column j of the local operator vanishes identically below -needs[j]
@@ -1927,14 +2126,58 @@ class Evaluator {
           if(value.contains_zero()){value=B(0);++statistics_.structural_zero_coefficients;}
           else ++statistics_.structural_zero_conflicts;
         }
+      // An identically vanishing column has no error either.
+      for(std::size_t j=0;j<needs.size();++j)if(needs[j])
+        for(int k=carried.low;k<=carried.high && k<static_cast<long>(weights_low)-*needs[j];++k)
+          for(auto& row:carried.coefficients)row[j][k-carried.low]=B(0);
       valid=std::max(valid,known-epsilon_demand::maximum(needs,-1000));
     }
     if(!exact && valid<target)throw WeightedDemand{depth,checked(static_cast<long>(target)-valid)};
     if(combined.high<target)throw std::logic_error("weighted accumulation: the local window is below its target");
     linear_boundary::tighten(combined);
+    error=windowed(carried,combined.low,combined.high);
+    observe_operator(depth,"estimated error of the weights",error);
     labels.insert(labels.end(),prepared.constraint_labels.begin(),prepared.constraint_labels.end());
     observe_operator(depth,"weights on the child's integrals",combined);
     return combined;
+  }
+  // The error of the requested integrals after an evaluation by rows. Every
+  // level transported its rows with probes, but a probe is a fixed
+  // combination of a level's rows, and the combination of them that a
+  // requested integral is made of, in which their errors cancel as their
+  // values do, is known only once the levels above are: the estimates kept
+  // per level (compose_child_expression) are too large by that cancellation.
+  // One more row tells: a fixed combination of all requested integrals,
+  // accumulated from the top with its error rows (evaluate_weighted). Its
+  // estimated error, taken for each requested integral, replaces the
+  // estimates by level. Where the chain is not covered those remain.
+  void estimate_rows_error(unsigned desired_top) {
+    auto& saved=*cache_[0];
+    if(options_.rows_error_estimate && options_.adjoint.uncertainty==AdjointOptions::Uncertainty::probe && options_.adjoint.tail_probe) {
+      // Weights of alternating sign and of different sizes between 1 and 2:
+      // no two requested integrals enter with equal or opposite weight.
+      const auto targets=graph_.nodes.front().requested.size();
+      std::vector<B> mixture;
+      for(std::size_t i=0;i<targets;++i) {
+        B weight;arb_set_ui(acb_realref(weight.raw()),targets+i);arb_div_ui(acb_realref(weight.raw()),acb_realref(weight.raw()),targets,B::precision());
+        if(i&1)acb_neg(weight.raw(),weight.raw());
+        mixture.push_back(std::move(weight));
+      }
+      const auto counted=statistics_;
+      try {
+        if(const auto combined=evaluate_weighted(desired_top,&mixture)) {
+          for(auto& row:saved.error)for(std::size_t k=0;k<row.size();++k) {
+            const long index=static_cast<long>(saved.low)+static_cast<long>(k)-combined->low;
+            row[k]=index>=0 && index<static_cast<long>(combined->error[0].size())?combined->error[0][index]:0.0;
+          }
+        }
+      } catch(const std::exception& failure) {
+        report(0,std::string("error estimate by weighted accumulation failed (")+failure.what()+"): estimates by level are kept",static_cast<int>(desired_top));
+      }
+      // The estimate is not an evaluation: only what it cost is counted.
+      const auto spent=statistics_;statistics_=counted;
+      statistics_.ordinary_seconds=spent.ordinary_seconds;statistics_.endpoint_operator_seconds=spent.endpoint_operator_seconds;
+    }
   }
   // The requested integrals of the top level through desired_top, or nothing
   // if the request is not covered: the caller then evaluates by rows.
@@ -1945,18 +2188,27 @@ class Evaluator {
   // endpoint constraints are covered. Only the top level's expression and
   // value are published; a later request for an inner level is evaluated by
   // rows.
-  std::optional<LaurentBoundary> evaluate_weighted(unsigned desired_top) {
+  //
+  // With `mixture` (one weight per requested integral) a single row is
+  // accumulated instead: that combination of all requested integrals, whose
+  // value and estimated error are returned and nothing is published. The
+  // evaluation by rows estimates its error with it (estimate_rows_error).
+  std::optional<LaurentBoundary> evaluate_weighted(unsigned desired_top,const std::vector<B>* mixture=nullptr) {
     const auto& top=graph_.nodes.front();
     if(top.scalar_leaf || top.closure.ordered_basis.empty())return std::nullopt;
     const auto decline=[&](const std::string& reason) -> std::optional<LaurentBoundary> {
+      if(mixture)return std::nullopt;
       ++statistics_.weighted_fallbacks;
       report(0,"weighted accumulation not applicable ("+reason+"): one row per requested integral",static_cast<int>(desired_top));
       return std::nullopt;
     };
     if(options_.linear_method!=LinearMethod::adjoint)return decline("the linear method is not adjoint");
     const auto targets=top.requested.size();
-    if(!targets || targets>options_.weighted_max_targets)
+    if(!targets || (!mixture && targets>options_.weighted_max_targets))
       return decline(std::to_string(targets)+" top-level targets, at most "+std::to_string(options_.weighted_max_targets)+" are weighted");
+    if(mixture && mixture->size()!=targets)throw std::logic_error("weighted accumulation: one mixture weight per requested integral");
+    if(!mixture)weighted_rows_=true;
+    const auto outputs=mixture?std::size_t(1):targets;
     std::size_t terminal=0;
     for(;;++terminal) {
       const auto& node=graph_.nodes[terminal];
@@ -1980,7 +2232,7 @@ class Evaluator {
       first+=loss[depth];
       if(first>static_cast<long>(options_.max_epsilon))throw std::runtime_error("recursive adjoint child epsilon demand exceeds finite budget");
     }
-    report(0,"weighted accumulation: "+std::to_string(targets)+(targets==1?" row":" rows")+" per level through "+
+    report(0,(mixture?"error estimate by weighted accumulation: ":"weighted accumulation: ")+std::to_string(outputs)+(outputs==1?" row":" rows")+" per level through "+
       std::to_string(terminal)+" levels",static_cast<int>(desired_top));
     report(terminal,"child boundary",static_cast<int>(first));
     (void)evaluate_child(terminal,static_cast<unsigned>(std::max(0L,first)));
@@ -1996,12 +2248,14 @@ class Evaluator {
       for(std::size_t depth=terminal;depth-->0;)
         target[depth]=checked(static_cast<long>(target[depth+1])+loss[depth]+extra[depth]);
       const int unit_high=std::max(0,target[0]);
-      LaurentRows weights{0,unit_high,std::vector(targets,std::vector(targets,std::vector<B>(unit_high+1,B(0))))};
-      for(std::size_t i=0;i<targets;++i)weights.coefficients[i][i][0]=B(1);
+      LaurentRows weights{0,unit_high,std::vector(outputs,std::vector(targets,std::vector<B>(unit_high+1,B(0))))};
+      for(std::size_t i=0;i<targets;++i)weights.coefficients[mixture?0:i][i][0]=mixture?(*mixture)[i]:B(1);
       std::vector<std::string> labels;
+      // The unit weights are exact.
+      LaurentRows error{0,unit_high,std::vector(1,std::vector(targets,std::vector<B>(unit_high+1,B(0))))};
       try {
         for(std::size_t depth=0;depth<terminal;++depth)
-          weights=weighted_level(depth,weights,depth==0,target[depth+1],labels,desired_top);
+          weights=weighted_level(depth,weights,depth==0,target[depth+1],labels,desired_top,error);
       } catch(const WeightedDemand& request) {
         extra[request.depth]+=request.deficit;++statistics_.refinements;
         report(request.depth,"weighted window refinement",request.deficit);
@@ -2027,29 +2281,23 @@ class Evaluator {
           linear_boundary::tighten(expression.transform);
           auto result=linear_boundary::materialize(expression,static_cast<int>(desired_top));
           result.taylor_tail_certified=false;
+          // The estimated error of the weights, contracted with the terminal
+          // values like the weights themselves: what the Taylor tails of all
+          // levels, and the rounding their probes collected, amount to in the
+          // requested integrals, order by order and the same for every target.
           {
-            const auto size=[](const B& value){mag_t m;mag_init(m);acb_get_mag(m,value.raw());const double out=mag_is_zero(m)?-std::numeric_limits<double>::infinity():mag_get_d_log2_approx(m);mag_clear(m);return out;};
-            const auto& source=*expression.leaf_source;const auto& map=expression.transform;
-            for(const auto& row:map.coefficients) {
-              double largest=-std::numeric_limits<double>::infinity();
-              for(std::size_t column=0;column<row.size();++column)for(std::size_t a=0;a<row[column].size();++a) {
-                const double weight=size(row[column][a]);
-                if(!std::isfinite(weight))continue;
-                for(std::size_t b=0;b<source.values[column].size();++b) {
-                  if(static_cast<long>(map.low)+static_cast<long>(a)+source.low+static_cast<long>(b)>static_cast<long>(desired_top))break;
-                  largest=std::max(largest,weight+size(source.values[column][b]));
-                }
-              }
-              result.term_log2.push_back(largest);
-            }
+            const auto size=contracted_size(windowed(error,weights.low,weights.high),child.transform,*child.leaf_source,
+              result.low,static_cast<int>(desired_top));
+            result.error.assign(result.values.size(),size);
           }
-          if(result.values.size()!=targets+labels.size() || expression.transform.coefficients.size()!=result.values.size())
+          if(result.values.size()!=outputs+labels.size() || expression.transform.coefficients.size()!=result.values.size())
             throw std::logic_error("weighted constrained expression shape mismatch");
+          if(mixture){result.values.resize(1);result.error.resize(1);return result;}
           // A constraint row is the constraint functional of its level applied
           // to that level's solution, contracted with the terminal values like
           // a target; it must vanish. Checked through desired_top.
           for(std::size_t i=0;i<labels.size();++i)check_endpoint_constraint(result,static_cast<unsigned>(targets+i),labels[i]);
-          expression.transform.coefficients.resize(targets);result.values.resize(targets);result.term_log2.resize(targets);
+          expression.transform.coefficients.resize(targets);result.values.resize(targets);result.error.resize(targets);
           observe_operator(0,"composed shared-source map",expression.transform);
           expressions_[0]=std::move(expression);cache_[0]=std::move(result);
           return *cache_[0];

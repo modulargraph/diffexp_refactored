@@ -124,7 +124,11 @@ Two options install the result. `diffexp ft` uses `remove` by default and
 and buys nothing measurable:
 
 - `--moving-poles remove` (`ft`): an internal basis per level, the smallest
-  connection among cached-integral exchanges and closure rows. The level's
+  connection among cached-integral exchanges and closure rows. A factor
+  whose removal leaves the connection more than four times larger is kept
+  (`Options::max_growth`): a closure row in the residue field of a factor
+  of high degree in x can multiply the size by dozens, and the endpoint
+  series and the transport cost in proportion to it. The level's
   requests to its child do not change, and the automatic basis scan of the
   level starts from this basis (`scan_physical_bases`).
 - `--moving-poles exchange` (`prepare`, `ft`): the level's masters

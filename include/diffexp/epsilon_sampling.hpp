@@ -146,6 +146,8 @@ struct Sample {
   Rational epsilon;
   std::vector<B> values; // by component
   double seconds = 0;
+  // The working precision the sample ended with, if it had to raise it.
+  long raised_bits = 0;
 };
 // Runs `command` + {"--epsilon-shift", Q} for every node, at most `jobs` at a
 // time, each with its standard output in `directory`. A sample that fails
@@ -157,6 +159,9 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
   std::vector<Sample> samples(points.size());
   std::map<pid_t, std::size_t> running;
   std::size_t next = 0, done = 0;
+  // A sample that had to raise its working precision computed its numbers
+  // twice. The samples started after it begin at the precision it reached.
+  long precision_floor = 0;
   const auto output = [&](std::size_t i, const char *suffix) {
     return directory / ("sample-" + std::to_string(getpid()) + "-" + std::to_string(i) + suffix);
   };
@@ -172,6 +177,10 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
     std::vector<std::string> arguments = command;
     arguments.push_back("--epsilon-shift");
     arguments.push_back(points[i].str());
+    if (precision_floor) {
+      arguments.push_back("--precision-floor");
+      arguments.push_back(std::to_string(precision_floor));
+    }
     std::vector<char *> argv;
     for (auto &argument : arguments) argv.push_back(argument.data());
     argv.push_back(nullptr);
@@ -232,6 +241,11 @@ inline std::vector<Sample> run(const std::vector<std::string> &command, const st
         const auto &entry = row.as_array().at(static_cast<std::size_t>(-low)).as_object();
         sample.values.push_back(B::from_strings(std::string(entry.at("real").as_string()), std::string(entry.at("imaginary").as_string())));
       }
+      if (const auto *precision = report.if_contains("precision"); precision && precision->is_object())
+        if (const auto *raises = precision->as_object().if_contains("raises"); raises && raises->is_array() && !raises->as_array().empty()) {
+          sample.raised_bits = raises->as_array().back().as_object().at("to").to_number<long>();
+          precision_floor = std::max(precision_floor, sample.raised_bits);
+        }
       samples[i] = std::move(sample);
       std::filesystem::remove(output(i, ".json"));
       std::filesystem::remove(output(i, ".log"));

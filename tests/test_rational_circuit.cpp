@@ -30,6 +30,23 @@ template<class Exception,class Function> void rejects(Function f,const char *mes
 }
 int main() {
   try {
+    // The denominator shifted to a chart centre is exact whenever the
+    // working precision holds it: a centre of few bits deep below the binary
+    // point (59/2^14) and a polynomial of degree twelve, whose shifted
+    // coefficients reach 168 places down.
+    for(slong bits:{384,640,1024}) {
+      B::set_precision(bits);
+      ExactField line({"x","eps","I"});
+      const std::vector<RationalLineEntry> pole{{0,0,0,Exact(line,"1/(1+x^12)")}};
+      const auto plan=rc::compile(pole,1,0,1,0,16);
+      const auto at=rc::prepare(plan,B::from_strings("59/16384"),16,1);
+      bool longest=false;
+      for(const auto& polynomial:at.data().polynomials)for(const auto& coefficient:polynomial) {
+        check(acb_is_exact(coefficient.raw()),"a polynomial shifted to a dyadic centre was rounded below the working precision");
+        longest=longest || acb_bits(coefficient.raw())>160;
+      }
+      check(longest,"the shifted denominator should need more bits than its centre has");
+    }
     B::set_precision(320);
     ExactField field({"x","eps","I","unused"});
     auto e=[&](const char *s) {return Exact(field,s);};

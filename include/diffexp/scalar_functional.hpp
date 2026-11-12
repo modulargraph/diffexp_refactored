@@ -14,6 +14,13 @@ struct CertifiedDeepestBetaOptions {
   std::string initial_radius="1/4";
   int f_rim=1;
   std::string scalar_split_anchor="1/2";
+  // The dimension is d0-2(epsilon_shift+eps), and the result the series in
+  // eps about it. The closed form at a chart centre is expanded there
+  // (tadpole_branch), every analytic factor exp(eps*L) gains the fixed factor
+  // exp(epsilon_shift*L), and the endpoint monomial x^(q+slope*(shift+eps))
+  // is integrated with the denominators n+q+1+slope*shift, which a shift
+  // that makes one of them vanish does not allow.
+  Rational epsilon_shift=Rational(0);
 };
 namespace scalar_functional_detail {
 struct Weight {
@@ -132,6 +139,8 @@ inline B ball_log(const B& value) {
 struct Integrand {
   Fraction u,f;std::vector<Fraction> weights;
   long c,a,q,slope;unsigned loops;
+  // exp(shift*L) multiplies the analytic factor (CertifiedDeepestBetaOptions).
+  Rational shift=Rational(0);
 };
 // Whole-disk proof of one chart. bounds[k] majorizes on |z|<=R the
 // coefficient of eps^k (counted from the lowest source order) of the analytic
@@ -151,7 +160,12 @@ inline Chart prove(const Integrand& g,const std::vector<B>& gamma,const B& centr
     prefactor=prefactor*ball_power(ratio,g.q);
     if(g.slope)logarithm=logarithm+B(g.slope)*ball_log(ratio);
   }
-  const auto p=M::upper_abs(prefactor),l=M::upper_abs(logarithm);
+  auto p=M::upper_abs(prefactor);const auto l=M::upper_abs(logarithm);
+  if(!g.shift.is_zero()) {
+    // |exp(shift*L)| <= exp(|shift| |L|) on the disk.
+    B bound(0);(M::upper_abs(B::from_strings(g.shift.str()))*l).add_error_to(bound);
+    acb_exp(bound.raw(),bound.raw(),bits);p=p*M::upper_abs(bound);
+  }
   // source[k]=sum_{j+m=k} |gamma_j| p l^m/m!
   std::vector<M> source(depth+1);M power=M::one();
   for(unsigned m=0;m<=depth;++m) {
@@ -180,6 +194,7 @@ inline std::vector<Jet> expand(const Integrand& g,const Chart& chart,const std::
     prefactor=prefactor*ratio.pow(g.q);
     if(g.slope)logarithm=logarithm+constant(B(g.slope))*ratio.log();
   }
+  if(!g.shift.is_zero())prefactor=prefactor*(logarithm*constant(B::from_strings(g.shift.str()))).exp();
   // source[k]=sum_{j+m=k} gamma_j prefactor logarithm^m/m!
   std::vector<Jet> source(depth+1,zero);auto power=prefactor;
   for(unsigned m=0;m<=depth;++m) {
@@ -316,7 +331,7 @@ inline void detour(const Integrand& g,const Symanzik& geometry,std::size_t varia
           acb_pow_si(u_centre.raw(),centre.raw(),u_power,bits);acb_pow_si(f_centre.raw(),centre.raw(),f_power,bits);
           u_centre=u_centre*u.centre_value;f_centre=f_centre*f.centre_value;
           if(u_centre.contains_zero() || f_centre.contains_zero())throw std::domain_error("scalar functional chart centre meets a zero");
-          seed=tadpole_branch(u_centre,f_centre,log_u,log_f,static_cast<unsigned>(v),loops,d0,gamma_order);
+          seed=tadpole_branch(u_centre,f_centre,log_u,log_f,static_cast<unsigned>(v),loops,d0,gamma_order,g.shift);
           auto candidate=prove(g,seed.coefficients,centre,monomial,M::upper_abs(disk_radius),depth,bits);
           acb_pow_si(scale.raw(),centre.raw(),weight_power,bits);
           const auto ratio=M::upper_abs(step)/M::lower_abs(disk_radius);
@@ -382,15 +397,22 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   const long slope=(static_cast<long>(loops)+1)*uf.power-static_cast<long>(loops)*ff.power;
   if(q<=-1 && -q-1>static_cast<long>(taylor_order))
     throw std::invalid_argument("Taylor order does not reach the resonant primitive coefficient");
-  const unsigned primitive_poles=q<=-1 && slope!=0?1:0;
+  // About a shifted dimension the endpoint denominators are
+  // n+q+1+slope*shift: no pole in eps, unless one of them vanishes.
+  const Rational shift=options.epsilon_shift;
+  const Rational endpoint_shift=Rational(slope)*shift;
+  const bool shifted=!endpoint_shift.is_zero();
+  if(shifted && endpoint_shift.str().find('/')==std::string::npos)
+    throw std::domain_error("scalar functional: the epsilon shift makes an endpoint power resonant");
+  const unsigned primitive_poles=!shifted && q<=-1 && slope!=0?1:0;
   const unsigned gamma_top=static_cast<unsigned>(std::max<long>(0,static_cast<long>(epsilon_top)-weights.epsilon_power+primitive_poles));
-  auto gamma=tadpole(uf.value,ff.value,v,loops,d0,gamma_top,options.f_rim);
+  auto gamma=tadpole(uf.value,ff.value,v,loops,d0,gamma_top,options.f_rim,shift);
   const int source_low=gamma.epsilon_low+weights.epsilon_power;
   const int low=std::min(0,source_low-static_cast<int>(primitive_poles)),top=static_cast<int>(epsilon_top);
   const unsigned maximum=static_cast<unsigned>(std::max(0,top+static_cast<int>(primitive_poles)-source_low));
   const auto weight_coefficients=scalar_functional_detail::epsilon_series(weights.regular,weights.epsilon_variable,maximum);
   const auto bits=B::precision();
-  Integrand g{compile_fraction(uf.regular,variable),compile_fraction(ff.regular,variable),{},c,a,q,slope,loops};
+  Integrand g{compile_fraction(uf.regular,variable),compile_fraction(ff.regular,variable),{},c,a,q,slope,loops,shift};
   for(const auto& coefficient:weight_coefficients)g.weights.push_back(compile_fraction(coefficient,variable));
   Rational radius=requested_radius;std::optional<Chart> origin;
   for(unsigned attempt=0;attempt<options.max_disk_attempts && !origin;++attempt) {
@@ -404,14 +426,23 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   const Rational overlap=quarter<Rational("1/8")?quarter:Rational("1/8");
   const auto h=B::from_strings(overlap.str());
   const long first_denominator=static_cast<long>(taylor_order)+q+2;
-  if(first_denominator<=0)throw std::domain_error("certified scalar functional omitted tail is not integrable");
+  const Rational first_shifted=Rational(first_denominator)+endpoint_shift;
+  if(!(Rational(0)<first_shifted))throw std::domain_error("certified scalar functional omitted tail is not integrable");
   std::vector<B> primitive(top-low+1,B(0));B h_power(1);
   for(unsigned n=0;n<=taylor_order;++n) {
     const long denominator=static_cast<long>(n)+q+1;
     for(unsigned k=0;k<analytic.size();++k) {
       auto coefficient=analytic[k].at(n)*h_power;const int exponent=source_low+static_cast<int>(k);
       if(coefficient.is_zero())continue;
-      if(!denominator) {
+      if(shifted) {
+        // h^(D+slope*eps)/(D+slope*eps) with D=n+q+1+slope*shift nonzero.
+        const auto shifted_denominator=B::from_strings((Rational(denominator)+endpoint_shift).str());
+        auto term=coefficient/shifted_denominator;
+        for(int target=exponent;target<=top;++target) {
+          if(target>=low)primitive[target-low]+=term;
+          term=term*B(-slope)/shifted_denominator;
+        }
+      } else if(!denominator) {
         if(!slope)throw std::domain_error("scalar functional endpoint has a logarithmic divergence not regulated by epsilon");
         if(exponent-1>=low && exponent-1<=top)primitive[exponent-1-low]+=coefficient/B(slope);
       } else {
@@ -428,6 +459,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
     h_power=h_power*h;
   }
   B log_h,scale;acb_log(log_h.raw(),h.raw(),bits);acb_pow_si(scale.raw(),h.raw(),q+1,bits);
+  if(shifted){auto exponent=B::from_strings(endpoint_shift.str())*log_h;acb_exp(exponent.raw(),exponent.raw(),bits);scale=scale*exponent;}
   Jet exponential(0,top-low+1,bits);if(exponential.length()>1)exponential.set(1,B(slope)*log_h);
   exponential=exponential.exp();std::vector<B> matched(top-low+1,B(0));
   for(unsigned k=0;k<matched.size();++k)for(unsigned j=0;j<=k;++j)matched[k]+=scale*primitive[k-j]*exponential.at(j);
@@ -440,7 +472,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
   const auto gap=M::positive_difference_lower(M::one(),ratio);
   if(gap.is_zero())throw std::domain_error("certified scalar functional overlap outside endpoint disk");
   const auto common=M::upper_abs(scale)*ratio.power_upper(taylor_order+1)/gap;
-  const auto d_lower=M::lower_abs(B::from_strings(std::to_string(first_denominator)));
+  const auto d_lower=M::lower_abs(B::from_strings(first_shifted.str()));
   const auto h_log=M::upper_abs(log_h);
   const auto slope_abs=M::upper_abs(B(slope));
   const unsigned tail_depth=static_cast<unsigned>(std::max(0,top-source_low));
@@ -501,7 +533,7 @@ inline LaurentValue integrate_one_sided(const Symanzik& geometry,unsigned loops,
         if(f_middle.is_zero() || u_middle<=Rational(0))
           throw std::domain_error("certified scalar functional real path meets a zero of U or F");
         try {
-          seed=tadpole(u_middle,f_middle,v,loops,d0,gamma_order,options.f_rim);
+          seed=tadpole(u_middle,f_middle,v,loops,d0,gamma_order,options.f_rim,shift);
           const auto centre=B::from_strings(middle.str()),disk_radius=B::from_strings((half*Rational(64)/Rational(sixtyfourths)).str());
           step=B::from_strings(half.str());
           auto candidate=prove(g,seed.coefficients,centre,monomial,M::upper_abs(disk_radius),depth,bits);

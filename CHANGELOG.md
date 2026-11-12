@@ -2,6 +2,25 @@
 
 ## 2.2.1
 
+- Numerical phase, counted work. A moving pole is kept when its removal
+  would leave the level's connection more than four times larger
+  (`moving_poles::Options::max_growth`), and the outcome of the moving-pole
+  search is recorded beside the exact cache (`moving-poles/`) and applied
+  again instead of being searched for by every run and every sample. The
+  gauge of an endpoint to Fuchsian form applies a shear entry by entry
+  instead of through an exact inverse and three dense products. A transport
+  leg reads its poles from the compiled circuit instead of isolating the
+  roots of every denominator again. An endpoint series converts its
+  coefficients for projection once. `timings` lists
+  `endpoint_gauge_seconds`, `endpoint_frame_seconds` and
+  `endpoint_observable_seconds`; the phases now add up to
+  `numerical_seconds`. Results of the default runs are unchanged.
+- Working precision. Without `--precision-bits` (or `working_bits` in the
+  family file) a run starts at 384 bits and computes its numbers again with
+  more when rounding leaves a coefficient fewer digits than `--leaf-digits`
+  asks for (`precision` in the JSON report; at most 4096 bits). The samples
+  of a fit start at the precision an earlier sample needed
+  (`--precision-floor`).
 - Built-in IBP solver, preparation. Seeds start small and grow on demand:
   the default numerator degree is 1 (was 2; `--ibp-numerators`,
   `preparation.ibp_numerators`), and a requested integral no longer raises
@@ -21,6 +40,57 @@
   the double pentagon are unchanged (same content identifiers). Caches
   written by earlier versions are not reused for the solver's samples and
   closure plans; verified level closures are.
+- Fixed: a chart centre of few bits deep below the binary point (the first
+  charts next to an endpoint) had the coefficient polynomials of degree
+  above ten rounded while they were shifted to it, at a precision that did
+  not follow the working precision. Their relative radius of about 2^-300
+  was harmless at 384 bits and exhausted the conditioning halvings from
+  about 640 bits on ("adjoint arithmetic-conditioning step budget
+  exhausted", four-loop banana with `--precision-bits 640
+  --transport-bits 180`). The shift is exact again.
+
+- The scalar leaf of a recursion around a shifted epsilon is expanded at
+  the shifted dimension itself (`CertifiedDeepestBetaOptions::epsilon_shift`,
+  `feynman::tadpole_branch` with a shift), through the requested order,
+  instead of summing some twenty orders of its series at epsilon=0 and
+  re-expanding them. The leaf of an epsilon sample costs 15 to 50 times
+  less (double box 1.07 s -> 0.04 s, four-loop banana 1.8 s -> 0.05 s),
+  half of the numerical time of a sample of a small family. A shift on a
+  pole of the gamma function or resonant with an endpoint power falls back
+  to the series (`NumericalOptions::direct_shifted_leaf`).
+
+- Endpoint operators of a recursion at a numeric dimension: the leading
+  coefficients of a functional composed with the ball inverse that vanish
+  exactly are exact zeros again. They are proved like the zeros of the
+  inverse, by evaluating the product modulo two primes at the exact point
+  (`affine_operator::impose_exact_zeros`, `Options::operator_exact_zeros`);
+  no size is compared with anything. Rows built on such an operator no
+  longer carry columns that are not theirs: the double pentagon sample by
+  rows has 1201 such entries and 40% fewer products, Higgs+jet family F 62.
+  The report has `basis_selection.operator_exact_zeros`.
+- Adjoint transport finds the singular points of a connection once and maps
+  them to every leg of the path, instead of once per leg from the pulled-back
+  coefficients.
+
+- Reported radii contain an estimate of the Taylor tails the transport
+  admits. What a chart cuts off is estimated from its last two retained
+  terms (a geometric tail, with its sign) and added to the probe rows, which
+  the flow carries to the end of the path. The probes are returned as rows
+  (`AdjointOptions::error`) and every further linear map is applied to them
+  as to the result (`LaurentBoundary::error`, eight times of which
+  `diffexp ft` adds to the printed radii): carried as a radius the estimate
+  would not cancel where the result does, and a recursion of several levels
+  would report it larger by the product of their condition numbers.
+  Weighted accumulation carries the error rows from level to level. An
+  evaluation by rows estimates its error by accumulating one weighted
+  combination of all requested integrals more
+  (`NumericalOptions::rows_error_estimate`, selected by `diffexp ft`).
+  The probes are a batch of their own, at half the Taylor order and a third
+  of the working precision; the progress line of a transport counts their
+  products apart. The factored method is unchanged and has no estimate.
+  The fixed widening of `diffexp ft` is one tail relative to the largest
+  coefficient of an integral (it was 2^6 tails).
+
 - Transport: the endpoint overlap is chosen per endpoint (a singular point
   next to one end no longer costs charts at the other); in probe mode a
   chart's radii are its own rounding (defect radii of the midpoint

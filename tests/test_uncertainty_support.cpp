@@ -68,5 +68,39 @@ int main(){try {
     B middle;acb_get_mid(middle.raw(),flow[j].raw());
     require(NativeTailMagnitude::upper_abs(value-middle).approximate_upper()<1e-20,"carried uncertainty was inflated");
   }
+  // The probes also estimate the Taylor tail the charts admit. The same
+  // flow from an exact start, with a tail of 2^-40 per chart: the result is
+  // off by what was cut, the probe row that is returned says by how much,
+  // and without it the radii say so.
+  {
+    AdjointOptions probing;probing.uncertainty=AdjointOptions::Uncertainty::probe;
+    probing.taylor_order=16;probing.truncation_bits=40;
+    const LaurentRows start{0,0,{{{B(1)},{B(2)}}}};
+    const auto shift=B(1000)*logarithm*(B(1)-B(2));
+    const std::vector<B> closed{B(1)+shift,B(2)+shift};
+    LaurentRows estimate;probing.error=&estimate;
+    const auto cut=transport_adjoint_rows(cancellation,start,no_forcing,{z,e("1/2")},probing);
+    require(estimate.coefficients.size()==1 && estimate.columns()==2 && estimate.low==cut.low && estimate.high==cut.high,
+      "the probe of a single transported row was not returned in the window of the result");
+    double actual=0,estimated=0;
+    for(unsigned j=0;j<2;++j) {
+      B middle;acb_get_mid(middle.raw(),cut.coefficients[0][j][0].raw());
+      actual=std::max(actual,NativeTailMagnitude::upper_abs(middle-closed[j]).approximate_upper());
+      estimated=std::max(estimated,NativeTailMagnitude::upper_abs(estimate.coefficients[0][j][0]).approximate_upper());
+      require(NativeTailMagnitude::upper_abs(cut.coefficients[0][j][0]-middle).approximate_upper()<actual/1e6+1e-60,
+        "returned probes must leave the radii of the result alone");
+    }
+    require(actual>1e-16 && actual<1e-6,"a tail of 2^-40 per chart did not show in the result");
+    require(actual<8*estimated && estimated<64*actual,"the probe does not estimate the truncation error");
+    probing.error=nullptr;
+    const auto widened=transport_adjoint_rows(cancellation,start,no_forcing,{z,e("1/2")},probing);
+    for(unsigned j=0;j<2;++j)require(acb_contains(widened.coefficients[0][j][0].raw(),closed[j].raw()),
+      "radii from the probes must cover the truncation error");
+    probing.tail_probe=false;
+    const auto bare=transport_adjoint_rows(cancellation,start,no_forcing,{z,e("1/2")},probing);
+    bool covered=true;
+    for(unsigned j=0;j<2;++j)covered=covered && acb_contains(bare.coefficients[0][j][0].raw(),closed[j].raw());
+    require(!covered,"without tail terms the radii are those of the retained polynomial");
+  }
   std::cout<<"uncertainty support tests passed\n";return 0;
 }catch(const std::exception& ex){std::cerr<<ex.what()<<'\n';return 1;}}

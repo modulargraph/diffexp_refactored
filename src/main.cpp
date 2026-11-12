@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
       // The command line accumulates top-down wherever that is covered; the
       // library default is one row per requested integral.
       numerical.accumulation=diffexp::recursion::Accumulation::weighted;
+      numerical.rows_error_estimate=true;
       const auto preparation_start=std::chrono::steady_clock::now();
       diffexp::AdjointConditioningStats conditioning;
       numerical.adjoint.conditioning_stats=&conditioning;
@@ -82,6 +83,11 @@ int main(int argc, char** argv) {
       auto epsilon_strategy=configuration.epsilon_strategy,sample_step=configuration.sample_step;
       unsigned ibp_max_degree=0;std::string merge_selection="auto",boundary="auto";
       unsigned samples=configuration.samples,sample_jobs=0;int sample_poles=-1;bool leaf_digits_given=false;
+      // A working precision stated on the command line or in the family file
+      // is kept; otherwise it is raised when the result shows that it limits
+      // the digits (see below). --precision-floor starts higher without
+      // fixing it: the samples of a fit pass on what the first ones needed.
+      bool precision_given=numerical.working_bits!=diffexp::recursion::NumericalOptions{}.working_bits;long precision_floor=0;
       // What a sample process is started with: this command line without the
       // options that select and shape the sampling itself.
       std::vector<std::string> sample_arguments;
@@ -98,7 +104,7 @@ int main(int argc, char** argv) {
         if(command=="ft" && option=="--no-numerical-cache"){numerical_cache=false;sample_arguments.push_back(option);continue;}
         if(option=="--leaf-digits")leaf_digits_given=true;
         if(option!="--epsilon-strategy" && option!="--samples" && option!="--sample-step" && option!="--sample-jobs" &&
-            option!="--sample-poles" && option!="--epsilon-order" && option!="--epsilon-shift" && i+1<argc) {
+            option!="--sample-poles" && option!="--epsilon-order" && option!="--epsilon-shift" && option!="--precision-floor" && i+1<argc) {
           sample_arguments.push_back(option);sample_arguments.push_back(argv[i+1]);
         }
         if(option=="--ft-transport" || option=="--ft-transport-digits")
@@ -202,7 +208,8 @@ int main(int argc, char** argv) {
           else if(option=="--endpoint-order"){if(number<1 || number>1000)throw std::invalid_argument("endpoint order must be in 1..1000");numerical.endpoint_order=number;}
           else if(option=="--overlap-ratio"){if(number<4 || number>65536)throw std::invalid_argument("overlap ratio must be in 4..65536");numerical.overlap_ratio=number;}
           else if(option=="--ordinary-order"){if(number<8 || number>1000)throw std::invalid_argument("ordinary order must be in 8..1000");numerical.ordinary_order=number;}
-          else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;}
+          else if(option=="--precision-bits"){if(number<64 || number>1000000)throw std::invalid_argument("precision bits must be in 64..1000000");numerical.working_bits=number;precision_given=true;}
+          else if(option=="--precision-floor"){if(number<64 || number>1000000)throw std::invalid_argument("precision floor must be in 64..1000000");precision_floor=number;}
           else if(option=="--leaf-digits"){if(number<1 || number>100000)throw std::invalid_argument("leaf digits must be in 1..100000");numerical.leaf_digits=number;}
           else if(option=="--basis-scan-seconds"){if(number>60)throw std::invalid_argument("basis scan seconds must be in 0..60");numerical.automatic_basis_scan=number!=0;if(number)numerical.basis_scan_seconds=number;}
           else throw std::invalid_argument("unknown FT option: "+option);
@@ -320,10 +327,11 @@ int main(int argc, char** argv) {
         }
         boost::json::array remaining;
         for(const auto& factor:result.remaining){progress<<"  left in place: ("<<factor<<")\n";remaining.emplace_back(factor);}
+        if(result.size_refusals)progress<<"  "<<result.size_refusals<<" of them kept for size: the basis without it has a connection more than four times as large\n";
         if(result.budget_reached)progress<<"  stopped by its step or time budget\n";
         moving_pole_levels.push_back(boost::json::object{{"level",depth+1},{"mixed_factors",result.before.factors},{"mixed_order_before",result.before.total_order},
           {"mixed_order_after",result.after.total_order},{"characters_before",result.original_characters},{"characters_after",result.characters},
-          {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
+          {"steps",std::move(steps)},{"left_in_place",std::move(remaining)},{"kept_for_size",result.size_refusals},{"budget_reached",result.budget_reached},{"seconds",result.seconds}});
         progress<<std::flush;
       };
       // Each level merges the pair of propagators with the fewest masters.
@@ -370,7 +378,7 @@ int main(int argc, char** argv) {
       // before its masters become the child's requests.
       if(moving_poles=="exchange")options.exchange_masters=[&](diffexp::level::Result level,unsigned depth) {
         diffexp::moving_poles::Result result;
-        level=diffexp::moving_poles::exchange(std::move(level),0,1,{},&result);
+        level=diffexp::moving_poles::exchange(std::move(level),0,1,{},&result,cache/"moving-poles");
         describe_moving_poles(depth,result);return level;
       };
       // A spent time budget names the three knobs that bound the preparation.
@@ -468,7 +476,7 @@ int main(int argc, char** argv) {
         std::vector<std::vector<diffexp::kernel::ComplexBall>> values(done.front().values.size());
         double cpu=0;boost::json::array sample_report;
         for(const auto& sample:done) {
-          cpu+=sample.seconds;sample_report.push_back(boost::json::object{{"epsilon",sample.epsilon.str()},{"numerical_seconds",sample.seconds}});
+          cpu+=sample.seconds;sample_report.push_back(boost::json::object{{"epsilon",sample.epsilon.str()},{"numerical_seconds",sample.seconds},{"raised_to_bits",sample.raised_bits}});
           for(std::size_t c=0;c<values.size();++c)values[c].push_back(sample.values.at(c));
         }
         const unsigned poles=sample_poles>=0?static_cast<unsigned>(sample_poles):es::pole_order(points,values,pole_bound);
@@ -518,7 +526,7 @@ int main(int argc, char** argv) {
         // on the exact graph, before any epsilon shift: at a numeric dimension
         // a moving pole is one more ordinary pole.
         if(moving_poles=="remove") {
-          for(auto& [depth,basis]:diffexp::moving_poles::bases(graph,{},describe_moving_poles))
+          for(auto& [depth,basis]:diffexp::moving_poles::bases(graph,{},describe_moving_poles,cache/"moving-poles"))
             numerical.physical_bases.insert_or_assign(depth,epsilon_shift.empty()?std::move(basis):
               diffexp::moving_poles::shift_epsilon(std::move(basis),diffexp::Rational(epsilon_shift),epsilon_order==0));
           // The scan for a smaller connection continues from these bases.
@@ -536,29 +544,110 @@ int main(int argc, char** argv) {
         report_moving_poles();
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
+        if(!precision_given && precision_floor>numerical.working_bits)numerical.working_bits=precision_floor;
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
-        report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
-        if(canonical_basis)result=diffexp::henn::project_boundary(*canonical_basis,graph.nodes.front().requested,result,epsilon_order,numerical.working_bits);
-        // The Taylor tail admitted per chart is not in the transported radii.
-        // An uncertified result is widened by it: 2^6 charts' worth of the
-        // tail, relative to the largest coefficient of each integral or, when
-        // larger, to the largest term that cancels into it. This is
-        // an estimate like the radii themselves; without it a sample asked
-        // for few leaf digits would report far more digits than it has.
-        if(!result.taylor_tail_certified) {
+        // The Taylor tails admitted per chart are estimated along the
+        // transport (AdjointOptions::tail_probe) and added below, eight
+        // times over. That estimate is one realisation of an error whose
+        // terms can cancel; a result is therefore never reported more
+        // accurately than one tail relative to its largest coefficient
+        // (`admitted_tail` with no slack), which also stands in where no
+        // probes ran.
+        const auto admitted_tail=[&](const diffexp::LaurentBoundary& values,std::size_t index,mag_t scale,long slack) {
           const unsigned tail=numerical.adjoint.truncation_bits?numerical.adjoint.truncation_bits:static_cast<unsigned>(std::min<double>(
             std::min<double>(2.0*numerical.ordinary_order,static_cast<double>(numerical.working_bits)-32),
             std::ceil((numerical.leaf_digits+10.0)*std::log2(10.0))));
+          mag_t size;mag_init(size);mag_zero(scale);
+          for(const auto& value:values.values[index]){acb_get_mag(size,value.raw());mag_max(scale,scale,size);}
+          mag_mul_2exp_si(scale,scale,slack-static_cast<slong>(tail));
+          mag_clear(size);
+        };
+        // The radii that arrive here are what the working precision left: each
+        // level loses some of it between the overlap points and the matching
+        // point (30 to 140 bits a level in the large families), and a deep
+        // recursion can lose all 384. Where they exceed the tail that was
+        // admitted on purpose, the digits asked for are lost to rounding
+        // alone. If a coefficient then has fewer digits than the leaf was
+        // asked for, the numbers are computed again with that many bits more,
+        // which repeats the endpoint operators, the transports and the leaf
+        // but not the exact endpoint plans. A precision stated by the caller
+        // is not changed, and neither is one that would have to grow beyond
+        // 4096 bits (an expanded recursion that loses thousands of bits needs
+        // another route, not more bits).
+        const bool tail_stated=numerical.adjoint.truncation_bits!=0;
+        long precision_deficit=0;boost::json::array precision_raises;
+        for(unsigned attempt=0;!canonical_basis && !result.taylor_tail_certified;++attempt) {
+          precision_deficit=0;long tail_deficit=0;
+          // Whether a coefficient has fewer digits than the leaf was asked
+          // for, counted against the largest coefficient of its integral.
+          bool short_of_digits=false;
+          mag_t scale,radius,largest,size;mag_init(scale);mag_init(radius);mag_init(largest);mag_init(size);
           for(std::size_t index=0;index<result.values.size();++index) {
-            auto& row=result.values[index];
-            mag_t scale,size;mag_init(scale);mag_init(size);
-            for(const auto& value:row){acb_get_mag(size,value.raw());mag_max(scale,scale,size);}
-            // The terms of a row before they cancel set the scale of its tail.
-            if(index<result.term_log2.size() && std::isfinite(result.term_log2[index])){mag_set_ui_2exp_si(size,1,static_cast<slong>(std::ceil(result.term_log2[index])));mag_max(scale,scale,size);}
-            mag_mul_2exp_si(scale,scale,6-static_cast<slong>(tail));
-            for(auto& value:row)if(!value.is_zero())acb_add_error_mag(value.raw(),scale);
-            mag_clear(scale);mag_clear(size);
+            admitted_tail(result,index,scale,6);
+            if(mag_is_zero(scale) || !mag_is_finite(scale))continue;
+            mag_zero(largest);
+            for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
+              const auto* value=result.values[index].at(k-result.low).raw();
+              arf_get_mag(size,arb_midref(acb_realref(value)));mag_max(largest,largest,size);
+              arf_get_mag(size,arb_midref(acb_imagref(value)));mag_max(largest,largest,size);
+            }
+            const double wanted_log2=mag_is_zero(largest)?-std::numeric_limits<double>::infinity():
+              mag_get_d_log2_approx(largest)-numerical.leaf_digits*std::log2(10.0);
+            for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
+              const auto& value=result.values[index].at(k-result.low);
+              mag_max(radius,arb_radref(acb_realref(value.raw())),arb_radref(acb_imagref(value.raw())));
+              // The Taylor tails as the transports estimated them, amplified by
+              // the cancellations between the levels: more precision does not
+              // reduce them, a smaller admitted tail does.
+              if(index<result.error.size() && static_cast<std::size_t>(k-result.low)<result.error[index].size() && result.error[index][k-result.low]>0) {
+                const double estimate=std::log2(8*result.error[index][k-result.low]);
+                if(estimate>wanted_log2)tail_deficit=std::max(tail_deficit,static_cast<long>(std::ceil(estimate-wanted_log2)));
+              }
+              if(mag_is_zero(radius))continue;
+              if(!mag_is_finite(radius)){precision_deficit=std::numeric_limits<long>::max()/2;short_of_digits=true;continue;}
+              precision_deficit=std::max(precision_deficit,static_cast<long>(std::ceil(mag_get_d_log2_approx(radius)-mag_get_d_log2_approx(scale))));
+              if(mag_get_d_log2_approx(radius)>wanted_log2)short_of_digits=true;
+            }
           }
+          mag_clear(scale);mag_clear(radius);mag_clear(largest);mag_clear(size);
+          // A few bits above the tail change no digit that is reported, and a
+          // result that has the digits asked for is not computed again.
+          if(tail_deficit>0 && !tail_stated && attempt<2) {
+            const unsigned now=evaluator.tail_bits();
+            const unsigned wanted=static_cast<unsigned>(std::min<long>(now+tail_deficit+8,std::min<long>(2L*numerical.ordinary_order,static_cast<long>(numerical.working_bits)-32)));
+            if(wanted>now) {
+              progress<<"Admitted Taylor tail lowered from 2^-"<<now<<" to 2^-"<<wanted<<": the estimated tails leave fewer digits than asked for by 2^"<<tail_deficit<<".\n"<<std::flush;
+              precision_raises.push_back(boost::json::object{{"tail_from",now},{"tail_to",wanted},{"estimate_over_goal_bits",tail_deficit}});
+              numerical.adjoint.truncation_bits=wanted;evaluator.raise_tail(wanted);
+              result=evaluator.evaluate(raw_high);
+              continue;
+            }
+          }
+          if(precision_deficit<8 || !short_of_digits || precision_given || attempt==2)break;
+          const long wanted=precision_deficit>8192?8192:((static_cast<long>(numerical.working_bits)+precision_deficit+32+63)/64)*64;
+          if(wanted>4096) {
+            progress<<"Working precision not raised: the transported radii exceed the admitted Taylor tail by 2^"<<precision_deficit
+              <<", more than 4096 bits would repair.\n"<<std::flush;
+            break;
+          }
+          progress<<"Working precision raised from "<<numerical.working_bits<<" to "<<wanted<<" bits: the transported radii exceed the admitted Taylor tail by 2^"
+            <<precision_deficit<<".\n"<<std::flush;
+          precision_raises.push_back(boost::json::object{{"from",numerical.working_bits},{"to",wanted},{"radius_over_tail_bits",precision_deficit}});
+          numerical.working_bits=wanted;evaluator.raise_precision(wanted);
+          result=evaluator.evaluate(raw_high);
+        }
+        report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
+        report["precision"]=boost::json::object{{"raises",std::move(precision_raises)},{"radius_over_tail_bits",std::max(0L,precision_deficit)},{"stated",precision_given}};
+        // Eight times the error the transports estimated for themselves.
+        result.widen_by_error();
+        if(canonical_basis)result=diffexp::henn::project_boundary(*canonical_basis,graph.nodes.front().requested,result,epsilon_order,numerical.working_bits);
+        if(!result.taylor_tail_certified) {
+          mag_t scale;mag_init(scale);
+          for(std::size_t index=0;index<result.values.size();++index) {
+            admitted_tail(result,index,scale,0);
+            for(auto& value:result.values[index])if(!value.is_zero())acb_add_error_mag(value.raw(),scale);
+          }
+          mag_clear(scale);
         }
         if(json_mode) {
           // Display enough decimal digits for the working binary precision;
@@ -580,7 +669,7 @@ int main(int argc, char** argv) {
           report["working_bits"]=numerical.working_bits;
           report["persistent_numerical_cache"]=numerical_cache;
         } else {
-          if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii exclude omitted endpoint and transport tails):\n";
+          if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii include an estimate of the transport tails, none of the endpoint series; nothing is certified):\n";
           for(unsigned row=0;row<result.values.size();++row)for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
             progress<<(canonical_basis?"Canonical component ":"Scalar ")<<row+1<<" epsilon^"<<k<<" = ";acb_printn(result.values[row][k-result.low].raw(),32,0);progress<<'\n';
           }
@@ -618,12 +707,16 @@ int main(int argc, char** argv) {
         // other and from ordinary_seconds.
         report["timings"].as_object()["endpoint_series_seconds"]=stats.endpoint_series_seconds;
         report["timings"].as_object()["endpoint_operator_seconds"]=stats.endpoint_operator_seconds;
+        report["timings"].as_object()["endpoint_gauge_seconds"]=stats.endpoint_gauge_seconds;
+        report["timings"].as_object()["endpoint_frame_seconds"]=stats.endpoint_frame_seconds;
+        report["timings"].as_object()["endpoint_observable_seconds"]=stats.endpoint_observable_seconds;
         report["timings"].as_object()["basis_selection_seconds"]=stats.basis_selection_seconds;
         report["timings"].as_object()["leaf_seconds"]=stats.leaf_seconds;
         report["basis_selection"]=boost::json::object{{"scans",stats.basis_scans},
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
           {"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
+          {"operator_exact_zeros",stats.operator_exact_zeros},
           {"structural_zero_conflicts",stats.structural_zero_conflicts}};
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"
@@ -632,7 +725,9 @@ int main(int argc, char** argv) {
           <<" already complete; "<<stats.ordinary_checkpoints.saved<<" accepted charts saved; "<<stats.ordinary_checkpoints.skipped_oversize<<" transports too large to checkpoint.\n"
           <<"Child-window preflights "<<stats.demand_preflights<<"; local operator reuses "<<stats.local_operator_reuses<<".\n"
           <<"Basis scans "<<stats.basis_scans<<"; selections "<<stats.basis_selections<<".\n"
-          <<"Seconds: endpoint series "<<stats.endpoint_series_seconds<<", endpoint operators "<<stats.endpoint_operator_seconds
+          <<"Seconds: endpoint gauges "<<stats.endpoint_gauge_seconds<<", endpoint series "<<stats.endpoint_series_seconds
+          <<", endpoint frames "<<stats.endpoint_frame_seconds<<", endpoint observables "<<stats.endpoint_observable_seconds
+          <<", endpoint operators "<<stats.endpoint_operator_seconds
           <<", basis selection "<<stats.basis_selection_seconds<<", leaf "<<stats.leaf_seconds<<", ordinary transport "<<stats.ordinary_seconds<<".\n"
           <<"Centered chart actions "<<conditioning.centered_charts<<"; conditioning subdivisions "<<conditioning.conditioning_subdivisions<<".\n"
           <<"Taylor recurrences: "<<diffexp::rational_circuit::compact_expansions.load()<<" on compact numbers, "
@@ -761,7 +856,11 @@ Feynman-trick recursion
                                   Defaults: R=64, N=22 (R=16, N=32 with --epsilon-shift), a
                                   2^-128 tail; with only N given, R follows from it.
   --ordinary-order N              8..1000 (default 80)
-  --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis)
+  --precision-bits N              64..1000000 (default 384; 64..4096 with --henn-basis). Without it
+                                  the precision starts at 384 bits and is raised, the numbers being
+                                  computed again, when rounding leaves a coefficient fewer digits
+                                  than --leaf-digits asks for (up to 4096 bits)
+  --precision-floor N             start at N bits instead of 384 without fixing the precision
   --leaf-digits N                 1..100000 (default 28)
   --method adjoint|factored|auto  linear transport of boundary data (default adjoint)
   --accumulation weighted|rows    how the levels are combined (adjoint method). weighted

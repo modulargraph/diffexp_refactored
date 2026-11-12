@@ -722,7 +722,18 @@ inline Prepared prepare(const Compiled &compiled,const B &center,unsigned order,
       detail::set_exact(acb_imagref(coefficients[n].raw()),p[n].imaginary,out.precision);
       exact=std::max<slong>(exact,acb_bits(coefficients[n].raw())+64);
     }
-    exact+=static_cast<slong>(p.size())*(acb_bits(center.raw())+2);
+    // A product with the centre lengthens a number by the bits of the
+    // centre, and its sum with the next coefficient by the depth of the
+    // centre's lowest bit below the binary point: a centre 59/2^14 has six
+    // bits and reaches fourteen places down at every power. Bits plus
+    // |exponent| covers both. (With the bits alone a polynomial of degree
+    // above ten was rounded here, at a precision that does not follow the
+    // working precision: its coefficients then carried a relative radius of
+    // some 2^-300 whatever the precision.)
+    slong span=0;
+    for(const auto* part:{arb_midref(acb_realref(center.raw())),arb_midref(acb_imagref(center.raw()))})
+      if(!arf_is_zero(part))span=std::max<slong>(span,arf_bits(part)+std::abs(arf_abs_bound_lt_2exp_si(part)));
+    exact+=static_cast<slong>(p.size())*(span+2);
     // Horner shift p(center+t): every intermediate fits in `exact` bits.
     for (std::size_t i=p.size();i-->1;)
       for (std::size_t j=i-1;j+1<p.size();++j)
@@ -1021,6 +1032,61 @@ inline Boundary evaluate(const Series &series,const B &step,double *truncation_l
         tail.component(result[series.rows[r]][k].raw(),[&](unsigned n){return series.at(n,r,k).raw();});
     *truncation_log2=tail.log2_relative();
   }
+  return result;
+}
+// Estimate of what the retained polynomial of every component omits at
+// `step`, with its sign. The last two terms t=y_N step^N and u=y_(N-1)
+// step^(N-1) give the ratio q=t/u at which the terms decay, and a tail that
+// continues geometrically sums to t q/(1-q). Where the two terms do not
+// show a decay (|q|>3/4, or u=0) the estimate is 3t. Midpoints at 64 bits:
+// this is the size and direction of the truncation error, not a bound.
+inline Boundary tail_estimate(const Series &series,const B &step) {
+  if (B::precision()!=series.precision || !step.is_finite())
+    throw std::invalid_argument("rational circuit series precision or step");
+  Boundary result;
+  result.reserve(series.dimension);
+  for (unsigned i=0;i<series.dimension;++i) result.emplace_back(series.width);
+  if (series.order<1) return result;
+  const slong bits=64;
+  B last,previous,top,ratio,one(1);
+  acb_get_mid(top.raw(),step.raw());
+  acb_pow_ui(previous.raw(),top.raw(),series.order-1,bits);
+  acb_mul(top.raw(),previous.raw(),top.raw(),bits);
+  const B power_last=top,power_previous=previous;
+  std::shared_ptr<compact::Stored> stored;
+  if (series.compact && series.y.empty()) stored=std::static_pointer_cast<compact::Stored>(series.compact);
+  mag_t size;
+  mag_init(size);
+  for (std::size_t r=0;r<series.rows.size();++r)
+    for (unsigned k=0;k<series.width;++k) {
+      if (stored) {
+        stored->pool.load(last.raw(),(r*series.width+k)*stored->stride+series.order);
+        stored->pool.load(previous.raw(),(r*series.width+k)*stored->stride+series.order-1);
+      } else {
+        last=series.at(series.order,r,k);
+        previous=series.at(series.order-1,r,k);
+      }
+      acb_get_mid(last.raw(),last.raw());
+      acb_get_mid(previous.raw(),previous.raw());
+      if (last.is_zero() || !last.is_finite() || !previous.is_finite()) continue;
+      acb_mul(last.raw(),last.raw(),power_last.raw(),bits);
+      acb_mul(previous.raw(),previous.raw(),power_previous.raw(),bits);
+      auto &value=result[series.rows[r]][k];
+      bool geometric=!previous.is_zero();
+      if (geometric) {
+        acb_div(ratio.raw(),last.raw(),previous.raw(),bits);
+        acb_get_mid(ratio.raw(),ratio.raw());
+        acb_get_mag(size,ratio.raw());
+        geometric=ratio.is_finite() && mag_cmp_2exp_si(size,-1)<=0 ? true : (ratio.is_finite() && mag_get_d(size)<=0.75);
+      }
+      if (geometric) {
+        acb_sub(previous.raw(),one.raw(),ratio.raw(),bits);
+        acb_div(ratio.raw(),ratio.raw(),previous.raw(),bits);
+        acb_mul(value.raw(),last.raw(),ratio.raw(),bits);
+      } else acb_mul_ui(value.raw(),last.raw(),3,bits);
+      acb_get_mid(value.raw(),value.raw());
+    }
+  mag_clear(size);
   return result;
 }
 inline Boundary chart(const Prepared &prepared,const Boundary &boundary,const B &step,

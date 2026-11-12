@@ -218,6 +218,20 @@ class Solver {
  void restart(double seconds){options_.seconds=seconds;started_=std::chrono::steady_clock::now();told_=0;}
  std::vector<Pivot> release(){std::fill(lookup_.begin(),lookup_.end(),-1);stats_={};leading_.clear();leading_fill_=0;return std::move(pivots_);}
  bool complete_rows()const{return options_.complete_rows;}
+ // After a complete elimination, the equations that reproduce the reductions
+ // of the given columns when eliminated alone with complete rows: those of
+ // the pivots the reductions meet, of the pivots of every column of their
+ // equations, and of every column of their rows (it got its pivot later, and
+ // a later equation reduced by that row meets it). More equations than
+ // selection() names, but found without making a leading row.
+ std::vector<std::uint32_t> complete_selection(const std::vector<Column>& columns){
+  std::vector<Column> roots;targets(columns,&roots);std::vector<bool> needed(pivots_.size());std::vector<int> stack;
+  auto need=[&](Column column){const auto p=lookup_[column];if(p>=0&&!needed[p]){needed[p]=true;stack.push_back(p);}};
+  for(auto root:roots)need(root);std::size_t steps=0;
+  while(!stack.empty()){const auto p=stack.back();stack.pop_back();if((steps++&1023)==0)budget();
+   for(const auto& entry:source_row(pivots_[p].source))need(entry.column);for(const auto& entry:pivots_[p].row)need(entry.column);}
+  std::vector<std::uint32_t> result;for(std::size_t p=0;p<pivots_.size();++p)if(needed[p])result.push_back(pivots_[p].source);std::sort(result.begin(),result.end());return result;
+ }
  // The equations that reproduce the reductions of the given columns when
  // eliminated alone, in order, the leading way: those of the pivots the
  // reductions meet and of the pivots their equations were reduced by. After

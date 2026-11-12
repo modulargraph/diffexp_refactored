@@ -236,7 +236,7 @@ class Sampler {
         const auto base=base_bounds[mask];if(dots<=base.first&&nums<=base.second)return true;
         for(const auto& corner:widened_[mask])if(dots<=corner.first&&nums<=corner.second)return true;
         return false;};
-      seeds.max_terms=limits.memory_bytes/64;seeds.max_seeds=std::size_t(1)<<30;seeds.max_states=std::size_t(1)<<34;seeds.seconds=remaining();
+      seeds.max_terms=limits.memory_bytes/16;seeds.max_seeds=std::size_t(1)<<30;seeds.max_states=std::size_t(1)<<34;seeds.seconds=remaining();
       if(!seeds.max_terms)throw std::invalid_argument("IBP solver memory budget too small");
       if(!plan_||plan_->program->program.targets!=targets||plan_->zero_sectors!=geometry.zero_sectors||plan_->dots!=seeds.dots||plan_->numerators!=seeds.numerators||plan_->max_terms!=seeds.max_terms||plan_->bounds!=sector_bounds||plan_->corners!=widened_){
         auto fresh=std::make_unique<Plan>();fresh->program=std::make_shared<::ibp::ParametricProgram>(::ibp::ParametricProgram::compile(geometry,seeds,targets,options_.dots_first?::ibp::ParametricOrdering::dots_first: ::ibp::ParametricOrdering::total_degree,sector_bounds,admitted));
@@ -244,6 +244,8 @@ class Sampler {
         // New targets usually leave the generated equations as they were, and
         // with them every complete elimination started ahead.
         fresh->system=plan_&&same_equations(*plan_->program,*fresh->program)?plan_->system:++systems_;
+        // A batch only grows: what its selection outgrew, it outgrows again.
+        fresh->complete_selection=plan_&&plan_->complete_selection;
         for(const auto& equation:fresh->program->rows)fresh->terms+=equation.size();
         plan_=std::move(fresh);++state_;++stats_.templates;stats_.equations+=plan_->program->rows.size();
       }
@@ -308,7 +310,7 @@ class Sampler {
             // Its seconds count once: not those this thread spent waiting for it.
             elsewhere+=std::max(0.0,early->seconds-std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count());
             started=std::chrono::steady_clock::now();
-            if(early->target_columns==program.target_columns){full=std::move(early->rows);dependencies=std::move(early->selection);}
+            if(early->target_columns==program.target_columns)full=std::move(early->rows);
             // Other targets are reduced here. The solver's clock has run since
             // its elimination began on the other thread: if it expires only
             // now, the elimination is repeated with a budget of its own.
@@ -330,7 +332,7 @@ class Sampler {
             // those it was given, and the entries its pivot rows hold.
             // All equations: reduced completely. A few selected ones: by
             // their leading columns alone (::ibp::SolveOptions).
-            auto telling=solve;telling.complete_rows=!selected;
+            auto telling=solve;telling.complete_rows=!selected||plan_->complete_selection;
             if(options_.progress)telling.progress=[this,total=sources?sources->size():parametric.rows.size()](const ::ibp::Statistics& s,double seconds){
               options_.progress("elimination: "+std::to_string(s.equations)+" of "+std::to_string(total)+" equations, rank "+std::to_string(s.rank)+", pivot fill "+std::to_string(s.fill)+", longest row "+std::to_string(s.peak_row)+", "+std::to_string(static_cast<long>(seconds))+" s");};
             owned=std::make_shared<Owned>(modulus,plan_->program,telling,parametric.evaluate_forms(values,field));solver=&owned->solver;
@@ -343,7 +345,18 @@ class Sampler {
           else if(continued){++stats_.continued_solves;stats_.continued_equations+=continued->rows.size();stats_.continued_solve_seconds+=seconds;}
           else {++stats_.full_solves;stats_.full_solve_seconds+=seconds;}
         };
-        auto selection=[&]()->const std::vector<std::uint32_t>&{if(!dependencies)dependencies=solver->selection(program.target_columns);return *dependencies;};
+        // The few equations the leading way needs are found by making its
+        // rows for them. Where those rows outgrow the fill budget (a large
+        // batch of a large system), the selection is the larger one of
+        // complete rows, and the selected equations are eliminated that way.
+        auto selection=[&]()->const std::vector<std::uint32_t>&{
+          if(!dependencies){
+            if(!plan_->complete_selection)try{dependencies=solver->selection(program.target_columns);}
+              catch(const std::length_error&){if(!solver->complete_rows())throw;plan_->complete_selection=true;
+                if(options_.progress)options_.progress("the leading rows of the selected equations exceed the fill budget; selecting for complete rows instead");}
+            if(!dependencies){solver->restart(remaining());dependencies=solver->complete_selection(program.target_columns);}
+          }
+          return *dependencies;};
         bool selected=options_.selected_source_rows&&plan_->selection.has_value()&&!complete;primal(selected);
         // The first complete elimination of a batch shows whether its seeds
         // contain every integral it leaves unreduced.
@@ -451,7 +464,7 @@ class Sampler {
   using Corners=std::vector<std::pair<unsigned,unsigned>>;
   struct Learned {std::optional<::ibp::ArithmeticTrace> trace;::ibp::ArithmeticTrace::Workspace workspace;bool checked=false,disabled=false;};
   // `system` names the generated equations: plans that differ in targets alone share it.
-  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0,terms=0;std::vector<std::pair<unsigned,unsigned>> bounds;std::vector<Corners> corners;bool contained=false,trace_told=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
+  struct Plan {std::shared_ptr<::ibp::ParametricProgram> program;std::vector<bool> zero_sectors;unsigned dots=0,numerators=0;std::size_t max_terms=0,system=0,terms=0;std::vector<std::pair<unsigned,unsigned>> bounds;std::vector<Corners> corners;bool contained=false,trace_told=false,complete_selection=false;std::map<modular::Word,Learned> primes;modular::Word sampling_modulus=0;
     std::optional<std::vector<std::uint32_t>> selection;std::set<::ibp::Column> terminal_columns;};
   static bool same_equations(const ::ibp::ParametricProgram& a,const ::ibp::ParametricProgram& b) {
     if(a.input_count!=b.input_count||a.constant_inputs!=b.constant_inputs||a.program.integrals!=b.program.integrals||a.rows.size()!=b.rows.size())return false;
@@ -484,7 +497,7 @@ class Sampler {
       for(;;){const auto i=next.fetch_add(1);if(i>=batch.size()||since(began)>=limits.timeout_seconds)break;auto& slot=*batch[i];const auto start=clock::now();
         try{std::vector<::ibp::Word> values;for(const auto& input:inputs_)values.push_back(modular::evaluate(input,slot.point,modulus));
           forms=parametric.evaluate_forms(values,field);
-          if(!solver){auto solve=probe;solve.complete_rows=false;solve.progress={};solve.seconds=std::max(1.0,limits.timeout_seconds-since(began));solver.emplace(program,field,solve,parametric.rows,forms);}
+          if(!solver){auto solve=probe;solve.complete_rows=plan_->complete_selection;solve.progress={};solve.seconds=std::max(1.0,limits.timeout_seconds-since(began));solver.emplace(program,field,solve,parametric.rows,forms);}
           solver->restart(std::max(1.0,limits.timeout_seconds-since(began)));solver->solve(0,&selected);auto rows=solver->targets(program.target_columns);
           std::set<::ibp::Column> found;for(const auto& row:rows)for(const auto& entry:row)found.insert(entry.column);
           if(found!=terminal)continue;
@@ -524,7 +537,7 @@ class Sampler {
   struct Elimination {
     std::size_t system=0,max_fill=0;::ibp::Field field;std::shared_ptr<const ::ibp::ParametricProgram> source;std::vector<::ibp::Word> forms;std::optional<::ibp::Solver> solver;
     // Reduced for the targets known when it started, on its own clock.
-    std::vector<::ibp::Column> target_columns;std::vector<::ibp::Row> rows;std::vector<std::uint32_t> selection;double seconds=0;
+    std::vector<::ibp::Column> target_columns;std::vector<::ibp::Row> rows;double seconds=0;
     std::mutex mutex;std::condition_variable ready;bool finished=false,solved=false;
     explicit Elimination(modular::Word modulus):field(modulus){}
   };
@@ -613,7 +626,7 @@ class Sampler {
           const auto started=std::chrono::steady_clock::now();bool solved=false;
           try{task->forms=task->source->evaluate_forms(values,task->field);
             task->solver.emplace(task->source->program,task->field,solve,task->source->rows,task->forms);task->solver->solve(0);
-            task->rows=task->solver->targets(task->target_columns);task->selection=task->solver->selection(task->target_columns);solved=true;
+            task->rows=task->solver->targets(task->target_columns);solved=true;
           }catch(...){}
           task->seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();flint_cleanup();
           {const std::lock_guard lock(task->mutex);task->solved=solved;task->finished=true;}task->ready.notify_all();

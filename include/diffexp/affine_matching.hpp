@@ -238,6 +238,18 @@ inline Matrix coefficients(const AffineFrobeniusSeries::Expansion &expansion,
                            Budget &budget, unsigned first = 0) {
   unsigned d = expansion.rows;
   budget.series_cells(d, expansion.columns, static_cast<std::size_t>(top) + 1);
+  // A truncated series must hold every order read here; a term it does not
+  // store is otherwise unknown, not zero.
+  if (!expansion.epsilon_truncation.empty()) {
+    long missing = 0;
+    for (unsigned i = 0; i < d; ++i)
+      for (unsigned j = 0; j < expansion.columns; ++j)
+        if (expansion.epsilon_truncation[i][j] < AffineFrobeniusSeries::Expansion::exact_order)
+          missing = std::max(missing, shifts[j] + static_cast<long>(top) + 1 -
+                                          expansion.epsilon_truncation[i][j]);
+    if (missing > 0)
+      throw EpsilonOrdersNeeded(missing);
+  }
   Matrix out(d, std::vector<Series>(expansion.columns, Series(top + 1)));
   for (auto &t : expansion.terms) {
     auto [val, c] = rational_coefficients(t.coefficient, top);
@@ -838,9 +850,12 @@ inline Result match(const AffineFrobeniusSeries &series,
     auto valuations = series.valuation_metadata(physical);
     auto shifts = valuations.minimum_by_column;
     for (auto v : shifts)
-      if (v == AffineFrobeniusSeries::Valuations::zero_valuation)
+      if (v == AffineFrobeniusSeries::Valuations::zero_valuation) {
+        if (!physical.epsilon_truncation.empty())
+          throw EpsilonOrdersNeeded(4);
         throw std::domain_error(
             "affine matching frame has an exact zero column");
+      }
     auto leading_matrix = coefficients(physical, shifts, 0, budget);
     if (auto inverse = verified_inverse(leading_matrix, point))
       return audit(regular_match(physical, shifts, point, boundary, requested,
@@ -950,6 +965,8 @@ inline Result match(const AffineFrobeniusSeries &series,
       }
     }
     result.status = Status::Success;
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const detail::PrecisionNeeded &e) {
     result.status = Status::NeedMorePrecision;
     result.reason = e.what();
@@ -983,6 +1000,8 @@ inline Result apply(const AffineFrobeniusSeries &series,
         static_cast<long>(requested.high) - requested.low + 1 >
             options.max_epsilon_depth)
       throw std::invalid_argument("invalid affine functional output window");
+    series.require_epsilon_orders(functional, std::vector<long>(functional.columns,
+        static_cast<long>(requested.high) - source.low));
     auto valuations = series.valuation_metadata(functional);
     long required = std::numeric_limits<long>::min(),
          minimum = AffineFrobeniusSeries::Valuations::zero_valuation;
@@ -1033,6 +1052,8 @@ inline Result apply(const AffineFrobeniusSeries &series,
                     source.coefficients[j][c - source.low];
           }
     result.status = Status::Success;
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const std::exception &e) {
     result.status = Status::Unsupported;
     result.reason = e.what();

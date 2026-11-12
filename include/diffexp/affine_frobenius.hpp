@@ -2011,6 +2011,7 @@ private:
   // recurrence over deg(q) lags. All arithmetic stays exact in Q(eps).
   Expansion project_impl(const Matrix& rows,bool endpoint_only) const {
     using C=UnivariateRational;using namespace affine_frobenius_detail;
+    if(truncated())return project_truncated(rows,endpoint_only);
     if(!options_.max_projection_products||rows.size()>options_.max_terms)throw std::length_error("affine projection receiving budget exhausted");
     auto out=projection_shape(rows,endpoint_only);
     const auto x=zero_.variable(xi_);std::size_t products=0;
@@ -2070,7 +2071,118 @@ private:
     }
     return normalize(std::move(out));
   }
+  // The same projection of a truncated series, in truncated Laurent
+  // arithmetic. The row is divided by the leading coefficient q_0 of its
+  // clearing denominator first, so that result_k = sum p'_lag*y_(k-lag) -
+  // sum q'_lag*result_(k-lag) with exact p', q' in Q(eps), each expanded as
+  // far as the series it multiplies is known. The order of an entry is the
+  // lower of what the arithmetic kept and of what the sources allow whatever
+  // was skipped as zero: an absent coefficient of the series is O(eps^T).
+  Expansion project_truncated(const Matrix& rows,bool endpoint_only) const {
+    using S=affine_frobenius_detail::EpsilonSeries;using namespace affine_frobenius_detail;
+    if(!options_.max_projection_products||rows.size()>options_.max_terms)throw std::length_error("affine projection receiving budget exhausted");
+    auto out=projection_shape(rows,endpoint_only);
+    out.epsilon_truncation.assign(rows.size(),std::vector<long>(d_,Expansion::exact_order));
+    const auto x=zero_.variable(xi_);std::size_t products=0;
+    auto multiply=[&](const S& a,const S& b){if(products++>=options_.max_projection_products)throw std::length_error("affine projection product budget exhausted");return a*b;};
+    std::vector<std::vector<std::size_t>> columns(d_);
+    for(std::size_t t=0;t<expansion_.terms.size();++t)columns[expansion_.terms[t].column].push_back(t);
+    std::call_once(truncated_sources_->once,[&]{
+      auto& cache=*truncated_sources_;cache.values.reserve(expansion_.terms.size());
+      for(const auto& t:expansion_.terms){
+        cache.values.emplace_back(t.coefficient,ei_,expansion_.truncation(t.row,t.column));
+        cache.relative=std::max(cache.relative,cache.values.back().order()-cache.values.back().valuation());
+      }
+    });
+    const auto& sources=truncated_sources_->values;
+    // Exact coefficients are expanded through as many orders as the longest
+    // coefficient of the series holds; a product is then as long as the series allows.
+    const long relative=truncated_sources_->relative;
+    struct Expanded{std::vector<S> values;long lowest=Expansion::exact_order;};
+    auto expand=[&](std::vector<Exact> exact,const Exact& divisor,unsigned first){
+      Expanded result;trim(exact);
+      for(unsigned k=0;k<exact.size();++k){
+        if(k<first||exact[k].is_zero()){result.values.emplace_back();continue;}
+        result.values.push_back(S::expand(exact[k]/divisor,ei_,relative));
+        result.lowest=std::min(result.lowest,result.values.back().valuation());
+      }
+      return result;
+    };
+    std::vector<long> cutoffs(d_);
+    for(unsigned i=0;i<rows.size();++i){
+      const long valuation=out.row_x_valuations[i];
+      if(valuation==Valuations::zero_valuation)continue;
+      if(std::abs(valuation)>options_.max_x_order)throw std::length_error("observable Laurent order exceeds affine budget");
+      long top=-1;
+      for(unsigned c=0;c<d_;++c){
+        cutoffs[c]=integer_value(frontiers_[c]-eigen_[c].power);
+        if(endpoint_only){
+          const auto lowest=eigen_[c].power+Rational(valuation);
+          if(!slopes_[c].is_zero()||lowest>Rational(0))cutoffs[c]=-1;
+          else while(cutoffs[c]&&lowest+Rational(cutoffs[c])>Rational(0))--cutoffs[c];
+        }
+        top=std::max(top,cutoffs[c]);
+      }
+      if(top<0)continue;
+      std::vector<Exact> analytic;auto q=zero_.constant(1);
+      for(const auto& value:rows[i]){analytic.push_back(value/fuchsify::detail::power(x,valuation));q=q.polynomial_lcm(analytic.back().denominator());}
+      const auto clearing=taylor(q,xi_,top);
+      if(clearing.front().is_zero())throw std::domain_error("affine projection clearing denominator is singular at origin");
+      const auto denominator=expand(clearing,clearing.front(),1);
+      std::vector<Expanded> numerator;for(const auto& value:analytic)numerator.push_back(expand(taylor(q*value,xi_,top),clearing.front(),0));
+      for(unsigned c=0;c<d_;++c){
+        if(cutoffs[c]<0)continue;
+        const unsigned cutoff=cutoffs[c];
+        // What the sources allow, whether or not a term of theirs is stored.
+        long order=Expansion::exact_order;
+        for(unsigned r=0;r<d_;++r)if(numerator[r].lowest<Expansion::exact_order&&expansion_.truncation(r,c)<Expansion::exact_order)
+          order=std::min(order,expansion_.truncation(r,c)+numerator[r].lowest);
+        if(order<Expansion::exact_order&&denominator.lowest<0)order+=denominator.lowest*static_cast<long>(cutoff);
+        unsigned log_high=0;for(const auto index:columns[c])log_high=std::max(log_high,expansion_.terms[index].log_degree);
+        std::vector<std::vector<S>> rhs(log_high+1,std::vector<S>(cutoff+1));
+        for(const auto index:columns[c]){
+          const auto& t=expansion_.terms[index];
+          const auto k=static_cast<unsigned long>(integer_value(t.power-eigen_[c].power));if(k>cutoff||numerator[t.row].values.empty())continue;
+          const auto& value=sources[index];const auto& lags=numerator[t.row].values;
+          for(unsigned lag=0;lag<lags.size()&&k+lag<=cutoff;++lag)if(!lags[lag].is_zero())rhs[t.log_degree][k+lag]+=multiply(value,lags[lag]);
+        }
+        for(unsigned l=0;l<=log_high;++l)for(unsigned k=0;k<=cutoff;++k){
+          auto& value=rhs[l][k];const auto& lags=denominator.values;
+          for(unsigned lag=1;lag<lags.size()&&lag<=k;++lag)if(!lags[lag].is_zero()&&!(rhs[l][k-lag].is_zero()&&rhs[l][k-lag].is_exact()))value-=multiply(lags[lag],rhs[l][k-lag]);
+          order=std::min(order,value.order());
+        }
+        out.epsilon_truncation[i][c]=order;
+        for(unsigned l=0;l<=log_high;++l)for(unsigned k=0;k<=cutoff;++k){
+          auto& value=rhs[l][k];value.truncate(order);
+          if(value.is_zero())continue;
+          if(out.terms.size()>=options_.max_terms)throw std::length_error("affine projection accumulated coordinate budget exhausted");
+          out.terms.push_back({i,c,l,eigen_[c].power+Rational(valuation)+Rational(k),slopes_[c],value.exact(zero_,ei_)});
+        }
+      }
+    }
+    return normalize(std::move(out));
+  }
+  static void require_exact(const Expansion& input,const char* operation){
+    if(!input.epsilon_truncation.empty())throw std::logic_error(std::string(operation)+" is defined for exact endpoint series only");
+  }
+  // A constant term of the fixed sector exists only in columns without slope.
+  std::vector<std::vector<long>> fixed_truncation(const Expansion& input) const {
+    auto out=input.epsilon_truncation;
+    if(out.empty())return out;
+    if(input.columns!=d_)throw std::logic_error("truncated endpoint functional of a contracted expansion");
+    for(auto& row:out)for(unsigned c=0;c<d_;++c)if(!slopes_[c].is_zero())row[c]=Expansion::exact_order;
+    return out;
+  }
 public:
+  // Every entry of `input` must be known through the epsilon order
+  // highs[column]; throws EpsilonOrdersNeeded with the largest deficit.
+  void require_epsilon_orders(const Expansion& input,const std::vector<long>& highs) const {
+    if(input.epsilon_truncation.empty())return;
+    long missing=0;
+    for(unsigned i=0;i<input.rows;++i)for(unsigned c=0;c<input.columns;++c)
+      if(input.epsilon_truncation[i][c]<Expansion::exact_order)missing=std::max(missing,highs.at(c)+1-input.epsilon_truncation[i][c]);
+    if(missing>0)throw EpsilonOrdersNeeded(missing);
+  }
   // Exact contraction supports pole-bearing matching constants without dropping
   // colliding exponents. Their epsilon cancellations remain visible on
   // expansion.
@@ -2078,6 +2190,7 @@ public:
                      const std::vector<Exact> &constants) const {
     if (constants.size() != input.columns)
       throw std::invalid_argument("affine contraction dimension");
+    require_exact(input, "contraction with exact constants");
     auto out = input;
     out.columns = 1;
     out.wronskian_prefactor.reset();
@@ -2095,6 +2208,35 @@ public:
   Expansion primitive(const Expansion &input) const {
     using namespace affine_frobenius_detail;
     Expansion out{input.rows, input.columns, {}};
+    if (!input.epsilon_truncation.empty()) {
+      // Dividing by a + slope*eps costs an order only at a = 0, once per
+      // logarithmic power; the powers of a column reach x^-1 only if they
+      // are integers. The bound of the logarithmic degree is the column's.
+      using S = EpsilonSeries;
+      if (input.columns != d_)
+        throw std::logic_error("truncated primitive of a contracted expansion");
+      out.epsilon_truncation = input.epsilon_truncation;
+      for (auto &row : out.epsilon_truncation)
+        for (unsigned c = 0; c < d_; ++c)
+          if (row[c] < Expansion::exact_order && !slopes_[c].is_zero() && is_integer(eigen_[c].power))
+            row[c] -= log_bounds_[c] + 1;
+      for (auto &t : normalize(input).terms) {
+        const auto a = t.power + Rational(1);
+        const auto delta = S::linear(a, t.slope);
+        if (delta.is_zero())
+          throw std::domain_error(
+              "unregulated fixed x^-1 logarithm has no meromorphic DR primitive");
+        std::vector<S> p(t.log_degree + 1);
+        p.back() = S(t.coefficient, ei_, input.epsilon_truncation[t.row][t.column]);
+        p = solve(p, delta);
+        for (unsigned l = 0; l < p.size(); ++l) {
+          p[l].truncate(out.epsilon_truncation[t.row][t.column]);
+          if (!p[l].is_zero())
+            out.terms.push_back({t.row, t.column, l, a, t.slope, p[l].exact(zero_, ei_)});
+        }
+      }
+      return normalize(std::move(out));
+    }
     for (auto &t : normalize(input).terms) {
       auto a = t.power + Rational(1);
       auto delta =
@@ -2142,6 +2284,9 @@ public:
     Rational power;
     unsigned log_degree;
     std::vector<Exact> coefficients;
+    // Of a truncated series: the epsilon order from which each coefficient
+    // is unknown (Expansion::epsilon_truncation of the constraint row).
+    std::vector<long> truncation;
   };
   struct DRDomain {
     Expansion admissible;
@@ -2163,7 +2308,25 @@ public:
       auto [at,inserted]=constraints.try_emplace({t.row,t.power,t.log_degree},input.columns,zero_);
       at->second[t.column]=at->second[t.column]+t.coefficient;
     }
-    for(auto& [coordinate,row]:constraints){const auto& [r,p,l]=coordinate;out.zero_constraints.push_back({r,p,l,std::move(row)});}
+    const auto orders=fixed_truncation(canonical);
+    for(auto& [coordinate,row]:constraints){const auto& [r,p,l]=coordinate;out.zero_constraints.push_back({r,p,l,std::move(row),orders.empty()?std::vector<long>{}:orders[r]});}
+    return out;
+  }
+  // The endpoint constant and a domain constraint as functionals on the
+  // matching constants, with what a truncated series knows of them.
+  Expansion dr_endpoint_functional(const Expansion& admissible) const {
+    const auto constants=dr_endpoint_constant(admissible);
+    Expansion out{admissible.rows,admissible.columns,{}};
+    for(unsigned i=0;i<constants.size();++i)for(unsigned j=0;j<constants[i].size();++j)
+      if(!constants[i][j].is_zero())out.terms.push_back({i,j,0,Rational(0),Rational(0),constants[i][j]});
+    out.epsilon_truncation=fixed_truncation(admissible);
+    return out;
+  }
+  static Expansion constraint_functional(const ZeroConstraint& constraint) {
+    Expansion out{1,static_cast<unsigned>(constraint.coefficients.size()),{}};
+    for(unsigned j=0;j<constraint.coefficients.size();++j)
+      if(!constraint.coefficients[j].is_zero())out.terms.push_back({0,j,0,Rational(0),Rational(0),constraint.coefficients[j]});
+    if(!constraint.truncation.empty())out.epsilon_truncation={constraint.truncation};
     return out;
   }
   // A limit needs only fixed nonpositive-power sectors. Positive powers and
@@ -2215,6 +2378,7 @@ public:
   std::vector<std::vector<B>> evaluate(const Expansion &input, const B &x,
                                        const B &epsilon) const {
     using namespace affine_frobenius_detail;
+    require_exact(input, "evaluation at a numeric epsilon");
     if (x.contains_zero())
       throw std::domain_error("affine evaluation requires a nonzero x");
     B logx;
@@ -2235,12 +2399,24 @@ public:
     }
     return out;
   }
+  // With column_highs, column c is evaluated through the epsilon order
+  // min(high, column_highs[c]) only; the coefficients above it stay zero and
+  // must not be read. A truncated expansion must be known that far.
   LaurentMatrix evaluate_laurent(const Expansion &input, const B &x, int low,
-                                 int high) const {
+                                 int high, const std::vector<long> *column_highs = nullptr) const {
     using namespace affine_frobenius_detail;
     if (x.contains_zero() || low > high ||
         static_cast<long>(high) - low + 1 > options_.max_epsilon_depth)
       throw std::invalid_argument("invalid affine Laurent evaluation window");
+    if (column_highs && column_highs->size() != input.columns)
+      throw std::invalid_argument("affine Laurent evaluation column windows");
+    {
+      std::vector<long> highs(input.columns, high);
+      if (column_highs)
+        for (unsigned c = 0; c < input.columns; ++c)
+          highs[c] = std::min<long>(high, (*column_highs)[c]);
+      require_epsilon_orders(input, highs);
+    }
     B logx;
     acb_log(logx.raw(), x.raw(), B::precision());
     LaurentMatrix out{
@@ -2251,9 +2427,10 @@ public:
     for (auto &t : normalize(input).terms) {
       EpsilonRational coefficient(t.coefficient,ei_);
       long valuation = coefficient.valuation();
-      if (valuation > high)
+      const long last = column_highs ? std::min<long>(high, (*column_highs)[t.column]) : high;
+      if (valuation > last)
         continue;
-      long length = static_cast<long>(high) - valuation + 1;
+      long length = last - valuation + 1;
       if (length > options_.max_epsilon_depth)
         throw std::length_error(
             "affine coefficient poles require additional epsilon-depth budget");
@@ -2269,7 +2446,7 @@ public:
       acb_exp(xp.raw(), exponent.raw(), B::precision());
       for (unsigned l = 0; l < t.log_degree; ++l)
         xp = xp * logx;
-      for (long k = std::max<long>(low, valuation); k <= high; ++k)
+      for (long k = std::max<long>(low, valuation); k <= last; ++k)
         out.coefficients[t.row][t.column][k - low] =
             out.coefficients[t.row][t.column][k - low] +
             xp * value.at(k - valuation);
@@ -2282,6 +2459,10 @@ private:
   // The coefficients of expansion_ as univariate fractions (project_impl).
   struct Sources { std::once_flag once; std::vector<UnivariateRational> values; };
   std::shared_ptr<Sources> sources_ = std::make_shared<Sources>();
+  // Of a truncated series: its coefficients as series, and the largest
+  // number of orders one of them holds (project_truncated).
+  struct TruncatedSources { std::once_flag once; std::vector<affine_frobenius_detail::EpsilonSeries> values; long relative = 1; };
+  std::shared_ptr<TruncatedSources> truncated_sources_ = std::make_shared<TruncatedSources>();
   unsigned d_ = 0, n_ = 0, finite_lag_rows_ = 0;
   std::size_t xi_ = 0, ei_ = 0;
   Options options_;

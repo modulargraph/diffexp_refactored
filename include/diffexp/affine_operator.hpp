@@ -230,6 +230,8 @@ inline void certify_principal_part(Operator &out, const Prepared &prepared,
       out.matrix.low = certified_low;
     }
     out.principal_part_certified = true;
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const std::exception &e) { out.principal_part_reason = e.what(); }
   out.principal_part_exact_operations = budget.work;
 }
@@ -596,6 +598,8 @@ inline void impose_exact_zeros(Operator &out, const Prepared &prepared,
         }
       }
     }
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const std::exception &) {
     // An exhausted budget or an unusable term leaves the balls as they are.
   }
@@ -632,9 +636,13 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     state->shifts = series.valuation_metadata(physical).minimum_by_column;
     const auto &shifts = state->shifts;
     for (auto shift : shifts)
-      if (shift == AffineFrobeniusSeries::Valuations::zero_valuation)
+      if (shift == AffineFrobeniusSeries::Valuations::zero_valuation) {
+        // Nothing of the column is known yet; it is not known to vanish.
+        if (!physical.epsilon_truncation.empty())
+          throw EpsilonOrdersNeeded(4);
         throw std::domain_error(
             "prepared affine inverse has an exact zero column");
+      }
     // Epsilon orders are converted to the exact field only when an exact zero
     // leading row requires another shear; the first pass over the series
     // already covers the window that a gauge without loss would need.
@@ -702,6 +710,8 @@ inline Prepared prepare(const AffineFrobeniusSeries &series,
     out.recurrence = std::move(state);
     detail::publish(out, series, physical, inverse_high, budget);
     out.status = Status::Success;
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const affine_matching::detail::PrecisionNeeded &e) {
     out.status = Status::NeedMorePrecision;
     out.reason = e.what();
@@ -725,6 +735,8 @@ inline void extend(Prepared &prepared, const AffineFrobeniusSeries &series,
     affine_matching::detail::Budget budget{options};
     budget.specialize(prepared.recurrence->point);
     detail::publish(prepared, series, physical, inverse_high, budget);
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const affine_matching::detail::PrecisionNeeded &e) {
     prepared.status = Status::NeedMorePrecision;
     prepared.reason = e.what();
@@ -785,6 +797,13 @@ inline Operator compose(const Prepared &prepared,
     out.required_inverse_high = required == std::numeric_limits<long>::min()
                                     ? prepared.inverse.high
                                     : am::integer(required);
+    // Column k of the functional meets the inverse from the order
+    // row_lower_bounds[k] on: it is read through operator_high minus that,
+    // and a truncated functional must be known that far, stored term or not.
+    std::vector<long> highs(d);
+    for (unsigned k = 0; k < d; ++k)
+      highs[k] = static_cast<long>(operator_high) - prepared.row_lower_bounds[k];
+    series.require_epsilon_orders(functional, highs);
     if (required > prepared.inverse.high) {
       out.status = Status::NeedMoreSource;
       out.reason =
@@ -807,7 +826,7 @@ inline Operator compose(const Prepared &prepared,
                       *std::min_element(prepared.row_lower_bounds.begin(),
                                         prepared.row_lower_bounds.end()));
       auto p = series.evaluate_laurent(functional, point, am::integer(minimum),
-                                       std::max(am::integer(minimum), ptop));
+                                       std::max(am::integer(minimum), ptop), &highs);
       for (unsigned i = 0; i < functional.rows; ++i)
         for (unsigned j = 0; j < d; ++j)
           for (unsigned k = 0; k < d; ++k)
@@ -830,6 +849,8 @@ inline Operator compose(const Prepared &prepared,
     detail::certify_principal_part(out, prepared, series, functional, point,
                                    valuations, options);
     out.status = Status::Success;
+  } catch (const EpsilonOrdersNeeded &) {
+    throw;
   } catch (const std::exception &e) {
     out.status = Status::Unsupported;
     out.reason = e.what();

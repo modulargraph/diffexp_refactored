@@ -380,9 +380,10 @@ int main(int argc, char** argv) {
       if(finite_masters=="on")options.choose_masters=[&](diffexp::level::Result closure,const auto& merged,const auto& sources,unsigned depth,const auto& reduce) {
         diffexp::finite_masters::Report chosen;
         closure=diffexp::finite_masters::choose(merged,configuration.family.momenta.loops,diffexp::Rational(static_cast<long>(configuration.family.dimension_at_epsilon_zero)),
-          std::move(closure),sources,0,reduce,chosen);
+          std::move(closure),sources,0,1,reduce,chosen,cache/"finite-masters");
         finite_master_seconds+=chosen.seconds;
         if(!chosen.divergent_before)return closure;
+        if(chosen.steps.empty() && !chosen.candidates){progress<<"Level "<<depth+1<<": finite masters: "<<chosen.note<<"\n"<<std::flush;return closure;}
         progress<<"Level "<<depth+1<<": finite masters: "<<chosen.divergent_before<<" of "<<chosen.masters<<" masters fail the convergence test at epsilon = 0 -> "
           <<chosen.divergent_after<<"; "<<chosen.candidates<<" candidate integrals reduced in "<<chosen.reductions<<" further reductions ("<<chosen.reduction_seconds
           <<" s); connection characters "<<chosen.characters_before<<" -> "<<chosen.characters_after<<"; "<<chosen.seconds<<" s\n";

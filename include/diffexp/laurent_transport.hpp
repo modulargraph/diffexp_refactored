@@ -7,10 +7,25 @@ struct LaurentBoundary {
   int low;
   Boundary values;
   bool taylor_tail_certified=false;
-  // By row, log2 of the largest product of a composed weight and a terminal
-  // value that enters it: the scale the terms of a row have before they
-  // cancel. Empty when it was not recorded.
-  std::vector<double> term_log2={};
+  // By row and coefficient, like `values`: the estimated size of the error
+  // that the transports behind a value committed (the Taylor tails they
+  // admit and their rounding, AdjointOptions::error). It is NOT in the radii
+  // of `values`, which remain those of the retained polynomials, exactly
+  // what the linear expression of the result materializes to; a caller that
+  // reports the values widens them (widen_by_error). Empty: not estimated.
+  std::vector<std::vector<double>> error={};
+  // Adds `factor` times the estimated error to the radius of every value
+  // that is not an exact zero. The estimate is one realisation of an error
+  // whose contributions can cancel: hence the factor.
+  void widen_by_error(double factor=8) {
+    mag_t size;mag_init(size);
+    for(std::size_t i=0;i<values.size() && i<error.size();++i)for(std::size_t k=0;k<values[i].size() && k<error[i].size();++k) {
+      if(!(error[i][k]>0) || values[i][k].is_zero())continue;
+      mag_set_d(size,factor*error[i][k]);
+      acb_add_error_mag(values[i][k].raw(),size);
+    }
+    mag_clear(size);
+  }
   int high() const {
     if(values.empty() || values[0].empty())throw std::invalid_argument("empty Laurent boundary");
     const auto n=values[0].size();

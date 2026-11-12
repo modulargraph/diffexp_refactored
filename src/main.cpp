@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
       // The command line accumulates top-down wherever that is covered; the
       // library default is one row per requested integral.
       numerical.accumulation=diffexp::recursion::Accumulation::weighted;
+      numerical.rows_error_estimate=true;
       const auto preparation_start=std::chrono::steady_clock::now();
       diffexp::AdjointConditioningStats conditioning;
       numerical.adjoint.conditioning_stats=&conditioning;
@@ -526,25 +527,24 @@ int main(int argc, char** argv) {
         const auto numerical_start=std::chrono::steady_clock::now();
         const auto raw_high=canonical_basis?std::max(0,diffexp::henn::needed_scalar_high(*canonical_basis,epsilon_order)):static_cast<int>(epsilon_order);
         diffexp::recursion::Evaluator evaluator(graph,numerical);auto result=evaluator.evaluate(raw_high);
+        // Eight times the error the transports estimated for themselves.
+        result.widen_by_error();
         report["timings"].as_object()["numerical_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-numerical_start).count();
         if(canonical_basis)result=diffexp::henn::project_boundary(*canonical_basis,graph.nodes.front().requested,result,epsilon_order,numerical.working_bits);
-        // The Taylor tail admitted per chart is not in the transported radii.
-        // An uncertified result is widened by it: 2^6 charts' worth of the
-        // tail, relative to the largest coefficient of each integral or, when
-        // larger, to the largest term that cancels into it. This is
-        // an estimate like the radii themselves; without it a sample asked
-        // for few leaf digits would report far more digits than it has.
+        // The Taylor tails admitted per chart are estimated along the
+        // transport (AdjointOptions::tail_probe) and were added above. That
+        // estimate is one realisation of an error whose terms can cancel; a
+        // result is therefore never reported more accurately than one tail
+        // relative to its largest coefficient, which also stands in where
+        // no probes ran.
         if(!result.taylor_tail_certified) {
           const unsigned tail=numerical.adjoint.truncation_bits?numerical.adjoint.truncation_bits:static_cast<unsigned>(std::min<double>(
             std::min<double>(2.0*numerical.ordinary_order,static_cast<double>(numerical.working_bits)-32),
             std::ceil((numerical.leaf_digits+10.0)*std::log2(10.0))));
-          for(std::size_t index=0;index<result.values.size();++index) {
-            auto& row=result.values[index];
+          for(auto& row:result.values) {
             mag_t scale,size;mag_init(scale);mag_init(size);
             for(const auto& value:row){acb_get_mag(size,value.raw());mag_max(scale,scale,size);}
-            // The terms of a row before they cancel set the scale of its tail.
-            if(index<result.term_log2.size() && std::isfinite(result.term_log2[index])){mag_set_ui_2exp_si(size,1,static_cast<slong>(std::ceil(result.term_log2[index])));mag_max(scale,scale,size);}
-            mag_mul_2exp_si(scale,scale,6-static_cast<slong>(tail));
+            mag_mul_2exp_si(scale,scale,-static_cast<slong>(tail));
             for(auto& value:row)if(!value.is_zero())acb_add_error_mag(value.raw(),scale);
             mag_clear(scale);mag_clear(size);
           }
@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
           report["working_bits"]=numerical.working_bits;
           report["persistent_numerical_cache"]=numerical_cache;
         } else {
-          if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii exclude omitted endpoint and transport tails):\n";
+          if(!result.taylor_tail_certified)progress<<"Retained series values (printed radii include an estimate of the transport tails, none of the endpoint series; nothing is certified):\n";
           for(unsigned row=0;row<result.values.size();++row)for(int k=result.low;k<=static_cast<int>(epsilon_order);++k) {
             progress<<(canonical_basis?"Canonical component ":"Scalar ")<<row+1<<" epsilon^"<<k<<" = ";acb_printn(result.values[row][k-result.low].raw(),32,0);progress<<'\n';
           }
@@ -613,6 +613,7 @@ int main(int argc, char** argv) {
           {"selections",stats.basis_selections},{"cache_hits",stats.basis_cache_hits},{"endpoint_series_built",stats.endpoint_series_built},
           {"child_window_preflights",stats.demand_preflights},
           {"child_refinements",stats.refinements},{"structural_zero_coefficients",stats.structural_zero_coefficients},
+          {"operator_exact_zeros",stats.operator_exact_zeros},
           {"structural_zero_conflicts",stats.structural_zero_conflicts}};
         progress<<"Exact endpoint plans "<<stats.exact_plans<<"; series built "<<stats.endpoint_series_built<<"; numerical refinements "<<stats.refinements<<"; numerical cache hits "<<stats.cache_hits<<".\n"
           <<"Linear transport selections: adjoint "<<stats.adjoint_selections<<", factored "<<stats.factored_selections<<"; conditioning method fallbacks "<<stats.conditioning_method_fallbacks<<".\n"

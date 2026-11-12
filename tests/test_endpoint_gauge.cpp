@@ -68,6 +68,27 @@ int main(){try {
     if(k==0 && u.is_zero()){++zeros;check(v.is_zero(),"numeric row gauge lost an exact zero of the inverse");}
   }
   check(zeros==1,"the triangular frame has one exact zero in its leading inverse");
+  // A functional composed with the ball inverse: the first row of the frame
+  // itself gives the first unit row, whose second entry is an exact zero
+  // that the ball product returns as a ball. Two modular evaluations prove
+  // it; the entry that is one stays a ball.
+  {
+    auto first_row=regular.project(std::vector<std::vector<Exact>>{{q("1"),q("1")}});
+    auto proved=affine_operator::compose(by_inverse,regular,first_row,point,0,numeric_settings);
+    auto plain_settings=numeric_settings;plain_settings.operator_exact_zeros=false;
+    auto plain=affine_operator::compose(by_inverse,regular,first_row,point,0,plain_settings);
+    check(proved.success() && plain.success(),"composition with the numeric row gauge");
+    check(proved.row_lower_bounds[0]==0 && proved.matrix.low<=0,"leading order of the unit row");
+    const auto& one=proved.matrix.coefficients[0][0][-proved.matrix.low];
+    const auto& none=proved.matrix.coefficients[0][1][-proved.matrix.low];
+    check(acb_contains(one.raw(),B(1).raw()) && !one.is_zero(),"the unit entry of the composed row");
+    check(none.is_zero() && proved.exact_zero_coefficients==1,"an exact zero of the composed operator was not proved");
+    check(plain.exact_zero_coefficients==0 && plain.matrix.coefficients[0][1][-plain.matrix.low].contains_zero(),
+      "the modular zero test must be optional");
+    // By elimination nothing is tested: the exact gauge has its own zeros.
+    auto exact_operator=affine_operator::compose(by_elimination,regular,first_row,point,0,exact_settings);
+    check(exact_operator.success() && exact_operator.exact_zero_coefficients==0,"modular zeros belong to the numeric row gauge");
+  }
   // The pole-bearing frame above is singular at leading order: the numeric
   // path must decline and leave the exact gauge in charge.
   auto declined=affine_operator::prepare(series,physical,point,10,numeric_settings);

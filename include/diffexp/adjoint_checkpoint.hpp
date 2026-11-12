@@ -33,7 +33,7 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
     if(!b.is_finite())throw std::invalid_argument("checkpoint initial ball is nonfinite");
   // Probe propagation changed its retained radii and its step acceptance.
   json::object payload{{"algorithm",options.uncertainty==AdjointOptions::Uncertainty::probe?
-      "DiffExp.AdjointOriginalPath/v12-probe-defect-radii":"DiffExp.AdjointOriginalPath/v11-tail-selected-steps"},
+      "DiffExp.AdjointOriginalPath/v13-probe-tail-terms":"DiffExp.AdjointOriginalPath/v11-tail-selected-steps"},
     {"flint_version",FLINT_VERSION},{"precision_bits",Jet::Ball::precision()},
     {"field_symbols",symbols},{"connection",numerical_rows_io::exact_matrix(matrix)},
     {"forcing",numerical_rows_io::exact_matrix(forcing)},{"initial",numerical_rows_io::exact_rows(initial)},
@@ -43,6 +43,12 @@ inline std::string identity(const ExactEpsilonMatrix& matrix,const LaurentRows& 
     {"max_rows_per_batch",options.max_rows_per_batch},{"centered_input",options.centered_input},
     {"max_conditioning_halvings",options.max_conditioning_halvings},
     {"uncertainty",options.uncertainty==AdjointOptions::Uncertainty::probe?"probe":"map"}};
+  if(options.uncertainty==AdjointOptions::Uncertainty::probe) {
+    payload["tail_probe"]=options.tail_probe;
+    // Whether the probes are returned decides the radii of the result.
+    payload["error_rows"]=options.error!=nullptr;
+    if(options.error && !options.error->coefficients.empty())payload["initial_error"]=numerical_rows_io::exact_rows(*options.error);
+  }
   return artifacts::detail::sha256(artifacts::detail::canonical(payload));
 }
 namespace detail {

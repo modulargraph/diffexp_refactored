@@ -56,6 +56,40 @@ int main(){try {
     auto oracle=quadrature(k+2,2,gamma);
     require(acb_contains(shifted.at(k).raw(),oracle.raw()),"epsilon^-2 weight requires gamma lookahead through epsilon six");
   }
+  // About a shifted epsilon the functional is expanded there directly. Its
+  // series must be the re-expansion of the Laurent series at epsilon=0:
+  // (s+eps)^k contributes binomial(k,m) s^(k-m) to eps^m, poles included.
+  {
+    const Rational s("1/50");const auto at=B::from_strings(s.str());
+    feynman::CertifiedDeepestBetaOptions wide_options,shifted_options;
+    wide_options.requested_digits=shifted_options.requested_digits=30;shifted_options.epsilon_shift=s;
+    const auto agrees=[&](const feynman::Symanzik& g,unsigned loops,unsigned power,const char* weight,const char* shifted_weight,int low,const char* what) {
+      const unsigned top=40;
+      auto wide=feynman::certified_scalar_functional(g,loops,2,power,Exact(field,weight),top,wide_options);
+      auto direct=feynman::certified_scalar_functional(g,loops,2,power,Exact(field,shifted_weight),2,shifted_options);
+      require(wide.epsilon_low==low,"unexpected pole order of the unshifted functional");
+      require(direct.epsilon_low==0 && direct.coefficients.size()==3 && direct.taylor_tail_certified,"a shifted functional has no pole and three coefficients");
+      for(unsigned m=0;m<=2;++m) {
+        B sum(0);
+        for(int k=wide.epsilon_low;k<=static_cast<int>(top);++k) {
+          fmpq_t binomial;fmpq_init(binomial);fmpq_one(binomial);
+          for(unsigned j=0;j<m;++j){fmpq_t factor;fmpq_init(factor);fmpq_set_si(factor,k-static_cast<long>(j),static_cast<ulong>(j)+1);fmpq_mul(binomial,binomial,factor);fmpq_clear(factor);}
+          B term,power_of_shift;acb_set_fmpq(term.raw(),binomial,384);fmpq_clear(binomial);
+          acb_pow_si(power_of_shift.raw(),at.raw(),k-static_cast<long>(m),384);
+          sum+=term*power_of_shift*wide.at(k);
+        }
+        require(NativeTailMagnitude::upper_abs(sum-direct.at(static_cast<int>(m))).approximate_upper()<1e-18,what);
+      }
+    };
+    agrees(geometry,1,2,"1+x+x^2","1+x+x^2",0,"shifted expansion of a regular functional");
+    agrees(geometry,1,2,"1/(2+x+eps)","1/(2+x+eps+1/50)",0,"shifted expansion with an epsilon-dependent weight");
+    // The resonant endpoint power x^(-1+eps) is regular at a shifted epsilon:
+    // its denominator is the shift, and the pole of Gamma(2 eps) is gone.
+    agrees({x,x},2,2,"1","1",-2,"shifted expansion of the resonant primitive");
+    // A shift that makes an endpoint power resonant is refused, not guessed.
+    feynman::CertifiedDeepestBetaOptions on_pole;on_pole.epsilon_shift=Rational("-1");
+    fails([&]{feynman::certified_scalar_functional({x,x},2,2,2,x.constant(1),0,on_pole);},"resonant");
+  }
   // Resonant DR primitive: Gamma(2eps) * integral x^(-1+eps) dx.
   auto resonant=feynman::certified_scalar_functional({x,x},2,2,2,x.constant(1),4);
   auto seed=feynman::tadpole(Rational(1),Rational(1),2,2,2,5);

@@ -402,10 +402,49 @@ class Session {
       // took as long as the eliminations). The coefficient that failed last
       // is tried first: while it fails, no other is lifted.
       std::vector<std::optional<Exact>> lifted(keys.size());std::size_t hardest=0;
+      // The denominators as products of factors over the rationals
+      // (modular::DenominatorFactors). While the factors are not lifted,
+      // every prime is sampled and fitted completely and its denominators
+      // add to them; a few primes at most. Once they are, a prime takes the
+      // samples the largest numerator needs and three more, and a fit finds
+      // the numerator alone: with the spare samples a denominator that is
+      // not the function's leaves no numerator. A prime at which a fit fails
+      // is sampled and fitted completely, and if its denominators are not
+      // the predicted ones the factors are given up.
+      std::optional<modular::DenominatorFactors> factors;bool denominators_known=false;std::size_t numerator_samples=8;
+      constexpr unsigned factor_primes=4;
+      const auto predicts=[&](const std::vector<modular::Image>& at_prime,unsigned prime_index){
+        modular::DenominatorFactors::At at(*factors,options_.modulus(prime_index));
+        for(std::size_t i=0;i<keys.size();++i){remaining();const auto predicted=at.denominator(i,images[i].ansatz);
+          if(!predicted||!std::equal(predicted->begin(),predicted->end(),at_prime[i].coefficients.begin()+images[i].ansatz.numerator.size()))return false;}
+        return true;};
+      const auto told=[&]{status("the denominators of the "+std::to_string(keys.size())+" coefficients are products of "+std::to_string(factors->factors())+" factors, known from "+std::to_string(factors->primes())+(factors->primes()==1?" prime":" primes")+"; a further prime takes "+std::to_string(numerator_samples)+" samples");};
+      if(options_.sparse_lifting){
+        for(const auto& image:images)numerator_samples=std::max(numerator_samples,image.ansatz.numerator.size()+3);
+        numerator_samples=std::min(numerator_samples,lifting_samples);
+        factors=modular::DenominatorFactors::find(images,active.size(),options_.modulus(1),deadline);
+        if(!factors)status("the denominators could not be factored; every prime is fitted completely");
+        else if(factors->lifted()){if((denominators_known=predicts(images,1)))told();else factors.reset();}
+      }
       for(unsigned pi=2;pi<=options_.max_primes;++pi) {
-        std::vector<detail::Probe> next;acquire(pi,lifting_samples,next);
-        auto samples=flatten(next);std::vector<modular::Image> next_images;
-        for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,options_.modulus(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
+        std::vector<detail::Probe> next;std::vector<modular::Sample> samples;std::vector<modular::Image> next_images;
+        if(denominators_known){
+          acquire(pi,numerator_samples,next);samples=flatten(next);modular::DenominatorFactors::At at(*factors,options_.modulus(pi));
+          for(std::size_t i=0;i<keys.size();++i){remaining();const auto denominator=at.denominator(i,images[i].ansatz);
+            auto image=denominator?modular::fit_numerator(samples,i,images[i].ansatz,*denominator,options_.modulus(pi)):std::nullopt;
+            if(!image){next_images.clear();status("a numerator does not fit the known denominator at prime "+std::to_string(pi)+"; this prime is fitted completely");break;}
+            next_images.push_back(std::move(*image));}
+        }
+        if(next_images.size()!=keys.size()){
+          acquire(pi,lifting_samples,next);samples=flatten(next);
+          for(std::size_t i=0;i<keys.size();++i){remaining();auto image=modular::fit(samples,i,images[i].ansatz,options_.modulus(pi),true);if(!image)throw std::runtime_error("modular rank/degree changed on independent reconstruction prime");next_images.push_back(*image);}
+          if(factors&&denominators_known){
+            if(!predicts(next_images,pi)){factors.reset();denominators_known=false;status("the complete fits of prime "+std::to_string(pi)+" do not return the denominators their factors predict; every prime is fitted completely");}
+          }else if(factors){
+            if(!factors->absorb(next_images,options_.modulus(pi),deadline)||(!factors->lifted()&&factors->primes()>=factor_primes)){factors.reset();status("the factors of the denominators are not the same, or not small, at "+std::to_string(pi)+" primes; every prime is fitted completely");}
+            else if(factors->lifted()){if((denominators_known=predicts(next_images,pi)))told();else factors.reset();}
+          }
+        }
         for(std::size_t i=0;i<keys.size();++i)lifts[i].append(next_images[i],options_.modulus(pi));
         for(std::size_t i=0;i<keys.size();++i)if(lifted[i]){bool same=true;
           try{for(std::size_t j=0;j<std::min<std::size_t>(2,next.size())&&same;++j)same=modular::evaluate(*lifted[i],next[j].point,options_.modulus(pi))==detail::coefficient(next[j],keys[i]);}

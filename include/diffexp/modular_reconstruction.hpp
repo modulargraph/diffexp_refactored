@@ -5,7 +5,10 @@
 #include <flint/fmpq.h>
 #include <flint/fmpz_mat.h>
 #include <flint/fmpz_lll.h>
+#include <flint/nmod_mpoly.h>
+#include <flint/nmod_mpoly_factor.h>
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <functional>
 #include <numeric>
@@ -192,6 +195,173 @@ inline std::optional<Ansatz> degree_box(const std::vector<Image>& slices,unsigne
   };
   auto n=terms(false),d=terms(true);if(!n||!d)return std::nullopt;
   result.numerator=std::move(*n);result.denominator=std::move(*d);return result;
+}
+// The denominators of the coefficient functions of a reduction are products
+// of few irreducible polynomials with small rational coefficients. Once
+// those are known over the rationals, the denominator of every function is
+// known modulo any further prime, and a fit at such a prime has the
+// numerator alone to find: as many points as the numerator has terms, not as
+// numerator and denominator together.
+//
+// The denominators of one prime are factored modulo that prime. A factor is
+// identified, at every prime, by the functions whose denominators it divides
+// and how often: factors that divide the same denominators equally often
+// are multiplied together (the pieces a polynomial irreducible over the
+// rationals splits into modulo a prime are such, and so are factors that
+// only occur together). The monic products of several primes are combined
+// by the Chinese remainder theorem until their coefficients are rational
+// numbers well within the modulus.
+//
+// Everything here is a hypothesis: the fits made with it carry spare points
+// of their own (fit_numerator), and a complete fit can be compared with what
+// it predicts.
+class DenominatorFactors {
+  struct Context {nmod_mpoly_ctx_t value;Context(std::size_t variables,Word p){nmod_mpoly_ctx_init(value,static_cast<slong>(variables),ORD_LEX,p);}~Context(){nmod_mpoly_ctx_clear(value);}Context(const Context&)=delete;};
+  struct Polynomial {nmod_mpoly_t value;const Context* context;explicit Polynomial(const Context& c):context(&c){nmod_mpoly_init(value,c.value);}
+    Polynomial(Polynomial&& other)noexcept:context(other.context){nmod_mpoly_init(value,context->value);nmod_mpoly_swap(value,other.value,context->value);}
+    ~Polynomial(){nmod_mpoly_clear(value,context->value);}};
+  // Where a factor occurs: (function, multiplicity), ascending.
+  using Occurrence=std::vector<std::pair<std::uint32_t,std::uint32_t>>;
+  struct Term {Power power;Word residue=0;};
+  // The monic products at one prime, by occurrence.
+  static std::optional<std::map<Occurrence,std::vector<Term>>> products(const std::vector<Image>& images,std::size_t variables,Word p,const std::function<void()>& checkpoint) {
+    Context context(variables,p);std::vector<Polynomial> pool;std::vector<Occurrence> occurs;Polynomial denominator(context),quotient(context);std::vector<ulong> exponent(variables);
+    for(std::size_t i=0;i<images.size();++i){const auto& image=images[i];
+      if(checkpoint)checkpoint();
+      nmod_mpoly_zero(denominator.value,context.value);const auto n=image.ansatz.numerator.size();
+      for(std::size_t j=0;j<image.ansatz.denominator.size();++j){const auto& term=image.ansatz.denominator[j];if(term.size()!=variables)return std::nullopt;
+        for(std::size_t v=0;v<variables;++v)exponent[v]=term[v];
+        if(image.coefficients.at(n+j))nmod_mpoly_push_term_ui_ui(denominator.value,image.coefficients[n+j],exponent.data(),context.value);}
+      nmod_mpoly_sort_terms(denominator.value,context.value);nmod_mpoly_combine_like_terms(denominator.value,context.value);
+      if(nmod_mpoly_is_zero(denominator.value,context.value))return std::nullopt;
+      // Most denominators are made of factors already found.
+      for(std::size_t f=0;f<pool.size();++f){std::uint32_t multiplicity=0;
+        while(nmod_mpoly_divides(quotient.value,denominator.value,pool[f].value,context.value)){nmod_mpoly_swap(quotient.value,denominator.value,context.value);++multiplicity;}
+        if(multiplicity)occurs[f].emplace_back(i,multiplicity);}
+      if(nmod_mpoly_is_ui(denominator.value,context.value))continue;
+      nmod_mpoly_factor_t factors;nmod_mpoly_factor_init(factors,context.value);
+      const bool factored=nmod_mpoly_factor(factors,denominator.value,context.value);
+      if(factored)for(slong f=0;f<factors->num;++f){
+        Polynomial monic(context);nmod_mpoly_make_monic(monic.value,factors->poly+f,context.value);
+        occurs.push_back({{static_cast<std::uint32_t>(i),static_cast<std::uint32_t>(fmpz_get_ui(factors->exp+f))}});pool.push_back(std::move(monic));}
+      nmod_mpoly_factor_clear(factors,context.value);
+      if(!factored)return std::nullopt;
+    }
+    std::map<Occurrence,Polynomial> merged;
+    for(std::size_t f=0;f<pool.size();++f){auto [it,inserted]=merged.try_emplace(occurs[f],context);
+      if(inserted)nmod_mpoly_set(it->second.value,pool[f].value,context.value);else nmod_mpoly_mul(it->second.value,it->second.value,pool[f].value,context.value);}
+    std::map<Occurrence,std::vector<Term>> out;
+    for(const auto& [where,product]:merged){auto& terms=out[where];
+      for(slong t=0;t<nmod_mpoly_length(product.value,context.value);++t){nmod_mpoly_get_term_exp_ui(exponent.data(),product.value,t,context.value);
+        auto& term=terms.emplace_back();for(auto e:exponent)term.power.push_back(static_cast<unsigned>(e));term.residue=nmod_mpoly_get_term_coeff_ui(product.value,t,context.value);}}
+    return out;
+  }
+ public:
+  // From the denominators of `images` at prime p (their terms are powers of
+  // `variables` variables). Nothing if a denominator is not factored.
+  static std::optional<DenominatorFactors> find(const std::vector<Image>& images,std::size_t variables,Word p,const std::function<void()>& checkpoint={}) {
+    if(!variables||images.empty())return std::nullopt;
+    auto first=products(images,variables,p,checkpoint);if(!first)return std::nullopt;
+    DenominatorFactors out;out.variables_=variables;out.powers_.resize(images.size());fmpz_set_ui(out.modulus_.value,p);out.primes_=1;
+    for(auto& [where,terms]:*first){
+      for(const auto& [function,multiplicity]:where)out.powers_[function].emplace_back(out.factors_.size(),multiplicity);
+      auto& factor=out.factors_.emplace_back();factor.where=where;
+      for(const auto& term:terms){factor.powers.push_back(term.power);factor.residues.emplace_back(term.residue);}}
+    out.lift();return out;
+  }
+  // The same denominators at a further prime. False if their factors do not
+  // occur as those of the first prime do, or have other terms.
+  bool absorb(const std::vector<Image>& images,Word p,const std::function<void()>& checkpoint={}) {
+    if(fmpz_fdiv_ui(modulus_.value,p)==0)return false;
+    const auto next=products(images,variables_,p,checkpoint);if(!next||next->size()!=factors_.size())return false;
+    for(const auto& factor:factors_){const auto it=next->find(factor.where);if(it==next->end()||it->second.size()!=factor.powers.size())return false;
+      for(std::size_t t=0;t<factor.powers.size();++t)if(it->second[t].power!=factor.powers[t])return false;}
+    for(auto& factor:factors_){const auto& terms=next->at(factor.where);
+      for(std::size_t t=0;t<terms.size();++t)fmpz_CRT_ui(factor.residues[t].value,factor.residues[t].value,modulus_.value,terms[t].residue,p,0);}
+    fmpz_mul_ui(modulus_.value,modulus_.value,p);++primes_;lift();return true;
+  }
+  // Whether every coefficient of every factor is a rational number with
+  // numerator and denominator nine bits below the square root of half the
+  // modulus: of all residues one in 2^18 is such a number by chance.
+  bool lifted()const{return lifted_;}
+  std::size_t factors()const{return factors_.size();}
+  unsigned primes()const{return primes_;}
+  // The denominators at prime p, each with the coefficients of its ansatz in
+  // order and one at the pivot. Nothing if a factor has a pole modulo p, or
+  // if the product does not have exactly the terms of the ansatz.
+  class At {
+   public:
+    At(const DenominatorFactors& factors,Word p):owner_(factors),context_(factors.variables_,p),product_(context_),power_(context_){
+      if(!factors.lifted_){valid_=false;return;}
+      nmod_t mod;nmod_init(&mod,p);std::vector<ulong> exponent(factors.variables_);
+      for(const auto& source:factors.factors_){auto& factor=factors_.emplace_back(context_);
+        for(std::size_t t=0;t<source.powers.size();++t){const auto d=fmpz_fdiv_ui(source.denominators[t].value,p);if(!d){valid_=false;return;}
+          for(std::size_t v=0;v<exponent.size();++v)exponent[v]=source.powers[t][v];
+          if(const auto c=nmod_mul(fmpz_fdiv_ui(source.numerators[t].value,p),nmod_inv(d,mod),mod))nmod_mpoly_push_term_ui_ui(factor.value,c,exponent.data(),context_.value);}
+        nmod_mpoly_sort_terms(factor.value,context_.value);nmod_mpoly_combine_like_terms(factor.value,context_.value);}
+    }
+    std::optional<std::vector<Word>> denominator(std::size_t index,const Ansatz& ansatz) {
+      if(!valid_)return std::nullopt;
+      nmod_mpoly_one(product_.value,context_.value);
+      for(const auto& [factor,multiplicity]:owner_.powers_.at(index)){
+        if(!nmod_mpoly_pow_ui(power_.value,factors_[factor].value,multiplicity,context_.value))return std::nullopt;
+        nmod_mpoly_mul(product_.value,product_.value,power_.value,context_.value);}
+      if(static_cast<std::size_t>(nmod_mpoly_length(product_.value,context_.value))!=ansatz.denominator.size())return std::nullopt;
+      std::vector<Word> out;std::vector<ulong> exponent(owner_.variables_);
+      for(const auto& term:ansatz.denominator){for(std::size_t v=0;v<exponent.size();++v)exponent[v]=term.at(v);
+        out.push_back(nmod_mpoly_get_coeff_ui_ui(product_.value,exponent.data(),context_.value));if(!out.back())return std::nullopt;}
+      nmod_t mod;nmod_init(&mod,context_.value->mod.n);const auto scale=nmod_inv(out.at(ansatz.pivot),mod);
+      for(auto& c:out)c=nmod_mul(c,scale,mod);
+      return out;
+    }
+   private:
+    const DenominatorFactors& owner_;Context context_;std::vector<Polynomial> factors_;Polynomial product_,power_;bool valid_=true;
+  };
+ private:
+  void lift() {
+    Integer limit;fmpz_fdiv_q_2exp(limit.value,modulus_.value,1);fmpz_sqrt(limit.value,limit.value);fmpz_fdiv_q_2exp(limit.value,limit.value,9);
+    fmpq_t q;fmpq_init(q);lifted_=!fmpz_is_zero(limit.value);
+    for(auto& factor:factors_){factor.numerators.assign(factor.powers.size(),Integer());factor.denominators.assign(factor.powers.size(),Integer());
+      for(std::size_t t=0;t<factor.powers.size()&&lifted_;++t){
+        lifted_=fmpq_reconstruct_fmpz_2(q,factor.residues[t].value,modulus_.value,limit.value,limit.value);
+        fmpz_set(factor.numerators[t].value,fmpq_numref(q));fmpz_set(factor.denominators[t].value,fmpq_denref(q));}
+      if(!lifted_)break;}
+    fmpq_clear(q);
+  }
+  // A factor: its terms, the residues of their coefficients modulo modulus_
+  // (monic) and, once lifted, the rational coefficients.
+  struct Factor {Occurrence where;std::vector<Power> powers;std::vector<Integer> residues,numerators,denominators;};
+  std::size_t variables_=0;unsigned primes_=0;bool lifted_=false;Integer modulus_;
+  std::vector<Factor> factors_;
+  std::vector<std::vector<std::pair<std::size_t,std::uint32_t>>> powers_;    // of each denominator: (factor, multiplicity)
+};
+// The fit of a function whose denominator is known at this prime
+// (`denominator`: the coefficients of the ansatz' denominator, one at the
+// pivot): the numerator alone is unknown. With more rows than numerator
+// terms the system is overdetermined, so a denominator that is not the
+// function's leaves no solution.
+inline std::optional<Image> fit_numerator(Samples samples,std::size_t coefficient,const Ansatz& ansatz,const std::vector<Word>& denominator,Word p) {
+  const auto n=ansatz.numerator.size(),columns=n+1;
+  if(denominator.size()!=ansatz.denominator.size()||samples.size()<columns+1)return std::nullopt;
+  nmod_mat_t matrix,kernel;nmod_mat_init(matrix,samples.size(),columns,p);nmod_mat_init(kernel,columns,columns,p);
+  std::vector<unsigned> degree;
+  for(const auto* terms:{&ansatz.numerator,&ansatz.denominator})for(const auto& term:*terms){
+    if(term.size()>degree.size())degree.resize(term.size());for(std::size_t v=0;v<term.size();++v)degree[v]=std::max(degree[v],term[v]);}
+  std::vector<std::vector<Word>> powers(degree.size());for(std::size_t v=0;v<degree.size();++v)powers[v].resize(degree[v]+1);
+  const auto monomial=[&](const Power& term){Word value=1;for(std::size_t v=0;v<term.size();++v)if(term[v])value=nmod_mul(value,powers[v][term[v]],matrix->mod);return value;};
+  for(std::size_t i=0;i<samples.size();++i) {
+    for(std::size_t v=0;v<degree.size();++v){const Word x=samples[i].point.at(v)%p;powers[v][0]=1;for(unsigned e=1;e<=degree[v];++e)powers[v][e]=nmod_mul(powers[v][e-1],x,matrix->mod);}
+    for(std::size_t j=0;j<n;++j)nmod_mat_entry(matrix,i,j)=monomial(ansatz.numerator[j]);
+    Word value=0;for(std::size_t j=0;j<denominator.size();++j)value=nmod_add(value,nmod_mul(denominator[j],monomial(ansatz.denominator[j]),matrix->mod),matrix->mod);
+    nmod_mat_entry(matrix,i,n)=nmod_neg(nmod_mul(samples[i].coefficients.at(coefficient)%p,value,matrix->mod),matrix->mod);
+  }
+  const slong rank=nmod_mat_nullspace(kernel,matrix);nmod_mat_clear(matrix);
+  if(rank!=1||!nmod_mat_entry(kernel,n,0)){nmod_mat_clear(kernel);return std::nullopt;}
+  const auto scale=nmod_inv(nmod_mat_entry(kernel,n,0),kernel->mod);
+  Image result{ansatz,{}};
+  for(std::size_t j=0;j<n;++j)result.coefficients.push_back(nmod_mul(nmod_mat_entry(kernel,j,0),scale,kernel->mod));
+  result.coefficients.insert(result.coefficients.end(),denominator.begin(),denominator.end());
+  nmod_mat_clear(kernel);return result;
 }
 struct Lift {
   Ansatz ansatz;std::vector<Integer> residues;Integer modulus;

@@ -22,6 +22,8 @@ Families that do not work yet are listed [at the end](#not-yet-working).
 | --- | --- |
 | `families/<name>.json` | `DiffExp.FeynmanFamily/v1` input: propagators, kinematics, dimension, requested integrals |
 | `families/<name>.meta.json` | source paper, the paper's propagators and labels, mapping notes, kinematic point, published reference values and the conversion used to compare with them |
+| `families/physical/<name>.json` | the paper's physical point of a family shipped at a Euclidean point, set up to be reached from that Euclidean point (`continuation`); see [below](#physical-points-by-continuation) |
+| `tools/add_continuation.py` | adds such a `continuation` object to a physical-point family |
 | `results/<name>.json` | DiffExp response and wall time of the run in the table |
 | `run_families.py` | runs all (or selected) families with a per-family time limit |
 | `make_table.py` | rebuilds the table below from `results/` |
@@ -107,25 +109,65 @@ Notes:
   pySecDec). Here DiffExp derives everything, including the boundary values,
   from the propagators.
 
+## Physical points by continuation
+
+DiffExp 2.2 can now reach a physical point P from a Euclidean one. A family's
+`continuation` object gives a Euclidean direction V; DiffExp starts at
+E = P + tV, where every F coefficient is positive, and transports the masters
+along 0 → ih → 1 + ih → 1 in the upper half plane of the line E + x(P − E).
+Along that line every F coefficient decreases, so the endpoint is the `F − i0`
+value without choosing any i0 side. The IBP Solver now provides the derivative
+in a kinematic direction (varying external Gram), and the boundary at E is a
+separate ordinary run. See `docs/feynman-families.md`, "Continuation from a
+Euclidean point".
+
+Checks:
+
+- These continuations agree to every printed digit with DiffExp's derived i0
+  sides (`tests/causal.cmake`): the bubble above threshold, the massless box
+  at a physical point, and the sunrise above threshold.
+- The sunrise above threshold is also derived directly now, through a new
+  statement on the Symanzik F ("dF/dx + c F has one sign").
+
+`families/physical/` holds the paper points of five shipped Euclidean families
+with a continuation set up: `radreturn_pl1`, `radreturn_pl2`,
+`ttj_pentabox_B`, `ttgamma_PBE` and `ttgamma_PBF`.
+
+- Their directions keep the physical masses fixed, together with on-shell
+  p² = m². Otherwise the line crosses m² = 0 next to P.
+- For `radreturn_pl1` with m² ≈ 2.6·10⁻⁷, that crossing was 2.6·10⁻⁸ from P
+  and the transport could not reach the point.
+- They have not been run to completion yet. The boundary at E alone takes the
+  85 masters of `radreturn_pl1` about 20 minutes through ε⁴ on a 10-core Mac,
+  and the larger families need hours of IBP reduction per line.
+
+Run one with:
+
+```sh
+build/diffexp ft examples/literature-2026/families/physical/radreturn_pl1.json --json
+```
+
 ## Not yet working
 
 These are kept out of this directory for now. Each line gives the paper, the
 family, and DiffExp 2.2.1's stopping reason.
 
-**Physical-point variants of shipped Euclidean families.** The i0 side of a real
+**Physical-point variants of shipped Euclidean families** (derived i0 sides;
+the first five now have a continuation set-up in `families/physical/`, not yet
+run to completion). The i0 side of a real
 singular point on a multi-loop level cannot be derived from the level's
 Symanzik F. `causal_explore.py` tried both sides of every such point; no
 combination completed.
 
 | Family (paper point) | Paper | Stopping reason |
 | --- | --- | --- |
-| `diphoton_heavyloop_pla_x1`, `_npa_x1`, `_npa_euclid` | [2606.30354](https://arxiv.org/abs/2606.30354) | with either side: "unsupported residue spectrum: eigenvalue is nonlinear in epsilon" |
+| `diphoton_heavyloop_pla_x1`, `_npa_x1`, `_npa_euclid` | [2606.30354](https://arxiv.org/abs/2606.30354) | with either side: "unsupported residue spectrum: eigenvalue is nonlinear in epsilon". Massless 2→2 (s + t + u = 0): no Euclidean region, so no continuation |
 | `ttgamma_PBE` | [2610.42062](https://arxiv.org/abs/2610.42062) | with either side at level 1: 3 h timeout |
 | `ttgamma_PBF` | [2610.42062](https://arxiv.org/abs/2610.42062) | each choice reveals a further underivable point on level 1 (x = 0.9668, 0.9907, 0.9969, …) |
 | `radreturn_pl1` | [2607.03343](https://arxiv.org/abs/2607.03343) | with either side at level 2: 3 h timeout |
 | `radreturn_pl2` | [2607.03343](https://arxiv.org/abs/2607.03343) | point at x = 3.4e-12 (from m² ≈ 2.6e-7); with either side: "artifact payload exceeds store size limit" |
 | `ttj_pentabox_B` | [2603.05336](https://arxiv.org/abs/2603.05336), [2404.12325](https://arxiv.org/abs/2404.12325) | with either side at level 3: "artifact payload exceeds store size limit" |
-| `np_double_box_massless` | [2607.18406](https://arxiv.org/abs/2607.18406) | asks for the side of x = 1/4 on level 1, then rejects it: "level 1 has no real singular point at x = 1/4" |
+| `np_double_box_massless` | [2607.18406](https://arxiv.org/abs/2607.18406) | level 1 at x = 1/4 is fixed; it now stops at a later level whose side is still undecided. Massless 2→2 nonplanar: no Euclidean region, so no continuation either |
 
 **Families that do not complete at any point tried.**
 

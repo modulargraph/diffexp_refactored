@@ -1,0 +1,208 @@
+{
+ "schema": "DiffExp.FeynmanFamily/v1",
+ "name": "radreturn_pl2",
+ "loops": 2,
+ "external_gram": [
+  [
+   "27238/104312222829",
+   "834497755394/104312222829",
+   "-4128453903924656717234225174/531275401982014609097131785"
+  ],
+  [
+   "834497755394/104312222829",
+   "27238/104312222829",
+   "-73930097825650775/28435746854311210908"
+  ],
+  [
+   "-4128453903924656717234225174/531275401982014609097131785",
+   "-73930097825650775/28435746854311210908",
+   "0"
+  ]
+ ],
+ "propagators": [
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "-1",
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "1"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "-1",
+    "0",
+    "0"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "1"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "1",
+    "1"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "-1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "1",
+    "1"
+   ],
+   "mass_squared": "27238/104312222829"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  }
+ ],
+ "physical_count": 7,
+ "dimension_at_epsilon_zero": 4,
+ "integrals": [
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   -1,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0,
+   -1
+  ]
+ ],
+ "epsilon_order": 0,
+ "numerical": {
+  "ordinary_order": 80,
+  "working_bits": 384,
+  "leaf_digits": 16,
+  "method": "adjoint"
+ },
+ "continuation": {
+  "euclidean_direction": {
+   "external_gram": [
+    [
+     "27238/104312222829",
+     "-5/2",
+     "-1"
+    ],
+    [
+     "-5/2",
+     "27238/104312222829",
+     "-3/2"
+    ],
+    [
+     "-1",
+     "-3/2",
+     "0"
+    ]
+   ],
+   "mass_squared": [
+    "0",
+    "27238/104312222829",
+    "27238/104312222829",
+    "27238/104312222829",
+    "0",
+    "27238/104312222829",
+    "27238/104312222829",
+    "27238/104312222829",
+    "0"
+   ]
+  }
+ }
+}

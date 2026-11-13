@@ -21,6 +21,8 @@
 #include "diffexp/epsilon_gauge.hpp"
 #include "diffexp/laurent_transport.hpp"
 #include "diffexp/level_preparation.hpp"
+#include "diffexp/geometry.hpp"
+#include <set>
 #include <boost/json.hpp>
 #include <map>
 #include <regex>
@@ -162,7 +164,7 @@ inline LaurentBoundary read_rows(const boost::json::object& response,slong bits)
 // returns the target rows at the endpoint through epsilon^top.
 inline LaurentBoundary transport_to_target(const ExactEpsilonMatrix& gauged,const std::vector<std::int64_t>& shifts,
     const LaurentBoundary& start,const std::vector<std::vector<Exact>>& targets,int top,const Rational& height,
-    unsigned taylor_order,slong bits) {
+    unsigned taylor_order,slong bits,std::ostream* progress=nullptr) {
   using B=kernel::ComplexBall;
   const auto n=gauged.size();
   LaurentBoundary result{0,{}};
@@ -182,7 +184,41 @@ inline LaurentBoundary transport_to_target(const ExactEpsilonMatrix& gauged,cons
   }
   const auto& sample=gauged[0][0];const auto h=height.str();
   std::vector<Exact> vertices{sample.constant(0),sample.parse("("+h+")*I"),sample.parse("1+("+h+")*I"),sample.constant(1)};
-  auto end=transport_laurent(gauged,std::move(z),vertices,taylor_order);
+  // The singular points of the line next to its two ends. The path leaves
+  // and reaches the real axis there; a point at an end is refused.
+  {
+    std::set<std::string> seen;std::vector<B> roots;
+    std::vector<Exact> at_zero_epsilon{sample.variable(0),sample.constant(0),sample.variable(2)};
+    for(const auto& row:gauged)for(const auto& entry:row) {
+      if(entry.is_zero())continue;
+      auto denominator=entry.denominator().substitute(at_zero_epsilon);
+      if(denominator.is_rational() || !seen.insert(denominator.str()).second)continue;
+      for(auto& root:polynomial_roots(denominator,0,bits))roots.push_back(std::move(root));
+    }
+    double nearest[2]={1e300,1e300};std::size_t inside=0;
+    for(const auto& root:roots) {
+      for(int end=0;end<2;++end) {
+        B d;acb_sub_si(d.raw(),root.raw(),end,bits);
+        if(acb_contains_zero(d.raw()))throw std::domain_error(std::string("continuation: the ")+(end?"requested point":"Euclidean start")+
+          " is a singular point of the line's differential equation; choose another euclidean_direction or scale");
+        arb_t a;arb_init(a);acb_abs(a,d.raw(),bits);nearest[end]=std::min(nearest[end],arf_get_d(arb_midref(a),ARF_RND_NEAR));arb_clear(a);
+      }
+      if(arb_contains_zero(acb_imagref(root.raw())) && arb_is_positive(acb_realref(root.raw())) && arf_cmp_si(arb_midref(acb_realref(root.raw())),1)<0)++inside;
+    }
+    if(progress)*progress<<"Continuation line: "<<roots.size()<<" singular points, "<<inside<<" of them real in (0,1); nearest to the start at distance "
+      <<nearest[0]<<", to the requested point at "<<nearest[1]<<".\n"<<std::flush;
+  }
+  LaurentBoundary end{0,{}};
+  for(slong precision=bits;;precision*=2) {
+    try {
+      kernel::ComplexBall::set_precision(precision);
+      end=transport_laurent(gauged,z,vertices,taylor_order);
+      break;
+    } catch(const std::domain_error& error) {
+      if(precision>=8192)throw;
+      if(progress)*progress<<"Continuation: transport at "<<precision<<" bits failed ("<<error.what()<<"); repeating at "<<2*precision<<" bits.\n"<<std::flush;
+    }
+  }
   // Laurent coefficients of the target rows.
   std::int64_t vmin=0;
   struct Series {std::int64_t low;std::vector<B> values;};

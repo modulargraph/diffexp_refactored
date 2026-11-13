@@ -390,7 +390,16 @@ int main(int argc, char** argv) {
           if(std::find(arguments.begin(),arguments.end(),"--json")==arguments.end())arguments.push_back("--json");
           progress<<"Continuation: the "<<n<<" masters at the Euclidean start through epsilon^"<<boundary_order<<" ("<<start_path.string()<<").\n"<<std::flush;
           const auto began=std::chrono::steady_clock::now();
-          const auto output=diffexp::continuation::run_capture(arguments);
+          // The same start file and options give the same masters: a repeated
+          // run (after a failed transport, say) reads them back.
+          std::string key=boost::json::serialize(document);for(std::size_t i=3;i<arguments.size();++i)key+="\n"+arguments[i];
+          const auto saved=cache/"continuation"/(plan.start.name+".response-"+std::to_string(std::hash<std::string>{}(key))+".json");
+          std::string output;
+          if(std::filesystem::exists(saved)){std::ifstream in(saved);std::stringstream s;s<<in.rdbuf();output=s.str();progress<<"Continuation: masters at the start read from "<<saved.string()<<".\n";}
+          else {
+            output=diffexp::continuation::run_capture(arguments);
+            try{if(boost::json::parse(output).as_object().at("status")=="completed"){std::ofstream out(saved);out<<output;}}catch(const std::exception&){}
+          }
           boundary_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
           auto response=boost::json::parse(output).as_object();
           if(response.at("status")!="completed")
@@ -403,7 +412,7 @@ int main(int argc, char** argv) {
         const auto transport_began=std::chrono::steady_clock::now();
         diffexp::kernel::ComplexBall::set_precision(numerical.working_bits);
         auto result=diffexp::continuation::transport_to_target(gauged,shifts,initial,targets,static_cast<int>(epsilon_order),
-          stated.height,numerical.ordinary_order,numerical.working_bits);
+          stated.height,numerical.ordinary_order,numerical.working_bits,&progress);
         const auto transport_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-transport_began).count();
         const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count();
         progress<<"Continuation: transported along the upper half plane in "<<transport_seconds<<" s; total "<<total<<" s.\n"<<std::flush;

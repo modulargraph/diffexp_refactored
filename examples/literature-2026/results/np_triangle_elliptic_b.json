@@ -1,0 +1,255 @@
+{
+ "family": "np_triangle_elliptic_b",
+ "command": [
+  "diffexp",
+  "ft",
+  "families/np_triangle_elliptic_b.json",
+  "--ibp-provider",
+  "ibp-solver",
+  "--ibp-threads",
+  "8",
+  "--cache",
+  "$DIFFEXP_CACHE",
+  "--fire-seconds",
+  "1800",
+  "--level-seconds",
+  "5400",
+  "--total-seconds",
+  "9000",
+  "--json"
+ ],
+ "threads": 8,
+ "exit_code": 0,
+ "wall_seconds": 19.201,
+ "response": {
+  "schema": "DiffExp.FeynmanTrick/v1",
+  "family": "np_triangle_elliptic_b",
+  "status": "completed",
+  "levels": 5,
+  "systems_built": 6,
+  "systems_reused": 0,
+  "ibp_provider": "ibp-solver",
+  "ladder": [
+   {
+    "level": 1,
+    "masters": 22,
+    "boundary": "upper",
+    "x": "1"
+   },
+   {
+    "level": 2,
+    "masters": 9,
+    "boundary": "anchor",
+    "x": "1/3"
+   },
+   {
+    "level": 3,
+    "masters": 5,
+    "boundary": "anchor",
+    "x": "1/3"
+   },
+   {
+    "level": 4,
+    "masters": 2,
+    "boundary": "anchor",
+    "x": "1/3"
+   }
+  ],
+  "ibp_cache": {
+   "systems_reused": 0,
+   "systems_built": 6,
+   "provider_options_ignored": false,
+   "note": "all level closures were built with the reported IBP provider and seeds"
+  },
+  "timings": {
+   "preparation_seconds": 6.607401803,
+   "numerical_seconds": 10.932475831,
+   "ordinary_seconds": 6.09815651,
+   "endpoint_series_seconds": 1.32191933,
+   "endpoint_operator_seconds": 1.291568697,
+   "endpoint_gauge_seconds": 0.048040871000000006,
+   "endpoint_frame_seconds": 0.414088038,
+   "endpoint_observable_seconds": 0.7816801560000001,
+   "basis_selection_seconds": 0.563048988,
+   "leaf_seconds": 0.064433824,
+   "total_seconds": 19.175466657
+  },
+  "finite_masters": {
+   "mode": "on",
+   "levels": [
+    {
+     "level": 1,
+     "masters": 22,
+     "failing_before": 19,
+     "failing_after": 19,
+     "candidates": 13,
+     "reductions": 2,
+     "reduction_seconds": 3.6965288329999995,
+     "characters_before": 50117,
+     "characters_after": 50117,
+     "steps": [],
+     "note": "kept: 5 masters have no finite replacement that leaves the connection without new poles",
+     "seconds": 3.728860542
+    }
+   ],
+   "euclidean_family": true,
+   "withdrawn": false,
+   "seconds": 3.729821444
+  },
+  "moving_poles": {
+   "mode": "remove",
+   "levels": [
+    {
+     "level": 1,
+     "mixed_factors": 2,
+     "mixed_order_before": 2,
+     "mixed_order_after": 0,
+     "characters_before": 50117,
+     "characters_after": 23229,
+     "steps": [
+      {
+       "factor": "24*x*eps-x-20*eps",
+       "replaced_master": 12,
+       "by": "integral [1,2,1,0,1,0,0]"
+      },
+      {
+       "factor": "19*x*eps+eps-1",
+       "replaced_master": 17,
+       "by": "integral [1,2,1,1,0,0,0]"
+      }
+     ],
+     "left_in_place": [],
+     "kept_for_size": 0,
+     "budget_reached": false,
+     "seconds": 1.392031298
+    },
+    {
+     "level": 2,
+     "mixed_factors": 1,
+     "mixed_order_before": 1,
+     "mixed_order_after": 0,
+     "characters_before": 6098,
+     "characters_after": 3556,
+     "steps": [
+      {
+       "factor": "3*x^2*eps-2*x^2+13*x*eps+4*x+4*eps-2",
+       "replaced_master": 3,
+       "by": "integral [2,1,0,1,0,0,0]"
+      }
+     ],
+     "left_in_place": [],
+     "kept_for_size": 0,
+     "budget_reached": false,
+     "seconds": 0.145990382
+    }
+   ],
+   "seconds": 1.538749102
+  },
+  "precision": {
+   "raises": [],
+   "radius_over_tail_bits": 0,
+   "stated": false
+  },
+  "epsilon_low": -4,
+  "epsilon_high": 0,
+  "coefficient_order": "component,epsilon",
+  "coefficients": [
+   [
+    {
+     "real": "[+/- 1.34e-27]",
+     "imaginary": "[+/- 1.35e-27]"
+    },
+    {
+     "real": "[+/- 2.08e-27]",
+     "imaginary": "[+/- 2.10e-27]"
+    },
+    {
+     "real": "[+/- 1.74e-26]",
+     "imaginary": "[+/- 1.62e-26]"
+    },
+    {
+     "real": "[+/- 2.66e-25]",
+     "imaginary": "[+/- 2.36e-25]"
+    },
+    {
+     "real": "[0.20628851371881591039424 +/- 8.87e-24]",
+     "imaginary": "[+/- 7.43e-24]"
+    }
+   ],
+   [
+    {
+     "real": "[+/- 4.34e-27]",
+     "imaginary": "[+/- 4.34e-27]"
+    },
+    {
+     "real": "[+/- 5.16e-27]",
+     "imaginary": "[+/- 5.09e-27]"
+    },
+    {
+     "real": "[+/- 1.93e-26]",
+     "imaginary": "[+/- 1.93e-26]"
+    },
+    {
+     "real": "[+/- 2.35e-25]",
+     "imaginary": "[+/- 2.29e-25]"
+    },
+    {
+     "real": "[0.66976329032795300239501 +/- 8.42e-24]",
+     "imaginary": "[+/- 6.85e-24]"
+    }
+   ],
+   [
+    {
+     "real": "[+/- 6.64e-27]",
+     "imaginary": "[+/- 6.64e-27]"
+    },
+    {
+     "real": "[+/- 7.37e-27]",
+     "imaginary": "[+/- 7.37e-27]"
+    },
+    {
+     "real": "[+/- 2.13e-26]",
+     "imaginary": "[+/- 2.13e-26]"
+    },
+    {
+     "real": "[+/- 2.51e-25]",
+     "imaginary": "[+/- 2.31e-25]"
+    },
+    {
+     "real": "[1.02520066359843992157409 +/- 8.00e-24]",
+     "imaginary": "[+/- 6.89e-24]"
+    }
+   ]
+  ],
+  "component_basis": "requested_scalar",
+  "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+  "omitted_tails_certified": false,
+  "working_bits": 384,
+  "persistent_numerical_cache": true,
+  "causal": {
+   "mode": "euclidean",
+   "f_rim": -1
+  },
+  "ft_transport": {
+   "method": "taylor",
+   "direct_endpoints": 0,
+   "uncertainty": "probe",
+   "accumulation": "weighted",
+   "weighted_levels": 4,
+   "cleared_epsilon_orders": 7
+  },
+  "basis_selection": {
+   "scans": 4,
+   "selections": 4,
+   "cache_hits": 0,
+   "endpoint_series_built": 15,
+   "endpoint_series_refinements": 7,
+   "child_window_preflights": 8,
+   "child_refinements": 0,
+   "structural_zero_coefficients": 0,
+   "operator_exact_zeros": 0,
+   "structural_zero_conflicts": 0
+  }
+ },
+ "status": "completed"
+}

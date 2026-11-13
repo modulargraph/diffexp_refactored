@@ -1,0 +1,214 @@
+{
+ "schema": "DiffExp.FeynmanFamily/v1",
+ "name": "ttj_pentabox_B_euclid",
+ "description": "Two-loop pentagon-box PB_B for pp->ttbar+jet (leading colour, two massive lines, elliptic subsector), arXiv:2404.12325, used in 2603.05336; Euclidean fallback point (no reference values)",
+ "loops": 2,
+ "external_gram": [
+  [
+   "1",
+   "-2",
+   "1",
+   "1"
+  ],
+  [
+   "-2",
+   "1",
+   "-1",
+   "1"
+  ],
+  [
+   "1",
+   "-1",
+   "0",
+   "-1"
+  ],
+  [
+   "1",
+   "1",
+   "-1",
+   "0"
+  ]
+ ],
+ "propagators": [
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "-1",
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "-1",
+    "-1",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "-1",
+    "-1",
+    "-1"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "-1",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "1",
+    "1",
+    "1"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "1",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "1",
+    "0",
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "1",
+    "1",
+    "0"
+   ],
+   "mass_squared": "1"
+  }
+ ],
+ "physical_count": 8,
+ "dimension_at_epsilon_zero": 4,
+ "integrals": [
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   -1,
+   0,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0,
+   0,
+   0
+  ]
+ ],
+ "epsilon_order": 0,
+ "numerical": {
+  "ordinary_order": 80,
+  "working_bits": 384,
+  "leaf_digits": 16,
+  "method": "adjoint"
+ }
+}

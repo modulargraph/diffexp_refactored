@@ -1,0 +1,112 @@
+{
+ "schema": "DiffExp.FeynmanFamily/v1",
+ "name": "pentagon_hp_p1",
+ "description": "One-loop massive pentagon P1 of arXiv:2610.41872 Table 3/7 (hp-quadrature in cLTD), d=4, exact rationalization of printed 4-momenta",
+ "loops": 1,
+ "external_gram": [
+  [
+   "-19786675716249/10000000000",
+   "15237508831129/10000000000",
+   "-1329271543161/1000000000",
+   "293605994137/500000000"
+  ],
+  [
+   "15237508831129/10000000000",
+   "-29035976934509/10000000000",
+   "-750862522739/1000000000",
+   "-290229522563/125000000"
+  ],
+  [
+   "-1329271543161/1000000000",
+   "-750862522739/1000000000",
+   "-1238102691479/400000000",
+   "116323429649/200000000"
+  ],
+  [
+   "293605994137/500000000",
+   "-290229522563/125000000",
+   "116323429649/200000000",
+   "-41137012143/12500000"
+  ]
+ ],
+ "propagators": [
+  {
+   "loop_coefficients": [
+    "1"
+   ],
+   "external_coefficients": [
+    "1",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "251214471369/10000000000"
+  },
+  {
+   "loop_coefficients": [
+    "1"
+   ],
+   "external_coefficients": [
+    "1",
+    "1",
+    "0",
+    "0"
+   ],
+   "mass_squared": "251214471369/10000000000"
+  },
+  {
+   "loop_coefficients": [
+    "1"
+   ],
+   "external_coefficients": [
+    "1",
+    "1",
+    "1",
+    "0"
+   ],
+   "mass_squared": "251214471369/10000000000"
+  },
+  {
+   "loop_coefficients": [
+    "1"
+   ],
+   "external_coefficients": [
+    "1",
+    "1",
+    "1",
+    "1"
+   ],
+   "mass_squared": "251214471369/10000000000"
+  },
+  {
+   "loop_coefficients": [
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0",
+    "0",
+    "0"
+   ],
+   "mass_squared": "251214471369/10000000000"
+  }
+ ],
+ "physical_count": 5,
+ "dimension_at_epsilon_zero": 4,
+ "integrals": [
+  [
+   1,
+   1,
+   1,
+   1,
+   1
+  ]
+ ],
+ "epsilon_order": 0,
+ "numerical": {
+  "ordinary_order": 80,
+  "working_bits": 384,
+  "leaf_digits": 16,
+  "method": "adjoint"
+ }
+}

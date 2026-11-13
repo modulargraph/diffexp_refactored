@@ -1,0 +1,35 @@
+{
+ "arxiv": "2609.08875",
+ "title": "How to choose a good rational basis for elliptic Feynman integrals?",
+ "family_label_in_paper": "SR (two-mass sunrise), eq.(55), Example 1/2",
+ "description": "2-loop sunrise with masses m,M,m in d=2-2eps; elliptic. (Families D and TT of the paper are not usable: their propagators are only shown as graphs/in references, ancillary files contain bases and DEs but no propagator definitions.)",
+ "propagators_as_in_paper": "rho_SR={l1^2-m^2, l2^2-M^2, (l1-l2-p)^2-m^2, l1.p, l2.p}; paper sets p^2=1",
+ "mapping_notes": "Linear ISPs l1.p, l2.p replaced by quadratic aux lines (l1-p)^2 and (l2-p)^2. Conversion: l2.p=(D2+M^2+p^2-N5)/2 with N5=(l2-p)^2, so paper G^{1,1,1,0,-1} = 1/2[ G^{1,0,1,0,0} + (M^2+p^2) G^{1,1,1,0,0} - I_ours(1,1,1,0,-1) ]. Measure in paper: int prod d^d l (no normalization stated).",
+ "reference_combination": "G_SR^{1,1,1,0,-1} = 1/2*( I[1,0,1,0,0] + (M^2+p^2)*I[1,1,1,0,0] - I[1,1,1,0,-1] ) with M^2=2, p^2=-1",
+ "point": {
+  "p^2": -1,
+  "m^2": 1,
+  "M^2": 2,
+  "note": "Euclidean point chosen by me (paper normalises p^2=1, generic m,M)."
+ },
+ "integrals_meaning": [
+  "G^{1,1,1,0,0}",
+  "aux numerator (l2-p)^2 (for G^{1,1,1,0,-1} via combination)",
+  "G^{1,0,1,0,0} (tadpole product for the combination)"
+ ],
+ "reference_values": null,
+ "reference_notes": "Paper gives only symbolic eps-expansions (eq.64-65), no numbers.",
+ "confidence": "high for definition; low value as a benchmark (2-loop sunrise).",
+ "validation": {
+  "n_props": 5,
+  "n_sp": 5,
+  "rank": 5,
+  "complete": true,
+  "independent": true,
+  "F_negative_samples": 0,
+  "U_nonpos": 0,
+  "samples": 1500,
+  "gram_rank": 1
+ },
+ "point_kind": "Euclidean (chosen here)"
+}

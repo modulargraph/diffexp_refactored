@@ -1,0 +1,82 @@
+{
+ "arxiv": "2610.41872",
+ "title": "Numerical evaluation of one-loop integrals using quadrature rules",
+ "family_label_in_paper": "pentagon configuration P1",
+ "description": "finite one-loop scalar pentagon with off-shell spacelike legs and massive lines, 'Euclidean' kinematics",
+ "propagators_as_in_paper": [
+  "(k+p1)^2-m1^2",
+  "(k+p1+p2)^2-m2^2",
+  "(k+p1+p2+p3)^2-m3^2",
+  "(k+p1+p2+p3+p4)^2-m4^2",
+  "k^2-m5^2"
+ ],
+ "mapping_notes": "Routing from the authors' code src/problems/pentagon.py (E1..E5). Four-momenta (E,px,py,pz) from Table 3 (identical to src/setups/pentagon.py) rationalized exactly as printed decimals; p5 = -(p1+..+p4). external_gram[i][j] = p_i.p_j with metric (+,-,-,-). mass_squared = (printed m)^2 exactly.",
+ "point": {
+  "momenta": [
+   [
+    "33.7452",
+    "45.7273",
+    "31.1525",
+    "-7.47943"
+   ],
+   [
+    "31.3644",
+    "-41.5073",
+    "46.479",
+    "2.04203"
+   ],
+   [
+    "4.59005",
+    "17.0701",
+    "32.654",
+    "41.9363"
+   ],
+   [
+    "29.5105",
+    "-28.2596",
+    "46.1733",
+    "-35.0892"
+   ]
+  ],
+  "masses": [
+   "5.01213",
+   "5.01213",
+   "5.01213",
+   "5.01213",
+   "5.01213"
+  ]
+ },
+ "integrals_meaning": [
+  "scalar pentagon, all powers 1"
+ ],
+ "reference_combination": "I_paper = i int d^4k/pi^2 prod 1/(q_i^2-m_i^2+i0) = (-1)^{N+1} I_DiffExp = +I_DiffExp for N=5 (eps^0, d=4; integral is finite)",
+ "normalization": "Paper eq.(1): I = i int d^D k / pi^{D/2} N/(D_1...D_N), D_i = q_i^2 - m_i^2 + i eps. Converts to DiffExp with factor (-1)^{N+1}; check: their triangles (N=3) and pentagons are positive, boxes negative, consistent.",
+ "reference_values": {
+  "source": "2610.41872 Table 7 (also reference_solution in src/setups/pentagon.py)",
+  "eps0": {
+   "hp_quadrature": "1.9585377709960803e-11",
+   "LoopTools_quad": "1.9585377709960810e-11",
+   "Vegas": "1.95853(2)e-11"
+  }
+ },
+ "confidence": "high; residual mismatch ~1e-16 relative possible because LoopTools/hp were fed double-precision invariants computed from these decimals",
+ "comparison": [
+  {
+   "quantity": "pentagon (LoopTools quad)",
+   "terms": [
+    {
+     "integral": 0,
+     "coefficient": "1"
+    }
+   ],
+   "reference": {
+    "0": [
+     "1.9585377709960810e-11",
+     "0"
+    ]
+   }
+  }
+ ],
+ "check": "vs paper: pentagon (LoopTools quad) 16 digits (1 orders)",
+ "point_kind": "paper's"
+}

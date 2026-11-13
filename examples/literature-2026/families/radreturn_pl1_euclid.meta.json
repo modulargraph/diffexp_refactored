@@ -1,0 +1,68 @@
+{
+ "arxiv": "2607.03343",
+ "title": "First look at the evaluation of two-loop Feynman integrals for radiative return processes",
+ "family_label_in_paper": "PL1",
+ "description": "2-loop planar 4-point double box with electron mass on 6 lines, off-shell leg q^2; contains the nested-square-root kite sector and 2 elliptic sectors; 68 MIs [Euclidean fallback point]",
+ "propagators_as_in_paper": [
+  "D1=(k1-p1)^2-m^2",
+  "D2=k1^2",
+  "D3=(k1+p2)^2-m^2",
+  "D4=(k2-p1)^2-m^2",
+  "D5=(k2+p2)^2-m^2",
+  "D6=(k2+p23)^2-m^2",
+  "D7=(k1-k2)^2",
+  "D8=(k1+p23)^2-m^2 [aux]",
+  "D9=k2^2 [aux]"
+ ],
+ "mapping_notes": "All p incoming, p1+p2+p3+p4=0. Independent p1,p2,p3: p1^2=p2^2=m2, p3^2=0, p1.p2=(s-2m2)/2, p2.p3=(t-m2)/2, p1.p3=(u-m2)/2 with u=2m2+q2-s-t. D1..D9 order kept (D8,D9 auxiliary). PHYSICAL boundary point x0 eq.(64) (s=16 GeV^2, m_e^2 ~2.6e-7: extreme hierarchy, s-channel above all thresholds); no causal object (derived contour). Euclidean fallback <slug>_euclid.json at m2=1,s=-3,t=-2,u=-1 (q2=-8), all F coefficients positive.",
+ "point": {
+  "external_gram": [
+   [
+    "1",
+    "-5/2",
+    "-1"
+   ],
+   [
+    "-5/2",
+    "1",
+    "-3/2"
+   ],
+   [
+    "-1",
+    "-3/2",
+    "0"
+   ]
+  ],
+  "mass_squared": [
+   "1",
+   "0",
+   "1",
+   "1",
+   "1",
+   "1",
+   "0",
+   "1",
+   "0"
+  ],
+  "note": "Euclidean fallback point (all F coefficients positive). The paper only quotes values at paper_point, a physical point where DiffExp 2.2 cannot yet derive every causal side, so reference_values are not compared here."
+ },
+ "paper_point": {
+  "s": "16",
+  "t": "-708703/136301126",
+  "q2": "67727737/149466910",
+  "m2": "27238/104312222829",
+  "derived": {
+   "u": "-8256907669122719304570926078/531275401982014609097131785"
+  }
+ },
+ "integrals_meaning": {
+  "[1^7,0,0]": "I_111111100",
+  "[1^7,0,-1]": "I_11111110-1",
+  "[1^7,-1,0]": "I_1111111-10"
+ },
+ "reference_combination": "masters.m (PL1): M1=eps^4*s*(s-4m2)*(m2-t)*FFG[1^7,0,0] (root 1); M2=eps^4*(qq-s)*FFG[1^7,0,-1] (root 1); M3=eps^4*s*(s-4m2)*FFG[1^7,-1,0] times r1=Sqrt[s]Sqrt[s-4m2]. Prefactors at x0: M1 987111978845702513915851534400/741548990543986707887027854683, M2 -2323742823/149466910, M3 26703927300992/104312222829 (r1=15.99999947776013767484260600358500464608).",
+ "reference_values": null,
+ "normalization": "Paper eq.(6): FFG = e^{2 eps gamma_E} (m^2)^{2eps - a} prod d^Dk/(i pi^{D/2}) prod 1/D_i^{a_i}, a=sum a_i, D=q^2-m^2 (+i delta). So FFG = e^{2eps gamma_E} (m2)^{2eps-a} (-1)^a J_DiffExp. a=7 for [1^7,0,0], a=6 for the ISP ones. DiffExp FT: denominators D=m^2-q^2 (Euclidean-positive), measure prod d^dk/(i pi^{d/2}), no exp(L eps gamma_E) (see de22/docs/amflow-comparison.md, feynman-families.md). Paper Minkowski integral with (q^2-m^2+i0) denominators = (-1)^{sum nu} * DiffExp value (numerator powers included in sum nu).",
+ "confidence": "high for family; medium for M3 mapping and for physical-point feasibility.",
+ "point_kind": "Euclidean (chosen here)"
+}

@@ -1,0 +1,37 @@
+{
+ "arxiv": "2603.05336 (family PB_B used as benchmark); definitions/values 2404.12325",
+ "title": "Evaluation of Feynman integrals via numerical integration of differential equations / Two-loop integrals for ttbar+jet production",
+ "family_label_in_paper": "PB_B (PBttjB in ancillary), 121 masters; basis element mi[PBttjB,3]",
+ "description": "outgoing p1,p2 tops (p^2=mt2), p3,p4,p5 massless; D1=k1^2-mt2, D2=(k1-p2)^2, D3=(k1-p2-p3)^2, D4=(k1-p2-p3-p4)^2, D5=k2^2-mt2, D6=(k2-p1)^2, D7=(k2-p1-p5)^2, D8=(k1+k2)^2; ISPs D9=(k1+p1)^2-mt2, D10=(k2+p2)^2-mt2, D11=(k2+p2+p3)^2-mt2",
+ "propagators_as_in_paper": [
+  "k1",
+  "k1-p2",
+  "k1-p2-p3",
+  "k1-p2-p3-p4",
+  "k2",
+  "k2-p1",
+  "k2-p1-p5",
+  "k1+k2",
+  "k1+p1",
+  "k2+p2",
+  "k2+p2+p3"
+ ],
+ "mapping_notes": "Order as PBttjB_propagators.m. Independent externals p1..p4, p5=-(p1+..+p4). d13,d14,d24,d25,d35 from momentum conservation. All s_ij<0, mt2=1; checked coefficient positivity of F.",
+ "point": {
+  "d12": "-2",
+  "d23": "-1",
+  "d34": "-1",
+  "d45": "-1",
+  "d15": "-1",
+  "mt2": "1"
+ },
+ "integrals_meaning": [
+  "j[PBttjB,1,1,1,1,1,1,1,1,-1,0,0] (numerator D9)",
+  "j[PBttjB,1,1,1,1,1,1,1,1,0,0,0]"
+ ],
+ "reference_combination": "mi3 = eps^4 d15 d23 d34 ( j[..,-1,0,0] + mt2 j[..,0,0,0] ), norm factor 1. Paper measure e^{eps gammaE} d^dk/(i pi^{d/2}) per loop, D=q^2-m^2 => j_paper[nu] = (-1)^{sum nu} j_DiffExp[nu]: mi3 = eps^4 e^{2 eps gammaE} d15 d23 d34 ( -J_DiffExp[row1] + mt2 J_DiffExp[row2] )",
+ "normalization": "e^{eps gammaE} d^d k/(i pi^{d/2}) per loop; inverse propagators q^2-m^2 (Minkowski, +i0 implicit).",
+ "reference_values": null,
+ "confidence": "high for family and point; physical-region contour is experimental",
+ "point_kind": "Euclidean (chosen here)"
+}

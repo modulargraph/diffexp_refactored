@@ -1,0 +1,36 @@
+{
+ "arxiv": "2606.30354 (family definitions from 2509.15315 App.C, Table 3/4)",
+ "title": "Solution of canonical differential equations for integrals on arbitrary geometries (example: 220 MIs of di-photon/di-jet/gamma+jet via a heavy-quark loop, Coro et al. 2509.15315)",
+ "family_label_in_paper": "PLA top sector [1, 1, 1, 1, 0, 1, 1, 0, 1]",
+ "description": "2-loop 4-point, massless external legs, closed heavy-quark loop (mass m) + massless lines; family involves an elliptic curve (P4(X) in eq.7 of 2606.30354, period varpi0(s,m^2)) and function G(s,t,m^2) beyond iterated dlogs. Planar top sector. [Euclidean fallback point]",
+ "propagators_as_in_paper": "D1=k1^2, D2=k2^2-m^2, D3=(k1-k2)^2-m^2, D4=(k1-p1)^2, D5=(k2-p1)^2, D6=(k1-p1-p2)^2, D7=(k2-p1-p2)^2-m^2, D8=(k1-p1-p2-p3)^2, D9=(k2-p1-p2-p3)^2-m^2",
+ "mapping_notes": "JSON propagator order = paper D[1, 2, 3, 4, 6, 7, 9, 5, 8] (physical first, then aux). Index vectors reordered accordingly; paper index vectors: [[1, 1, 1, 1, 0, 1, 1, 0, 1], [1, 1, 1, 1, -1, 1, 1, 0, 1], [1, 1, 1, 1, 0, 1, 1, -1, 1]]. s=(p1+p2)^2, t=(p1+p3)^2 (NOTE t pairs p1,p3), u=(p2+p3)^2=-s-t; p_i^2=0. Gram: p1.p2=s/2, p1.p3=t/2, p2.p3=u/2.",
+ "point": {
+  "s": "-3",
+  "t": "-2",
+  "u": "5",
+  "m^2": 1,
+  "note": "Euclidean in s,t (u = -s-t > 0 but below the 4m^2 threshold); DiffExp's positivity check decides"
+ },
+ "integrals_meaning": [
+  "paper PLA[1,1,1,1,0,1,1,0,1]",
+  "paper PLA[1,1,1,1,-1,1,1,0,1]",
+  "paper PLA[1,1,1,1,0,1,1,-1,1]"
+ ],
+ "normalization": "AMFlow values (ancillary amfpt*C.m of 2606.30354, generated for 2509.15315): measure prod_l int d^dk_l/(i pi^{d/2}) with NO e^{eps gamma_E} and no Gamma(1+eps) (checked: PLA[0,2,2,0,...] = Gamma(eps)^2 = 1/eps^2 - 1.15443/eps + 2.31129), m^2=mt2=1, d=4-2eps, integrand 1/prod D_i^{n_i} with Minkowski D_i=q^2-m^2 (+i0). DiffExp's propagator is 1/(m^2-q^2), so I_AMF = (-1)^{sum n_i} I_DiffExp (assumed AMFlow sign convention; verify with the tadpole-type check above which is sign-blind). The paper 2509.15315 itself uses mu0^{2eps}/C_eps d^dk/(2pi)^d with C_eps=i(4pi)^eps Gamma(1+eps), but the ancillary AMFlow numbers are NOT in that normalization (tadpole^2 shows plain Gamma(eps)^2).",
+ "reference_values": null,
+ "reference_values_format": "Mathematica strings, (Re`prec + Im`prec*I) + c/eps^2 + ... ; ~50 digits; eps expansion to eps^2 (to eps^3 poles where present).",
+ "confidence": "high for propagators (verbatim tables) and point; medium for sign convention (-1)^{sum n}.",
+ "validation": {
+  "n_props": 9,
+  "n_sp": 9,
+  "rank": 9,
+  "complete": true,
+  "independent": true,
+  "F_negative_samples": 192,
+  "U_nonpos": 0,
+  "samples": 1500,
+  "gram_rank": 3
+ },
+ "point_kind": "s,t < 0 < u (complex; i0 sides derived by DiffExp)"
+}

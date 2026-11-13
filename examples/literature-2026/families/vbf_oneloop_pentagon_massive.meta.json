@@ -1,0 +1,31 @@
+{
+ "arxiv": "2609.37919",
+ "title": "One-loop QCD amplitudes for vector-boson-fusion Higgs-boson production to higher orders in epsilon",
+ "family_label_in_paper": "pentagon family eq.(68)-(69) / integralfamilies.yaml 'pentagon'",
+ "description": "1-loop 5-point pentagon, two adjacent internal lines of mass m (W/Z) flanking massive leg q1^2=s1 (Higgs), other legs massless; 18 MIs, needed to O(eps^2)",
+ "propagators_as_in_paper": [
+  "d1=l^2-m^2",
+  "d2=(l+q1)^2-m^2",
+  "d3=(l+q1+q2)^2",
+  "d4=(l+q1+q2+q3)^2",
+  "d5=(l+q1+q2+q3+q4)^2"
+ ],
+ "mapping_notes": "All q incoming, q5 eliminated; independent q1..q4. q1^2=s1, q2^2=q3^2=q4^2=0, q1.q2=(s12-s1)/2, q2.q3=s23/2, q3.q4=s34/2, q1.q3=(s45-s12-s23)/2, q2.q4=(s15-s23-s34)/2, q1.q4=(s23-s45-s15)/2 (from s45=(q1+q2+q3)^2, s15=(q2+q3+q4)^2, q5^2=0). Euclidean (positive F coefficients) needs s1<2m2, s12,s45,s15<m2, s23<m2, s34<0. epsilon_order left 0 per instructions although the paper targets eps^2.",
+ "point": {
+  "m2": "1",
+  "s1": "1",
+  "s12": "-1",
+  "s23": "-2",
+  "s34": "-3",
+  "s45": "-1",
+  "s15": "-2"
+ },
+ "integrals_meaning": {
+  "[1,1,1,1,1]": "I_11111 (enters canonical I18 with Q0 coefficient)"
+ },
+ "reference_values": null,
+ "normalization": "Paper eq.(68): e^{eps gamma_E} mu0^{2eps} d^dl/(i pi^{d/2}), d=q^2-m^2. DiffExp FT: denominators D=m^2-q^2 (Euclidean-positive), measure prod d^dk/(i pi^{d/2}), no exp(L eps gamma_E) (see de22/docs/amflow-comparison.md, feynman-families.md). Paper Minkowski integral with (q^2-m^2+i0) denominators = (-1)^{sum nu} * DiffExp value (numerator powers included in sum nu).",
+ "confidence": "high for family (text and yaml agree). Paper prints only amplitude values at a physical complex-mass point (App. C) and analytic boundary values of canonical masters at the degenerate point x0'=(m2,s1,s12,s23,s34,s45,s15)=(1,0,0,0,-1,0,0) (eq.85: I18=0 there) - no numeric MI values.",
+ "reference_combination": null,
+ "point_kind": "Euclidean (chosen here)"
+}

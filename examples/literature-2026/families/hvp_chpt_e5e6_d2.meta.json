@@ -1,0 +1,27 @@
+{
+ "arxiv": "2603.15252",
+ "title": "The elliptic three-loop integrals of hadronic vacuum polarization in chiral perturbation theory",
+ "family_label_in_paper": "three-loop HVP family, nine equal-mass lines; masters E5, E6",
+ "description": "3-loop 2-point, all lines mass M, elliptic kite with bubble on the rung, d=2-2\u03b5",
+ "propagators_as_in_paper": [
+  "l1",
+  "l2",
+  "l3",
+  "l1-p",
+  "l2-p",
+  "l3-p",
+  "l1+l3",
+  "l2+l3",
+  "l1-l2"
+ ],
+ "mapping_notes": "Physical lines (paper positions 1,2,4,5,7,8) = l1, l2, l1-p, l2-p, l1+l3, l2+l3; auxiliary lines l3, l3-p, l1-l2 (paper 3,6,9). M=1; DiffExp convention (k^2-m^2) and DiffExp measure, not the paper's (2\u03c0)^{-3d/2} normalization.",
+ "point": "t = p^2/M^2 = -1",
+ "integrals_meaning": [
+  "E5 ~ I_{1,1,0,1,1,0,1,1,0}",
+  "E6 ~ I_{2,1,0,1,1,0,1,1,0}"
+ ],
+ "reference_values": null,
+ "confidence": "high: family copied from the paper's definition; banana subtopology E1 reproduces the shipped banana example exactly",
+ "check": "E1 subintegral = shipped banana (38 digits); 55-digit rerun stable",
+ "point_kind": "Euclidean (chosen here)"
+}

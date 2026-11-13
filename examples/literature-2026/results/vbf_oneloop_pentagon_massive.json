@@ -1,0 +1,138 @@
+{
+ "family": "vbf_oneloop_pentagon_massive",
+ "command": [
+  "diffexp",
+  "ft",
+  "families/vbf_oneloop_pentagon_massive.json",
+  "--ibp-provider",
+  "ibp-solver",
+  "--ibp-threads",
+  "8",
+  "--cache",
+  "$DIFFEXP_CACHE",
+  "--fire-seconds",
+  "1800",
+  "--level-seconds",
+  "5400",
+  "--total-seconds",
+  "9000",
+  "--json"
+ ],
+ "threads": 8,
+ "exit_code": 0,
+ "wall_seconds": 0.915,
+ "response": {
+  "schema": "DiffExp.FeynmanTrick/v1",
+  "family": "vbf_oneloop_pentagon_massive",
+  "status": "completed",
+  "levels": 4,
+  "systems_built": 3,
+  "systems_reused": 0,
+  "ibp_provider": "ibp-solver",
+  "ladder": [
+   {
+    "level": 1,
+    "masters": 7,
+    "boundary": "lower",
+    "x": "0"
+   },
+   {
+    "level": 2,
+    "masters": 3,
+    "boundary": "upper",
+    "x": "1"
+   },
+   {
+    "level": 3,
+    "masters": 2,
+    "boundary": "upper",
+    "x": "1"
+   }
+  ],
+  "ibp_cache": {
+   "systems_reused": 0,
+   "systems_built": 3,
+   "provider_options_ignored": false,
+   "note": "all level closures were built with the reported IBP provider and seeds"
+  },
+  "timings": {
+   "preparation_seconds": 0.418887941,
+   "numerical_seconds": 0.487663551,
+   "ordinary_seconds": 0.241885544,
+   "endpoint_series_seconds": 0.027875948999999997,
+   "endpoint_operator_seconds": 0.031129601999999996,
+   "endpoint_gauge_seconds": 0.0006335460000000001,
+   "endpoint_frame_seconds": 0.01426801,
+   "endpoint_observable_seconds": 0.053250258,
+   "basis_selection_seconds": 0.080886557,
+   "leaf_seconds": 0.013297161,
+   "total_seconds": 0.911486013
+  },
+  "finite_masters": {
+   "mode": "on",
+   "levels": [],
+   "euclidean_family": true,
+   "withdrawn": false,
+   "seconds": 0.000499589
+  },
+  "moving_poles": {
+   "mode": "remove",
+   "levels": [],
+   "seconds": 0.0011181029999999998
+  },
+  "precision": {
+   "raises": [],
+   "radius_over_tail_bits": 0,
+   "stated": false
+  },
+  "epsilon_low": -2,
+  "epsilon_high": 0,
+  "coefficient_order": "component,epsilon",
+  "coefficients": [
+   [
+    {
+     "real": "[0.05555555555555555555555556 +/- 5.69e-27]",
+     "imaginary": "[+/- 1.25e-27]"
+    },
+    {
+     "real": "[-0.19264374571098319737856859 +/- 4.88e-27]",
+     "imaginary": "[+/- 1.25e-27]"
+    },
+    {
+     "real": "[-0.08412232639262876126454918 +/- 3.21e-27]",
+     "imaginary": "[+/- 1.46e-27]"
+    }
+   ]
+  ],
+  "component_basis": "requested_scalar",
+  "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+  "omitted_tails_certified": false,
+  "working_bits": 384,
+  "persistent_numerical_cache": true,
+  "causal": {
+   "mode": "euclidean",
+   "f_rim": -1
+  },
+  "ft_transport": {
+   "method": "taylor",
+   "direct_endpoints": 0,
+   "uncertainty": "probe",
+   "accumulation": "weighted",
+   "weighted_levels": 3,
+   "cleared_epsilon_orders": 1
+  },
+  "basis_selection": {
+   "scans": 3,
+   "selections": 3,
+   "cache_hits": 0,
+   "endpoint_series_built": 6,
+   "endpoint_series_refinements": 0,
+   "child_window_preflights": 6,
+   "child_refinements": 0,
+   "structural_zero_coefficients": 0,
+   "operator_exact_zeros": 0,
+   "structural_zero_conflicts": 0
+  }
+ },
+ "status": "completed"
+}

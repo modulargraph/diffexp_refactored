@@ -1,0 +1,133 @@
+{
+ "schema": "DiffExp.FeynmanFamily/v1",
+ "name": "np_triangle_elliptic_b_y0p01",
+ "description": "Two-loop non-planar triangle family (b) with two massive lines (elliptic top sector), arXiv:2305.13951, CHESS 2606.26691 sec. 4.3; s=-100, m^2=1",
+ "loops": 2,
+ "external_gram": [
+  [
+   "0",
+   "-50"
+  ],
+  [
+   "-50",
+   "0"
+  ]
+ ],
+ "propagators": [
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "-1",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "-1",
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "1"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "-1"
+   ],
+   "external_coefficients": [
+    "0",
+    "1"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "-1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0",
+    "0"
+   ],
+   "mass_squared": "0"
+  }
+ ],
+ "physical_count": 6,
+ "dimension_at_epsilon_zero": 4,
+ "integrals": [
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   1,
+   1,
+   0,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   0,
+   1,
+   1,
+   0
+  ]
+ ],
+ "epsilon_order": 0,
+ "numerical": {
+  "ordinary_order": 80,
+  "working_bits": 384,
+  "leaf_digits": 16,
+  "method": "adjoint"
+ }
+}

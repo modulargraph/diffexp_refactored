@@ -1,0 +1,225 @@
+{
+ "family": "ttj_pentabox_B_euclid",
+ "command": [
+  "diffexp",
+  "ft",
+  "families/ttj_pentabox_B_euclid.json",
+  "--ibp-provider",
+  "ibp-solver",
+  "--ibp-threads",
+  "8",
+  "--cache",
+  "$DIFFEXP_CACHE",
+  "--fire-seconds",
+  "1800",
+  "--level-seconds",
+  "5400",
+  "--total-seconds",
+  "9000",
+  "--json"
+ ],
+ "threads": 8,
+ "exit_code": 0,
+ "wall_seconds": 146.984,
+ "response": {
+  "schema": "DiffExp.FeynmanTrick/v1",
+  "family": "ttj_pentabox_B_euclid",
+  "status": "completed",
+  "levels": 7,
+  "systems_built": 6,
+  "systems_reused": 0,
+  "ibp_provider": "ibp-solver",
+  "ladder": [
+   {
+    "level": 1,
+    "masters": 61,
+    "boundary": "anchor",
+    "x": "1/3"
+   },
+   {
+    "level": 2,
+    "masters": 31,
+    "boundary": "anchor",
+    "x": "1/3"
+   },
+   {
+    "level": 3,
+    "masters": 16,
+    "boundary": "upper",
+    "x": "1"
+   },
+   {
+    "level": 4,
+    "masters": 8,
+    "boundary": "anchor",
+    "x": "1/3"
+   },
+   {
+    "level": 5,
+    "masters": 4,
+    "boundary": "upper",
+    "x": "1"
+   },
+   {
+    "level": 6,
+    "masters": 2,
+    "boundary": "anchor",
+    "x": "1/3"
+   }
+  ],
+  "ibp_cache": {
+   "systems_reused": 0,
+   "systems_built": 6,
+   "provider_options_ignored": false,
+   "note": "all level closures were built with the reported IBP provider and seeds"
+  },
+  "timings": {
+   "preparation_seconds": 26.91526861,
+   "numerical_seconds": 117.375648027,
+   "ordinary_seconds": 36.436543207,
+   "endpoint_series_seconds": 43.253166624,
+   "endpoint_operator_seconds": 10.964399481,
+   "endpoint_gauge_seconds": 0.083980517,
+   "endpoint_frame_seconds": 3.0650588220000006,
+   "endpoint_observable_seconds": 12.327760633,
+   "basis_selection_seconds": 20.161999225000002,
+   "leaf_seconds": 0.117478413,
+   "total_seconds": 146.840242295
+  },
+  "finite_masters": {
+   "mode": "on",
+   "levels": [],
+   "euclidean_family": true,
+   "withdrawn": false,
+   "seconds": 0.026989674
+  },
+  "moving_poles": {
+   "mode": "remove",
+   "levels": [
+    {
+     "level": 2,
+     "mixed_factors": 1,
+     "mixed_order_before": 1,
+     "mixed_order_after": 0,
+     "characters_before": 118280,
+     "characters_after": 101641,
+     "steps": [
+      {
+       "factor": "2*x^2*eps-x^2-12*x*eps+4*x+4*eps",
+       "replaced_master": 18,
+       "by": "integral [2,0,1,0,1,1,0,0,0,0,0]"
+      }
+     ],
+     "left_in_place": [],
+     "kept_for_size": 0,
+     "budget_reached": false,
+     "seconds": 1.2916866
+    },
+    {
+     "level": 3,
+     "mixed_factors": 1,
+     "mixed_order_before": 1,
+     "mixed_order_after": 0,
+     "characters_before": 26691,
+     "characters_after": 17440,
+     "steps": [
+      {
+       "factor": "38*x*eps-19*x-36*eps+30",
+       "replaced_master": 12,
+       "by": "integral [2,1,0,1,1,0,0,0,0,0,0]"
+      }
+     ],
+     "left_in_place": [],
+     "kept_for_size": 0,
+     "budget_reached": false,
+     "seconds": 0.362447998
+    }
+   ],
+   "seconds": 1.7110882880000002
+  },
+  "precision": {
+   "raises": [],
+   "radius_over_tail_bits": 0,
+   "stated": false
+  },
+  "epsilon_low": -4,
+  "epsilon_high": 0,
+  "coefficient_order": "component,epsilon",
+  "coefficients": [
+   [
+    {
+     "real": "[0.2760416666666666666666667 +/- 7.62e-26]",
+     "imaginary": "[+/- 4.29e-26]"
+    },
+    {
+     "real": "[-0.8457518168818463458291988 +/- 5.43e-26]",
+     "imaginary": "[+/- 4.59e-26]"
+    },
+    {
+     "real": "[-0.232862224970523456905966 +/- 6.95e-25]",
+     "imaginary": "[+/- 3.15e-25]"
+    },
+    {
+     "real": "[1.91690430408308032135548 +/- 8.46e-24]",
+     "imaginary": "[+/- 7.28e-24]"
+    },
+    {
+     "real": "[6.6050845864791469028247 +/- 7.51e-23]",
+     "imaginary": "[+/- 6.16e-23]"
+    }
+   ],
+   [
+    {
+     "real": "[0.1197916666666666666666667 +/- 5.00e-26]",
+     "imaginary": "[+/- 1.67e-26]"
+    },
+    {
+     "real": "[-0.3621200301051412540196247 +/- 4.70e-26]",
+     "imaginary": "[+/- 1.97e-26]"
+    },
+    {
+     "real": "[-0.083447407840143773208920 +/- 5.92e-25]",
+     "imaginary": "[+/- 2.75e-25]"
+    },
+    {
+     "real": "[0.83017356571141383422585 +/- 8.96e-24]",
+     "imaginary": "[+/- 6.86e-24]"
+    },
+    {
+     "real": "[2.548155757084794782037 +/- 9.93e-23]",
+     "imaginary": "[+/- 5.81e-23]"
+    }
+   ]
+  ],
+  "component_basis": "requested_scalar",
+  "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+  "omitted_tails_certified": false,
+  "working_bits": 384,
+  "persistent_numerical_cache": true,
+  "causal": {
+   "mode": "euclidean",
+   "f_rim": -1
+  },
+  "ft_transport": {
+   "method": "taylor",
+   "direct_endpoints": 0,
+   "uncertainty": "probe",
+   "accumulation": "weighted",
+   "weighted_levels": 6,
+   "cleared_epsilon_orders": 4
+  },
+  "basis_selection": {
+   "scans": 6,
+   "selections": 6,
+   "cache_hits": 0,
+   "endpoint_series_built": 20,
+   "endpoint_series_refinements": 8,
+   "child_window_preflights": 12,
+   "child_refinements": 0,
+   "structural_zero_coefficients": 0,
+   "operator_exact_zeros": 0,
+   "structural_zero_conflicts": 0
+  }
+ },
+ "status": "completed"
+}

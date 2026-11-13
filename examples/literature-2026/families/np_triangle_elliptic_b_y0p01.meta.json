@@ -1,0 +1,75 @@
+{
+ "arxiv": "2606.26691 (CHESS, benchmark 4.3); family from 2305.13951",
+ "title": "CHESS: Chebyshev pseudo-spectral transport for Feynman integral differential equations",
+ "family_label_in_paper": "two-loop non-planar triangle family (b)",
+ "description": "p1^2=p2^2=0, s=(p1+p2)^2; D2,D4 massive (m), others massless; D7=l1^2 ISP",
+ "propagators_as_in_paper": [
+  "(l1-p1)^2",
+  "(l2-p1)^2-m^2",
+  "(l1+p2)^2",
+  "(l1-l2+p2)^2-m^2",
+  "(l1-l2)^2",
+  "l2^2",
+  "l1^2 (ISP)"
+ ],
+ "mapping_notes": "Same order as paper eq.(2) with kappa=0. m^2=1, x=s/m^2, y=-m^2/s.",
+ "point": {
+  "s": "-100",
+  "m2": "1",
+  "y": "1/100"
+ },
+ "integrals_meaning": [
+  "top-sector scalar I_{1111110} (elliptic, no printed scalar value)",
+  "I_{1111100} (enters M4)",
+  "I_{1110110} (enters M6)"
+ ],
+ "reference_combination": "M4 = eps^4 x I_paper_{1111100}, M6 = eps^4 x I_paper_{1110110} (2305.13951 eq. for M^(b)_4, M^(b)_6), x=s/m^2; I_paper = e^{2 eps gammaE} prod d^D l/(i pi^{D/2}) with D=q^2-m^2 => I_paper = (-1)^5 I_DiffExp. So M4 = -eps^4 x e^{2 eps gammaE} I_DiffExp = 100 eps^4 e^{2eps gammaE} I_DiffExp: the eps^4 coefficient of M equals 100 * (finite eps^0 value of I_DiffExp). Rows of CHESS file assumed to be M1..M18 in paper order (rows 4,6,8 are zero below eps^4, consistent with finite eps^4-normalized integrals and the positive sign predicted).",
+ "normalization": "Paper: e^{2 eps gammaE} (m^2)^{nu-D} int d^D l1/(i pi^{D/2}) d^D l2/(i pi^{D/2}) D7^{-nu7}/prod D_i^{nu_i}, D_i Minkowski q^2-m^2.",
+ "reference_values": {
+  "source": "CHESS repo data/NPTriangleB/reference/boundary_y0p01.wl (y=1/100, s=-100), AMFlow 200 digits, canonical rows, orders eps^0..eps^4; rows 4,6,8 vanish below eps^4",
+  "values": {
+   "M4_eps4": "25.095989033184911998579939102744676338705033",
+   "M6_eps4": "34.460237153047963887891203892541922427300496",
+   "M8_eps4_not_requested": "117.51353751287163621689271076173160940036847"
+  }
+ },
+ "confidence": "high for family; medium for the CHESS row <-> paper M_i mapping (verify: I_DiffExp_{1111100}(eps^0) should equal M4_eps4/100)",
+ "comparison": [
+  {
+   "quantity": "M4",
+   "terms": [
+    {
+     "integral": 1,
+     "coefficient": "100"
+    }
+   ],
+   "eps_shift": 4,
+   "exp_eps": "2*gammaE",
+   "reference": {
+    "4": [
+     "25.095989033184911998579939102744676338705033",
+     "0"
+    ]
+   }
+  },
+  {
+   "quantity": "M6",
+   "terms": [
+    {
+     "integral": 2,
+     "coefficient": "100"
+    }
+   ],
+   "eps_shift": 4,
+   "exp_eps": "2*gammaE",
+   "reference": {
+    "4": [
+     "34.460237153047963887891203892541922427300496",
+     "0"
+    ]
+   }
+  }
+ ],
+ "check": "vs paper: M4 24 digits (1 orders); M6 22 digits (1 orders)",
+ "point_kind": "paper's"
+}

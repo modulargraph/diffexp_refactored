@@ -1,0 +1,222 @@
+{
+ "family": "radreturn_pl1_euclid",
+ "command": [
+  "diffexp",
+  "ft",
+  "families/radreturn_pl1_euclid.json",
+  "--ibp-provider",
+  "ibp-solver",
+  "--ibp-threads",
+  "8",
+  "--cache",
+  "$DIFFEXP_CACHE",
+  "--fire-seconds",
+  "1800",
+  "--level-seconds",
+  "5400",
+  "--total-seconds",
+  "9000",
+  "--json"
+ ],
+ "threads": 8,
+ "exit_code": 0,
+ "wall_seconds": 58.865,
+ "response": {
+  "schema": "DiffExp.FeynmanTrick/v1",
+  "family": "radreturn_pl1_euclid",
+  "status": "completed",
+  "levels": 6,
+  "systems_built": 5,
+  "systems_reused": 0,
+  "ibp_provider": "ibp-solver",
+  "ladder": [
+   {
+    "level": 1,
+    "masters": 49,
+    "boundary": "lower",
+    "x": "0"
+   },
+   {
+    "level": 2,
+    "masters": 20,
+    "boundary": "lower",
+    "x": "0"
+   },
+   {
+    "level": 3,
+    "masters": 9,
+    "boundary": "upper",
+    "x": "1"
+   },
+   {
+    "level": 4,
+    "masters": 4,
+    "boundary": "lower",
+    "x": "0"
+   },
+   {
+    "level": 5,
+    "masters": 1,
+    "boundary": "anchor",
+    "x": "1/3"
+   }
+  ],
+  "ibp_cache": {
+   "systems_reused": 0,
+   "systems_built": 5,
+   "provider_options_ignored": false,
+   "note": "all level closures were built with the reported IBP provider and seeds"
+  },
+  "timings": {
+   "preparation_seconds": 11.85325051,
+   "numerical_seconds": 44.436645117,
+   "ordinary_seconds": 17.670008528,
+   "endpoint_series_seconds": 13.715572685999998,
+   "endpoint_operator_seconds": 3.565429177999999,
+   "endpoint_gauge_seconds": 0.062104467,
+   "endpoint_frame_seconds": 1.7141957970000001,
+   "endpoint_observable_seconds": 4.054937483,
+   "basis_selection_seconds": 2.5848281790000005,
+   "leaf_seconds": 0.000712531,
+   "total_seconds": 58.78389791
+  },
+  "finite_masters": {
+   "mode": "on",
+   "levels": [],
+   "euclidean_family": true,
+   "withdrawn": false,
+   "seconds": 0.020391739000000002
+  },
+  "moving_poles": {
+   "mode": "remove",
+   "levels": [
+    {
+     "level": 1,
+     "mixed_factors": 1,
+     "mixed_order_before": 1,
+     "mixed_order_after": 0,
+     "characters_before": 188927,
+     "characters_after": 198081,
+     "steps": [
+      {
+       "factor": "100*x^2*eps-210*x*eps-40*x+68*eps+61",
+       "replaced_master": 24,
+       "by": "closure row"
+      }
+     ],
+     "left_in_place": [],
+     "kept_for_size": 0,
+     "budget_reached": false,
+     "seconds": 2.21345355
+    }
+   ],
+   "seconds": 2.224896762
+  },
+  "precision": {
+   "raises": [],
+   "radius_over_tail_bits": 0,
+   "stated": false
+  },
+  "epsilon_low": -4,
+  "epsilon_high": 0,
+  "coefficient_order": "component,epsilon",
+  "coefficients": [
+   [
+    {
+     "real": "[+/- 3.01e-27]",
+     "imaginary": "[+/- 3.01e-27]"
+    },
+    {
+     "real": "[+/- 3.04e-27]",
+     "imaginary": "[+/- 3.03e-27]"
+    },
+    {
+     "real": "[0.0194830146744232505333583 +/- 2.36e-26]",
+     "imaginary": "[+/- 7.71e-27]"
+    },
+    {
+     "real": "[0.063723670999524292878628 +/- 6.33e-25]",
+     "imaginary": "[+/- 1.93e-25]"
+    },
+    {
+     "real": "[0.46261719275794209333558 +/- 4.72e-24]",
+     "imaginary": "[+/- 1.22e-24]"
+    }
+   ],
+   [
+    {
+     "real": "[+/- 6.38e-28]",
+     "imaginary": "[+/- 6.38e-28]"
+    },
+    {
+     "real": "[+/- 6.62e-28]",
+     "imaginary": "[+/- 6.58e-28]"
+    },
+    {
+     "real": "[+/- 5.78e-27]",
+     "imaginary": "[+/- 5.34e-27]"
+    },
+    {
+     "real": "[-0.095746113387601167564051 +/- 5.65e-25]",
+     "imaginary": "[+/- 1.92e-25]"
+    },
+    {
+     "real": "[0.02036034719065146124897 +/- 2.32e-24]",
+     "imaginary": "[+/- 1.24e-24]"
+    }
+   ],
+   [
+    {
+     "real": "[+/- 1.13e-26]",
+     "imaginary": "[+/- 1.13e-26]"
+    },
+    {
+     "real": "[+/- 1.13e-26]",
+     "imaginary": "[+/- 1.13e-26]"
+    },
+    {
+     "real": "[0.0584490440232697516000748 +/- 6.50e-26]",
+     "imaginary": "[+/- 1.60e-26]"
+    },
+    {
+     "real": "[0.191171012998572878635883 +/- 5.20e-25]",
+     "imaginary": "[+/- 2.15e-25]"
+    },
+    {
+     "real": "[1.73159654367087328006102 +/- 4.49e-24]",
+     "imaginary": "[+/- 1.25e-24]"
+    }
+   ]
+  ],
+  "component_basis": "requested_scalar",
+  "ball_encoding": "Arb decimal interval strings for real and imaginary parts",
+  "omitted_tails_certified": false,
+  "working_bits": 384,
+  "persistent_numerical_cache": true,
+  "causal": {
+   "mode": "euclidean",
+   "f_rim": -1
+  },
+  "ft_transport": {
+   "method": "taylor",
+   "direct_endpoints": 0,
+   "uncertainty": "probe",
+   "accumulation": "weighted",
+   "weighted_levels": 5,
+   "cleared_epsilon_orders": 3
+  },
+  "basis_selection": {
+   "scans": 5,
+   "selections": 4,
+   "cache_hits": 0,
+   "endpoint_series_built": 16,
+   "endpoint_series_refinements": 6,
+   "child_window_preflights": 10,
+   "child_refinements": 0,
+   "structural_zero_coefficients": 0,
+   "operator_exact_zeros": 0,
+   "structural_zero_conflicts": 0
+  }
+ },
+ "status": "completed"
+}

@@ -1,0 +1,94 @@
+{
+ "schema": "DiffExp.FeynmanFamily/v1",
+ "name": "sunrise_two_mass_sr_d2",
+ "loops": 2,
+ "external_gram": [
+  [
+   "-1"
+  ]
+ ],
+ "propagators": [
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "0"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "0"
+   ],
+   "mass_squared": "2"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "-1"
+   ],
+   "external_coefficients": [
+    "-1"
+   ],
+   "mass_squared": "1"
+  },
+  {
+   "loop_coefficients": [
+    "1",
+    "0"
+   ],
+   "external_coefficients": [
+    "-1"
+   ],
+   "mass_squared": "0"
+  },
+  {
+   "loop_coefficients": [
+    "0",
+    "1"
+   ],
+   "external_coefficients": [
+    "-1"
+   ],
+   "mass_squared": "0"
+  }
+ ],
+ "physical_count": 3,
+ "dimension_at_epsilon_zero": 2,
+ "integrals": [
+  [
+   1,
+   1,
+   1,
+   0,
+   0
+  ],
+  [
+   1,
+   1,
+   1,
+   0,
+   -1
+  ],
+  [
+   1,
+   0,
+   1,
+   0,
+   0
+  ]
+ ],
+ "epsilon_order": 0,
+ "numerical": {
+  "ordinary_order": 80,
+  "working_bits": 384,
+  "leaf_digits": 16,
+  "method": "adjoint"
+ }
+}

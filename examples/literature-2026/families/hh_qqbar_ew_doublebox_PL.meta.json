@@ -1,0 +1,37 @@
+{
+ "arxiv": "2601.16924 (also 2606.25928); definition taken from 2503.16620 Table 1",
+ "title": "NLO QCD corrections to the electroweak production of a Higgs boson pair in the quark-antiquark channel",
+ "family_label_in_paper": "Fig.1a double box = family PL of ref.[35] arXiv:2503.16620",
+ "description": "2-loop planar 4-point double box, 2 massless + 2 Higgs legs (mH^2), 3 internal lines of mass mV; 45 canonical MIs, polylogarithmic",
+ "propagators_as_in_paper": [
+  "D1=k1^2",
+  "D2=(k1+p1)^2",
+  "D3=(k1-p2)^2",
+  "D4=(k1-k2)^2",
+  "D5=(k2+p1)^2-mV^2",
+  "D6=(k2-p2)^2-mV^2",
+  "D7=(k2+p1+p3)^2-mV^2",
+  "D8=k2^2 [aux]",
+  "D9=(k1+p1+p3)^2 [aux]"
+ ],
+ "mapping_notes": "p1,p2 massless, p3^2=p4^2=mH^2, sum p=0, s=(p1+p2)^2, t=(p1+p3)^2, u=(p2+p3)^2=2mH^2-s-t. Independent p1,p2,p3: p1.p2=s/2, p1.p3=(t-mH2)/2, p2.p3=(u-mH2)/2. Euclidean requires s,t<0 AND mH2<mV2 (x2x4x7 coefficient mV2-mH2), so the physical ratio mH2/mV2=625/256 cannot be kept. The second top sector (Fig.1b of 2601.16924, 6 extra MIs) has no propagator list in text/ancillary -> not written.",
+ "point": {
+  "mV2": "1",
+  "mH2": "1/2",
+  "s": "-3",
+  "t": "-2",
+  "derived": {
+   "u": "6"
+  }
+ },
+ "integrals_meaning": {
+  "[1^7,0,0]": "PL(1,1,1,1,1,1,1,0,0)",
+  "[1^7,-1,0]": "numerator D8",
+  "[1^7,0,-1]": "numerator D9"
+ },
+ "reference_values": null,
+ "normalization": "2503.16620 eq.(2): e^{2eps gamma_E}(mV^2)^{2eps} prod d^Dk/(i pi^{D/2}), D=q^2-m^2 (+i delta). DiffExp FT: denominators D=m^2-q^2 (Euclidean-positive), measure prod d^dk/(i pi^{d/2}), no exp(L eps gamma_E) (see de22/docs/amflow-comparison.md, feynman-families.md). Paper Minkowski integral with (q^2-m^2+i0) denominators = (-1)^{sum nu} * DiffExp value (numerator powers included in sum nu).",
+ "confidence": "medium-high: definition verbatim from 2503.16620, identified with Fig.1a via '45 integrals' statement. Papers print only amplitude/form-factor values (2601.16924 Table 2 at s=3125/128,t=-1875/128,u=-625/128,mV2=1; 2503.16620 Table 6), no master-integral values.",
+ "reference_combination": null,
+ "point_kind": "Euclidean (chosen here)"
+}

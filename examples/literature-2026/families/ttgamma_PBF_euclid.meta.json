@@ -1,0 +1,85 @@
+{
+ "arxiv": "2610.42062",
+ "title": "Two-loop integrals for ttbar gamma production at hadron colliders in the leading-colour approximation",
+ "family_label_in_paper": "PB_F",
+ "description": "2-loop planar 5-point pentagon-box, 2 on-shell tops + photon + 2 massless; 3 massive internal lines; 142 MIs, 3 elliptic sectors + 2 nested-root doublets [Euclidean fallback point]",
+ "propagators_as_in_paper": [
+  "D1=k1^2-mt^2",
+  "D2=(k1-p3)^2-mt^2",
+  "D3=(k1-p13)^2",
+  "D4=(k1+p24)^2",
+  "D5=k2^2-mt^2",
+  "D6=(k2-p2)^2",
+  "D7=(k2-p24)^2",
+  "D8=(k1+k2)^2",
+  "D9=(k1+p2)^2 [ISP]",
+  "D10=(k2+p3)^2-mt^2 [ISP]",
+  "D11=(k2+p13)^2 [ISP]"
+ ],
+ "mapping_notes": "All p outgoing, sum p=0, d_ij=p_i.p_j. Independent p1..p4 (p5 eliminated; propagators only use p1..p4). d13=d45-d12-d23-mt2, d14=d23-d15-d45, d24=d15-d23-d34; p1^2=p2^2=mt2, p3^2=p4^2=0. Order D1..D11 kept, k1,k2 as in paper. Planar ordering (1,5,4,2,3) for PB_E and (3,1,5,4,2) for PB_F: adjacent channels s13,s15,s45,s24,s23; Euclidean fallback makes them all negative (all F coefficients positive). PHYSICAL point X1 of ancillary Boundary_values/PBF_X1.m (s45 channel, above thresholds); no causal object written: relies on DiffExp's derived Feynman (F-i0) contour, which may be refused for 2-loop levels (docs: statements 1-2 only). Euclidean fallback ttgamma_PBF_euclid.json at d12=-1,d23=-1,d34=1,d45=-2,d15=-1,mt2=1.",
+ "point": {
+  "external_gram": [
+   [
+    "1",
+    "-1",
+    "-1",
+    "2"
+   ],
+   [
+    "-1",
+    "1",
+    "-1",
+    "-1"
+   ],
+   [
+    "-1",
+    "-1",
+    "0",
+    "1"
+   ],
+   [
+    "2",
+    "-1",
+    "1",
+    "0"
+   ]
+  ],
+  "mass_squared": [
+   "1",
+   "1",
+   "0",
+   "0",
+   "1",
+   "0",
+   "0",
+   "0",
+   "0",
+   "1",
+   "0"
+  ],
+  "note": "Euclidean fallback point (all F coefficients positive). The paper only quotes values at paper_point, a physical point where DiffExp 2.2 cannot yet derive every causal side, so reference_values are not compared here."
+ },
+ "paper_point": {
+  "d12": "19/8",
+  "d23": "189/40",
+  "d34": "-33/29",
+  "d45": "8",
+  "d15": "-388937/142680",
+  "mt2": "1/15",
+  "derived": {
+   "d13": "5/6",
+   "d14": "-3917/7134",
+   "d24": "-1553/246",
+   "d25": "-35/41",
+   "d35": "-15383/3480"
+  }
+ },
+ "integrals_meaning": {
+  "[1^8,-1,0,0]": "j[PBF,1,1,1,1,1,1,1,1,-1,0,0] (top sector, D9 numerator)"
+ },
+ "reference_combination": "mi[PBF,3] = d15*(d15-d23-d34)*eps^4*(d12+d23-d45+mt2)*j[PBF,1,1,1,1,1,1,1,1,-1,0,0]; prefactor at X1 = -604019161/42119136 (times eps^4)",
+ "reference_values": null,
+ "normalization": "Paper eq.(9): e^{eps gamma_E} d^dk/(i pi^{d/2}) per loop, D=k^2-m^2 (Minkowski, +i0). j_paper[nu] = (-1)^{sum nu} e^{2 eps gamma_E} j_DiffExp[nu]; for both requested index vectors sum nu = 7 -> j_paper = -e^{2eps gamma_E} j_DE. Masters mi[...] contain eps^4 (two-loop starts eps^-4), values given through eps^4 i.e. j through eps^0. DiffExp FT: denominators D=m^2-q^2 (Euclidean-positive), measure prod d^dk/(i pi^{d/2}), no exp(L eps gamma_E) (see de22/docs/amflow-comparison.md, feynman-families.md). Paper Minkowski integral with (q^2-m^2+i0) denominators = (-1)^{sum nu} * DiffExp value (numerator powers included in sum nu).",
+ "confidence": "high for family (verbatim Table 1) and reference (ancillary basis+values parsed directly); physical-point contour derivation is the risk.",
+ "point_kind": "Euclidean (chosen here)"
+}

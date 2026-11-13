@@ -1,0 +1,43 @@
+{
+ "arxiv": "2611.12661",
+ "title": "Pentagon Functions for Two-Loop Leading-Colour pp->ttH Amplitudes with a Light-Quark Loop",
+ "family_label_in_paper": "T1 (penta-box)",
+ "description": "2-loop planar 5-point penta-box, two on-shell tops (m_t) + off-shell boson q^2 + 2 massless legs; massive k1-line (rho2,rho3), nested square roots; 111 masters",
+ "propagators_as_in_paper": [
+  "rho1=l1^2",
+  "rho2=(l1+p1)^2-mt^2",
+  "rho3=(l1+p12)^2-mt^2",
+  "rho4=(l1+p123)^2",
+  "rho5=(l1+l2)^2",
+  "rho6=l2^2",
+  "rho7=(l2+p5)^2",
+  "rho8=(l2+p45)^2",
+  "rho9=(l1-p5)^2 [ISP]",
+  "rho10=(l2-p12)^2-mt^2 [ISP]",
+  "rho11=(l2-p1)^2-mt^2 [ISP]"
+ ],
+ "mapping_notes": "Order rho1..rho11 kept, k1=l1,k2=l2, all p incoming, sum p=0. Independent externals p1..p4, p5=-(p1+p2+p3+p4) substituted. v_ij=2p_i.p_j. Given v12,v23,v34,v45,v15,mt2,q2: v13=v45-2mt2-q2-v12-v23, v14=-(2mt2+v12+v13+v15), v24=-(v45+v14+v34); gram p_i.p_j=v_ij/2, p1^2=p3^2=mt2, p2^2=q2, p4^2=0. Checked: all U,F monomial coefficients positive (Euclidean).",
+ "point": {
+  "mt2": "1",
+  "q2": "1/2",
+  "v12": "-3",
+  "v23": "-3",
+  "v34": "-2",
+  "v45": "-5",
+  "v15": "-2",
+  "derived": {
+   "v13": "-3/2",
+   "v14": "9/2",
+   "v24": "5/2"
+  }
+ },
+ "integrals_meaning": {
+  "[1^8,0,0,0]": "top-sector scalar T1[1,1,1,1,1,1,1,1,0,0,0]",
+  "[1^8,-1,0,0]": "top sector with ISP rho9 numerator"
+ },
+ "reference_values": null,
+ "normalization": "Paper: (e^{gamma_E} mu^2)^{2eps} prod d^dl/(i pi^{d/2}), rho=q^2-m^2 (+i0). DiffExp FT: denominators D=m^2-q^2 (Euclidean-positive), measure prod d^dk/(i pi^{d/2}), no exp(L eps gamma_E) (see de22/docs/amflow-comparison.md, feynman-families.md). Paper Minkowski integral with (q^2-m^2+i0) denominators = (-1)^{sum nu} * DiffExp value (numerator powers included in sum nu).",
+ "confidence": "high for family definition (verbatim eq.22); point is my Euclidean choice. No master-integral numbers printed (only physical points; funcs.m pentagon-function values are not on arXiv as ancillary files and are canonical combos from Febres Cordero et al. 2024).",
+ "reference_combination": null,
+ "point_kind": "Euclidean (chosen here)"
+}

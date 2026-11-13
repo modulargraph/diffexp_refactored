@@ -46,6 +46,19 @@ in about a minute and a half and one epsilon sample
 minutes on four threads; two different merge ladders give the same sample
 value to 28 digits.
 
+## Families from the 2026 literature
+
+`examples/literature-2026/` holds 17 families from 2026 papers that cite
+DiffExp: elliptic kites and sunrises, two-loop five-point families with a top
+mass, three-loop ladders and one-loop pentagons. Each is computed from its
+propagators alone. The directory's README has a table of timings and values,
+and the families whose printed numbers are reproduced (16 to 24 digits). It
+also lists the families that do not run yet and why.
+
+```sh
+python3 examples/literature-2026/run_families.py hvp_chpt_e5e6_d2
+```
+
 ## Original DiffExp examples
 
 The three download scripts fetch upstream matrices and verify their SHA-256

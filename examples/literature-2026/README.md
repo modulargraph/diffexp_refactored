@@ -137,7 +137,12 @@ with a continuation set up: `radreturn_pl1`, `radreturn_pl2`,
   p² = m². Otherwise the line crosses m² = 0 next to P.
 - For `radreturn_pl1` with m² ≈ 2.6·10⁻⁷, that crossing was 2.6·10⁻⁸ from P
   and the transport could not reach the point.
-- They have not been run to completion yet. The boundary at E alone takes the
+- `radreturn_pl1` runs through (4.4 h on a 10-core Mac: about 7 min for the
+  line's derivative and 26 min for the transport, the rest for the boundary at
+  E), but the result has lost all precision: every ball is about ±10²⁴. The
+  line still has a singular point 1.7·10⁻⁴ from P, and the transport at the
+  default 384 bits does not survive it. This is not solved yet.
+- The other four have not been run to completion yet. The boundary at E alone takes the
   85 masters of `radreturn_pl1` about 20 minutes through ε⁴ on a 10-core Mac,
   and the larger families need hours of IBP reduction per line.
 

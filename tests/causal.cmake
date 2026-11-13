@@ -120,14 +120,14 @@ endif()
 run_ft("${examples}/box_physical.json")
 expect("physical box" -2 "^\\[-12\\.00000000000000000000" "^(0|\\[\\+/-)")
 expect("physical box" -1 "^\\[0\\.33491424680973617890667" "^\\[-18\\.849555921538759430775")
-expect("physical box" 0 "^\\[41\\.284167397546468572091" "^\\[-9\\.8280948169895949709241")
+expect("physical box" 0 "^\\[41\\.284167397546468572091" "^\\[-9\\.82809481698959497092411")
 expect_mode("physical box" derived)
 file(READ "${examples}/box_physical.json" box)
 string(JSON ladder SET "${box}" preparation "{\"merges\":[[0,1],[1,2],[0,1]]}")
 file(WRITE "${work}/box_ladder.json" "${ladder}")
 run_ft("${work}/box_ladder.json")
 expect("physical box, second ladder" -1 "^\\[0\\.33491424680973617890667" "^\\[-18\\.849555921538759430775")
-expect("physical box, second ladder" 0 "^\\[41\\.284167397546468572091" "^\\[-9\\.8280948169895949709241")
+expect("physical box, second ladder" 0 "^\\[41\\.284167397546468572091" "^\\[-9\\.82809481698959497092411")
 string(JSON level GET "${ft_output}" causal oriented_points 0 level)
 string(JSON side GET "${ft_output}" causal oriented_points 0 side)
 if(NOT level EQUAL 2 OR NOT side EQUAL 1)
@@ -146,16 +146,19 @@ run_ft("${work}/bubble_threshold.json")
 if(ft_status EQUAL 0 OR NOT ft_output MATCHES "repeated zero at x = 0\\.5000" OR NOT ft_output MATCHES "pinched")
   message(FATAL_ERROR "bubble at threshold was not refused as a pinched contour: ${ft_output} ${ft_errors}")
 endif()
-# A two-loop level above threshold is not decided by the implemented
-# statements: no side is guessed.
+# A two-loop level above threshold, where dF/dx has no common sign: dF/dx
+# + c F has one for a constant c, which fixes the sign of dF/dx where F
+# vanishes. The value is the one continued from p^2 = -1 below.
 file(READ "${examples}/sunrise.json" sunrise)
 string(JSON above SET "${sunrise}" external_gram "[[\"20\"]]")
 file(WRITE "${work}/sunrise_above.json" "${above}")
 run_ft("${work}/sunrise_above.json")
-if(ft_status EQUAL 0 OR NOT ft_output MATCHES "causal side of the real singular point x = 0\\.[0-9]+ of level 1 could not be derived"
-    OR NOT ft_output MATCHES "explicit `causal` object that states its side" OR NOT ft_output MATCHES "points")
-  message(FATAL_ERROR "undetermined two-loop contour was not refused with the documented message: ${ft_output} ${ft_errors}")
-endif()
+expect("sunrise above threshold" 0 "^\\[0\\.44493623173578260018" "^\\[3\\.12126753526489844254")
+expect_mode("sunrise above threshold" derived)
+string(JSON above SET "${above}" continuation "{\"euclidean_direction\":{\"external_gram\":[[\"-1\"]],\"mass_squared\":[\"1\",\"1\",\"1\"]}}")
+file(WRITE "${work}/sunrise_above_continued.json" "${above}")
+run_ft("${work}/sunrise_above_continued.json")
+expect("sunrise above threshold, continued" 0 "^\\[0\\.44493623173578260018" "^\\[3\\.12126753526489844254")
 # Below threshold (but not Euclidean) the same level is free of cuts and real.
 string(JSON below SET "${sunrise}" external_gram "[[\"5\"]]")
 file(WRITE "${work}/sunrise_below.json" "${below}")
@@ -163,3 +166,32 @@ run_ft("${work}/sunrise_below.json")
 expect("sunrise below threshold" 0 "^\\[3\\.27180532142958952052" "^(0|\\[\\+/-|\\[-?[0-9.]+e-[0-9][0-9])")
 expect_mode("sunrise below threshold" derived)
 file(REMOVE_RECURSE "${work}")
+
+# The same physical points reached from a Euclidean one: E = P + t V with a
+# Euclidean direction V, IBP along the line E -> P (whose external Gram
+# moves) and transport through the upper half plane. The values agree with
+# the derived contour above.
+file(READ "${examples}/bubble_above_threshold.json" bubble)
+string(JSON bubble SET "${bubble}" continuation
+  "{\"euclidean_direction\":{\"external_gram\":[[\"-1\"]],\"mass_squared\":[\"1\",\"1\"]}}")
+file(WRITE "${work}/bubble_continued.json" "${bubble}")
+run_ft("${work}/bubble_continued.json")
+expect("bubble continued from a Euclidean point" 0 "^\\[-0\\.57387858795200538518591097" "^\\[0\\.93664196413876351908751661")
+expect("bubble continued from a Euclidean point" 1 "^\\[-1\\.34953334547654819456090200" "^\\[-2\\.04811150156670114602461229")
+expect_mode("bubble continued from a Euclidean point" euclidean-line)
+file(READ "${examples}/box_physical.json" box)
+string(JSON box SET "${box}" continuation
+  "{\"euclidean_direction\":{\"external_gram\":[[\"0\",\"-1/2\",\"1\"],[\"-1/2\",\"0\",\"-1/2\"],[\"1\",\"-1/2\",\"0\"]],\"mass_squared\":[\"0\",\"0\",\"0\",\"0\"]}}")
+file(WRITE "${work}/box_continued.json" "${box}")
+run_ft("${work}/box_continued.json")
+expect("box continued from a Euclidean point" -1 "^\\[0\\.33491424680973617890" "^\\[-18\\.8495559215387594307")
+expect("box continued from a Euclidean point" 0 "^\\[41\\.28416739754646857209" "^\\[-9\\.82809481698959497092")
+expect_mode("box continued from a Euclidean point" euclidean-line)
+# A direction that is not Euclidean is refused before any reduction.
+string(JSON box SET "${box}" continuation euclidean_direction external_gram
+  "[[\"0\",\"1/2\",\"1\"],[\"1/2\",\"0\",\"-1/2\"],[\"1\",\"-1/2\",\"0\"]]")
+file(WRITE "${work}/box_bad_direction.json" "${box}")
+run_ft("${work}/box_bad_direction.json")
+if(ft_status EQUAL 0 OR NOT ft_errors MATCHES "euclidean_direction is not Euclidean")
+  message(FATAL_ERROR "a non-Euclidean continuation direction was not refused: ${ft_errors}")
+endif()

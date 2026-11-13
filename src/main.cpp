@@ -23,6 +23,7 @@
 #include "diffexp/epsilon_sampling.hpp"
 #include "diffexp/moving_poles.hpp"
 #include "diffexp/finite_masters.hpp"
+#include "diffexp/euclidean_continuation.hpp"
 #endif
 #include <iostream>
 #include <string>
@@ -330,6 +331,105 @@ int main(int argc, char** argv) {
         if(result.cache_hit)++reused;else if(result.result.success)++built;
         return std::move(result.result);
       };
+      if(command=="ft" && configuration.continuation) {
+        if(numerical.causal_prescription)throw std::invalid_argument("continuation and causal cannot be combined: the line fixes the contour");
+        const auto& stated=*configuration.continuation;
+        const auto& target=configuration.family;
+        auto plan=diffexp::continuation::plan(target,stated.external_gram,stated.mass_squared,stated.scale);
+        progress<<"Continuation from the Euclidean point P + "<<plan.scale.str()<<" V (Euclidean for scales above "<<plan.minimum_scale.str()
+          <<"); every F coefficient decreases along the line, whose path stays in the upper half plane.\n"<<std::flush;
+        diffexp::ExactField field({"x","eps","I"});diffexp::Exact x(field,"x"),eps(field,"eps");
+        const auto dimension=x.constant(target.dimension_at_epsilon_zero)-x.constant(2)*eps;
+        diffexp::ibp::PropagatorBasis basis(diffexp::ibp::line_family(plan.start.momenta,target.momenta,x,target.physical_count));
+        if(requested.empty()) {
+          diffexp::ibp::Integral scalar(basis.space.size(),0);std::fill_n(scalar.begin(),target.physical_count,1);requested.push_back(std::move(scalar));
+        }
+        auto line=provider(basis,dimension,field,0,requested,options.reduction);
+        if(!line.success)throw std::runtime_error("continuation line IBP: "+line.reason);
+        const auto line_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count();
+        const auto& masters=line.ordered_basis;const auto n=masters.size();
+        progress<<"Continuation line: "<<n<<" masters, prepared in "<<line_seconds<<" s.\n"<<std::flush;
+        std::vector<std::int64_t> shifts(n,0);diffexp::ExactEpsilonMatrix gauged;
+        if(n) {
+          auto gauge=diffexp::epsilon_diagonal_gauge(line.matrix,1);shifts=gauge.shifts;gauged=std::move(gauge.matrix);
+        }
+        // Target rows at the endpoint, as Laurent series in epsilon.
+        std::vector<diffexp::Exact> at_end{x.constant(1),eps,field.variables().size()>2?diffexp::Exact(field,"I"):eps};
+        std::vector<std::vector<diffexp::Exact>> targets;std::int64_t lowest_target=0;
+        for(const auto& row:line.target_rows) {
+          targets.emplace_back();
+          for(const auto& entry:row) {
+            targets.back().push_back(entry.substitute(at_end));
+            if(auto v=diffexp::exact_epsilon_valuation(targets.back().back(),1))lowest_target=std::min(lowest_target,*v);
+          }
+        }
+        const std::int64_t largest_shift=n?*std::max_element(shifts.begin(),shifts.end()):0;
+        const long boundary_order=static_cast<long>(epsilon_order)+largest_shift-lowest_target;
+        if(boundary_order>100)throw std::invalid_argument("continuation needs the masters through epsilon^"+std::to_string(boundary_order)+", beyond 100");
+        // Masters at the Euclidean start, from this program.
+        boost::json::object boundary_report;double boundary_seconds=0;
+        diffexp::LaurentBoundary initial{0,{}};
+        if(n) {
+          auto document=boost::json::parse([&]{std::ifstream in(argv[2]);std::stringstream s;s<<in.rdbuf();return s.str();}()).as_object();
+          document.erase("continuation");document["name"]=plan.start.name;document["epsilon_order"]=boundary_order;
+          boost::json::array gram;for(const auto& row:plan.start.momenta.external_gram){boost::json::array r;for(const auto& v:row)r.emplace_back(v.str());gram.push_back(std::move(r));}
+          document["external_gram"]=std::move(gram);
+          auto& lines=document["propagators"].as_array();
+          for(std::size_t i=0;i<lines.size();++i)lines[i].as_object()["mass_squared"]=plan.start.momenta.lines[i].mass_squared.str();
+          boost::json::array integrals;for(const auto& m:masters){boost::json::array r;for(auto power:m)r.emplace_back(power);integrals.push_back(std::move(r));}
+          document["integrals"]=std::move(integrals);
+          std::filesystem::create_directories(cache/"continuation");
+          const auto start_path=cache/"continuation"/(plan.start.name+".json");
+          {std::ofstream out(start_path);out<<boost::json::serialize(document)<<'\n';}
+          std::vector<std::string> arguments{argv[0],"ft",start_path.string()};
+          for(int i=3;i<argc;++i) {
+            const std::string option=argv[i];
+            if(option=="--epsilon-order"){++i;continue;}
+            arguments.push_back(option);
+          }
+          if(std::find(arguments.begin(),arguments.end(),"--json")==arguments.end())arguments.push_back("--json");
+          progress<<"Continuation: the "<<n<<" masters at the Euclidean start through epsilon^"<<boundary_order<<" ("<<start_path.string()<<").\n"<<std::flush;
+          const auto began=std::chrono::steady_clock::now();
+          const auto output=diffexp::continuation::run_capture(arguments);
+          boundary_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
+          auto response=boost::json::parse(output).as_object();
+          if(response.at("status")!="completed")
+            throw std::runtime_error("continuation boundary at the Euclidean start failed: "+(response.if_contains("message")?std::string(response.at("message").as_string()):output.substr(0,400)));
+          initial=diffexp::continuation::read_rows(response,numerical.working_bits);
+          boundary_report=boost::json::object{{"family",plan.start.name},{"file",start_path.string()},{"seconds",boundary_seconds},
+            {"epsilon_low",initial.low},{"epsilon_high",initial.high()}};
+          if(auto t=response.if_contains("timings"))boundary_report["timings"]=*t;
+        }
+        const auto transport_began=std::chrono::steady_clock::now();
+        diffexp::kernel::ComplexBall::set_precision(numerical.working_bits);
+        auto result=diffexp::continuation::transport_to_target(gauged,shifts,initial,targets,static_cast<int>(epsilon_order),
+          stated.height,numerical.ordinary_order,numerical.working_bits);
+        const auto transport_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-transport_began).count();
+        const auto total=std::chrono::duration<double>(std::chrono::steady_clock::now()-preparation_start).count();
+        progress<<"Continuation: transported along the upper half plane in "<<transport_seconds<<" s; total "<<total<<" s.\n"<<std::flush;
+        boost::json::object report{{"schema","DiffExp.FeynmanTrick/v1"},{"family",target.name},{"status","completed"},{"ibp_provider",ibp_provider}};
+        const long output_digits=std::max<long>(45,(static_cast<long>(numerical.working_bits)*30103+99999)/100000+3);
+        boost::json::array rows;
+        for(const auto& row:result.values){boost::json::array powers;for(const auto& v:row)powers.push_back(diffexp::ball_json(v,output_digits));rows.push_back(std::move(powers));}
+        report["epsilon_low"]=result.low;report["epsilon_high"]=epsilon_order;report["coefficient_order"]="component,epsilon";
+        report["coefficients"]=std::move(rows);report["component_basis"]="requested_scalar";
+        report["ball_encoding"]="Arb decimal interval strings for real and imaginary parts";report["omitted_tails_certified"]=false;
+        report["working_bits"]=numerical.working_bits;
+        boost::json::array start_gram;for(const auto& row:plan.start.momenta.external_gram){boost::json::array r;for(const auto& v:row)r.emplace_back(v.str());start_gram.push_back(std::move(r));}
+        boost::json::array start_masses;for(const auto& line:plan.start.momenta.lines)start_masses.emplace_back(line.mass_squared.str());
+        boost::json::array shift_array;for(auto s:shifts)shift_array.emplace_back(s);
+        report["causal"]=boost::json::object{{"mode","euclidean-line"},{"f_rim",-1}};
+        report["continuation"]=boost::json::object{{"scale",plan.scale.str()},{"minimum_scale",plan.minimum_scale.str()},
+          {"start",boost::json::object{{"external_gram",std::move(start_gram)},{"mass_squared",std::move(start_masses)}}},
+          {"masters",n},{"epsilon_gauge_shifts",std::move(shift_array)},{"path_height",stated.height.str()},
+          {"boundary",std::move(boundary_report)},{"line_seconds",line_seconds},{"transport_seconds",transport_seconds}};
+        report["timings"]=boost::json::object{{"preparation_seconds",line_seconds},{"numerical_seconds",boundary_seconds+transport_seconds},{"total_seconds",total}};
+        if(json_mode)std::cout<<boost::json::serialize(report)<<'\n';
+        else for(std::size_t r=0;r<result.values.size();++r)for(std::size_t k=0;k<result.values[r].size();++k) {
+          progress<<"Scalar "<<r+1<<" epsilon^"<<result.low+static_cast<int>(k)<<" = ";acb_printn(result.values[r][k].raw(),32,0);progress<<'\n';
+        }
+        return 0;
+      }
       // Masters without moving poles (docs/moving-poles.md). An expanded run
       // removes them by default; a sample gains nothing from it.
       // A sample exchanges the masters themselves: its endpoint series are then
@@ -359,8 +459,11 @@ int main(int argc, char** argv) {
       // Each level merges the pair of propagators with the fewest masters.
       // Explicit anchors and a causal prescription are stated level by level
       // for the ladder as written, so they keep it.
-      if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() &&
-          (!numerical.causal_prescription || (numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty()))) {
+      // Points that only supplement the derived contour name the singular
+      // points of the ladder an earlier run chose automatically (its error
+      // message states them), so that ladder is chosen again.
+      const bool derived_contour=!numerical.causal_prescription || numerical.causal_prescription->derive_orientations;
+      if(merge_selection=="auto" && ibp_provider=="ibp-solver" && options.merges.empty() && options.anchors.empty() && derived_contour) {
         options.merge_chosen=[&progress](unsigned level,unsigned left,unsigned right,std::size_t candidates,std::size_t masters,std::size_t first) {
           if(left==0 && right==1)return;
           progress<<"Level "<<level<<": merging propagators "<<left<<" and "<<right<<", the pair with the fewest masters of "
@@ -387,8 +490,7 @@ int main(int argc, char** argv) {
       // (endpoint_boundary.hpp). Explicit anchors, a stated causal
       // prescription and the Henn projection are written for the ladder of
       // interior anchors and keep it.
-      const bool stated_ladder=!options.anchors.empty() || !henn_basis.empty() ||
-        (numerical.causal_prescription && !(numerical.causal_prescription->derive_orientations && numerical.causal_prescription->points.empty()));
+      const bool stated_ladder=!options.anchors.empty() || !henn_basis.empty() || !derived_contour;
       if(boundary=="endpoint" && stated_ladder)
         throw std::invalid_argument("--boundary endpoint cannot be combined with explicit anchors, stated causal sides or --henn-basis");
       options.boundary=boundary=="anchor" || stated_ladder?diffexp::recursion::BoundaryPolicy::anchor:

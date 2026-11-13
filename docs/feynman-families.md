@@ -128,7 +128,14 @@ How a point is decided, in ball arithmetic on its isolating interval:
    `s Im x` on the whole real simplex. The side is `-s`. This holds for any
    number of loops and for massless lines (it is the rule "`s -> s + i0`"
    when `F` depends on an invariant monotonically).
-3. One-loop levels, where `F = alpha^T M(x) alpha`: a pinch on a face `S` of
+3. A constant `c` exists with every monomial coefficient of `dF/dx + c F`
+   nonzero at `x*` (or, for a coefficient of `F` that vanishes there, of
+   `dF/dx`) and of one sign `s`. Where `F` vanishes on the simplex, `dF/dx`
+   has the sign `s`, so a pinch does too; on a face where `F` is not
+   identically zero the combination keeps that sign. The side is `-s`.
+   Statement 2 is the case `c = 0`. The equal-mass sunrise above threshold is
+   decided this way.
+4. One-loop levels, where `F = alpha^T M(x) alpha`: a pinch on a face `S` of
    the simplex is a positive null vector of the principal submatrix `M_SS`.
    A face with `det M_SS(x*) != 0` has none. A face whose determinant
    vanishes for every `x` (soft and collinear regions of massless lines) is
@@ -155,7 +162,7 @@ object that states its side, "causal": {"points": [{"level": 1, "x":
 
 What is not decided:
 
-- Levels with two or more loops beyond statements 1 and 2. Their faces with
+- Levels with two or more loops beyond statements 1 to 3. Their faces with
   vanishing `U` need the Symanzik polynomials of contracted subgraphs. A
   two-loop level above a threshold in which `F` is not monotone (the equal
   mass sunrise at `p^2 > 9 m^2`) is refused.
@@ -179,6 +186,55 @@ the free points of each level.
 Physical-region examples: `bubble_timelike.json`, `bubble_above_threshold.json`,
 `triangle_physical.json` (its first level passes its two cuts on opposite
 sides) and `box_physical.json` (massless box at `s > 0`, `t < 0`).
+
+### Continuation from a Euclidean point
+
+A physical point can also be reached from a Euclidean one, without deciding
+any side on the recursion levels:
+
+```json
+"continuation": {
+  "euclidean_direction": {
+    "external_gram": [["-1"]],
+    "mass_squared": ["1", "1"]
+  }
+}
+```
+
+`euclidean_direction` is a point V of the same family (same propagators,
+one mass per propagator, 0 for numerator slots) whose `U` and `F` have
+positive monomials; it must keep the vanishing scalar products and the
+vanishing or equal squared momenta and masses of the requested point P, since
+those fix the master integrals. DiffExp starts at `E = P + t V`, with `t` the
+simplest of 1, 2, 5 times a power of ten above twice the smallest `t` that
+makes `E` Euclidean (`"scale"` states it instead). Along the line
+`E + lambda (P - E)`
+
+```
+F_P - F_E = -t F_V,
+```
+
+so every monomial coefficient of `F` decreases and, for `Im lambda > 0`,
+`Im F = Im(lambda) (F_P - F_E) < 0` on the whole open simplex: the integrals
+are analytic in the upper half `lambda` plane and their boundary value at
+`lambda = 1` is the one of `F - i0`. The run
+
+1. reduces the derivative of the requested integrals along the line with the
+   same IBP provider and cache (the external Gram moves, so the derivative
+   acts through the momenta: `d/dlambda = sum_ij W_ji p_i . d/dp_j` with
+   `W = (1/2) dG/dlambda G^-1`);
+2. computes the masters of the line at `E` with an ordinary `ft` run of the
+   same program and options (the family file is written under
+   `CACHE/continuation/`), through the epsilon order the transport needs;
+3. transports them along `0 -> i h -> 1 + i h -> 1` (`"height"` h, default 1)
+   after a diagonal epsilon gauge, and contracts with the target rows at P.
+
+The JSON report has `causal.mode` `euclidean-line` and a `continuation`
+object with the start point, the scale, the number of masters and the
+seconds of each stage. Families without a Euclidean region (massless
+two-to-two scattering with all of s, t, u in `F`) have no such direction.
+`examples/literature-2026/tools/add_continuation.py` writes the object from a
+Euclidean family file with the same propagators.
 
 ### Explicit contour
 

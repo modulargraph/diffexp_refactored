@@ -128,8 +128,8 @@ struct NumericalOptions {
   // disables it; explicit physical_bases always take priority.
   std::filesystem::path basis_cache_directory;
   std::filesystem::path ordinary_cache_directory;
-  std::size_t ordinary_cache_max_bytes=64*1024*1024;
-  std::size_t basis_cache_max_bytes=64*1024*1024;
+  std::size_t ordinary_cache_max_bytes=std::size_t(1)*1024*1024*1024;
+  std::size_t basis_cache_max_bytes=std::size_t(1)*1024*1024*1024;
   affine_matching::Options matching=[] {affine_matching::Options value;value.max_dimension=256;value.max_epsilon_depth=512;value.numeric_operator_convolution=true;return value;}();
   AffineFrobeniusSeries::Options endpoint=[] {AffineFrobeniusSeries::Options value;value.max_dimension=256;return value;}();
   fuchsify::Options fuchsification=[] {fuchsify::Options value;value.max_dimension=256;return value;}();
@@ -915,7 +915,8 @@ class Evaluator {
     throw std::domain_error("the causal side of the real singular point x = "+middle.real_midpoint(20)+" of level "+
       std::to_string(depth+1)+" could not be derived from the level's Symanzik F ("+point.undetermined+
       "); supply an explicit `causal` object that states its side, \"causal\": {\"points\": [{\"level\": "+std::to_string(depth+1)+
-      ", \"x\": \""+middle.real_midpoint(12)+"\", \"side\": 1}]}, with side 1 (above the real axis) or -1");
+      ", \"x\": \""+middle.real_midpoint(12)+"\", \"side\": 1}]}, with side 1 (above the real axis) or -1; "
+      "or reach the point from a Euclidean one with a `continuation` object (docs/feynman-families.md)");
   }
   void report(std::size_t depth,const std::string& phase,int high)const {if(options_.progress)options_.progress(depth,phase,high);}
   static int checked(long value) {

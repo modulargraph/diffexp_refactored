@@ -75,6 +75,10 @@ struct QuadraticFamily {
   ScalarProducts scalar_products;
   std::vector<Affine> physical;
   std::vector<Affine> auxiliary;
+  // For D = m^2 - q^2 with q = sum a_l k_l + sum c_e p_e: the c_e of each
+  // physical, then auxiliary line. Known only for lines built from momenta;
+  // a derivative that moves the external Gram needs them.
+  std::optional<std::vector<std::vector<Exact>>> external_coefficients;
 };
 inline QuadraticFamily quadratic_family(const feynman::Family& family,const Exact& sample,
     std::size_t physical_count=0) {
@@ -88,7 +92,10 @@ inline QuadraticFamily quadratic_family(const feynman::Family& family,const Exac
   }
   ScalarProducts sp(family.loops,std::move(gram),sample);
   QuadraticFamily result{sp,{}, {}};
+  result.external_coefficients.emplace();
   for(const auto& line:family.lines) {
+    result.external_coefficients->emplace_back();
+    for(const auto& c:line.external_coefficients)result.external_coefficients->back().push_back(sample.constant(c));
     auto d=sp.zero(); d.constant=sample.constant(line.mass_squared);
     auto c=line.loop_coefficients;
     c.insert(c.end(),line.external_coefficients.begin(),line.external_coefficients.end());
@@ -106,6 +113,7 @@ inline QuadraticFamily merge(const QuadraticFamily& f,unsigned left,unsigned rig
   auto out=f;
   out.physical[left]=plus(scaled(f.physical[left],x),scaled(f.physical[right],x.constant(1)-x));
   out.physical.erase(out.physical.begin()+right);
+  out.external_coefficients.reset();
   return out;
 }
 
@@ -115,6 +123,7 @@ class PropagatorBasis {
  public:
   explicit PropagatorBasis(QuadraticFamily family)
       : space(std::move(family.scalar_products)),physical_count(family.physical.size()),
+        external_coefficients(std::move(family.external_coefficients)),
         denominators(std::move(family.physical)),zero_(space.zero().constant) {
     if(!physical_count || physical_count>space.size())
       throw std::invalid_argument("physical propagators require partial fractions before IBP completion");
@@ -140,6 +149,11 @@ class PropagatorBasis {
     for(std::size_t i=0;i<space.size() && denominators.size()<space.size();++i) {
       auto d=space.zero(); d.linear[i]=zero_.constant(1);
       if(insert(d.linear)) denominators.push_back(std::move(d));
+    }
+    // Completing slots are scalar products: no quadratic dependence on p.
+    if(external_coefficients) {
+      if(external_coefficients->size()>denominators.size())throw std::invalid_argument("external coefficient rows exceed the denominators");
+      external_coefficients->resize(denominators.size(),std::vector<Exact>(space.externals(),zero_));
     }
     const auto n=space.size();
     std::vector<std::vector<Exact>> matrix, inverse(n,std::vector<Exact>(n,zero_));
@@ -176,6 +190,7 @@ class PropagatorBasis {
   }
   ScalarProducts space;
   std::size_t physical_count;
+  std::optional<std::vector<std::vector<Exact>>> external_coefficients;
   std::vector<Affine> denominators,scalar_products_in_denominators;
  private:
   Exact zero_;
@@ -285,18 +300,74 @@ class Generator {
     validate(indices);Relation result;
     if(!dimension_.derivative(parameter).is_zero())
       throw std::invalid_argument("parameter differentiation cannot vary the integration dimension");
+    bool moving=false;
     for(const auto& row:basis_.space.external_gram) for(const auto& value:row)
-      if(!value.derivative(parameter).is_zero())
-        throw std::invalid_argument("varying external Gram requires a kinematic derivative operator");
+      moving=moving || !value.derivative(parameter).is_zero();
+    const auto weights=moving?kinematic_weights(parameter):std::vector<std::vector<Exact>>{};
     for(std::size_t k=0;k<indices.size();++k) if(indices[k]) {
       const auto& d=basis_.denominators[k];
       Affine derivative{d.constant.derivative(parameter),{}};
       for(const auto& c:d.linear) derivative.linear.push_back(c.derivative(parameter));
+      if(moving)derivative=plus(derivative,external_part(k,weights,parameter));
       insert_derivative(result,indices,k,basis_.rewrite(derivative),dimension_.constant(-std::int64_t(indices[k])));
     }
     return result;
   }
  private:
+  // A parameter that moves the external Gram G acts through the momenta:
+  // with O_ij = p_i . d/dp_j on the integrand, d/dx = sum_ij W_ji O_ij for
+  // W = (1/2) (dG/dx) G^-1, from O_ij f(G) = 2 (G dF/dG)_ij for symmetric G.
+  std::vector<std::vector<Exact>> kinematic_weights(std::size_t parameter) const {
+    const auto& G=basis_.space.external_gram;const auto n=G.size();
+    if(!basis_.external_coefficients)throw std::invalid_argument("varying external Gram requires the momentum lines of the family");
+    std::vector<std::vector<Exact>> a=G,inverse(n,std::vector<Exact>(n,dimension_.constant(0)));
+    for(std::size_t i=0;i<n;++i)inverse[i][i]=dimension_.constant(1);
+    for(std::size_t i=0;i<n;++i) {
+      auto pivot=i;while(pivot<n && a[pivot][i].is_zero())++pivot;
+      if(pivot==n)throw std::domain_error("varying external Gram must stay invertible along the parameter");
+      std::swap(a[i],a[pivot]);std::swap(inverse[i],inverse[pivot]);
+      auto c=a[i][i];
+      for(std::size_t j=0;j<n;++j){a[i][j]=a[i][j]/c;inverse[i][j]=inverse[i][j]/c;}
+      for(std::size_t k=0;k<n;++k)if(k!=i && !a[k][i].is_zero()) {
+        auto f=a[k][i];
+        for(std::size_t j=0;j<n;++j){a[k][j]=a[k][j]-f*a[i][j];inverse[k][j]=inverse[k][j]-f*inverse[i][j];}
+      }
+    }
+    std::vector<std::vector<Exact>> w(n,std::vector<Exact>(n,dimension_.constant(0)));
+    for(std::size_t j=0;j<n;++j)for(std::size_t i=0;i<n;++i) {
+      auto s=dimension_.constant(0);
+      for(std::size_t k=0;k<n;++k)s=s+G[j][k].derivative(parameter)*inverse[k][i];
+      w[j][i]=s/dimension_.constant(2);
+    }
+    return w;
+  }
+  // sum_ij W_ji p_i . dD_k/dp_j minus the explicit Gram dependence of the
+  // constant, which d/dx of the constant already contains: the remaining
+  // explicit derivative is that of the mass.
+  Affine external_part(std::size_t k,const std::vector<std::vector<Exact>>& w,std::size_t parameter) const {
+    const auto& space=basis_.space;const auto L=space.loops,E=space.externals();
+    const auto& c=basis_.external_coefficients->at(k);const auto& d=basis_.denominators[k];
+    auto out=space.zero();
+    for(unsigned i=0;i<E;++i)for(unsigned j=0;j<E;++j) {
+      if(w[j][i].is_zero())continue;
+      auto e=space.zero();
+      for(unsigned l=0;l<L;++l) {
+        auto it=std::find(space.pairs.begin(),space.pairs.end(),std::pair{l,L+j});
+        const auto& lin=d.linear.at(it-space.pairs.begin());
+        if(!lin.is_zero())e=plus(e,scaled(space.dot(l,L+i),lin));
+      }
+      if(!c[j].is_zero()) {
+        auto s=dimension_.constant(0);
+        for(unsigned f=0;f<E;++f)s=s+c[f]*space.external_gram[i][f];
+        e.constant=e.constant-dimension_.constant(2)*c[j]*s;
+      }
+      out=plus(out,scaled(e,w[j][i]));
+    }
+    // d/dx of the constant -sum_ef c_e c_f G_ef is not a derivative of the mass.
+    for(unsigned e=0;e<E;++e)for(unsigned f=0;f<E;++f)
+      if(!c[e].is_zero() && !c[f].is_zero())out.constant=out.constant+c[e]*c[f]*space.external_gram[e][f].derivative(parameter);
+    return out;
+  }
   void validate(const Integral& indices) const {
     if(indices.size()!=basis_.denominators.size()) throw std::invalid_argument("IBP integral dimension");
     for(std::size_t i=basis_.physical_count;i<indices.size();++i)

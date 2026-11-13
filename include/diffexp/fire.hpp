@@ -154,7 +154,7 @@ inline const std::vector<data::Expr>& list(const data::Expr& e,std::size_t size=
   if(e.head!="List"||(size!=std::size_t(-1)&&e.args.size()!=size))throw std::invalid_argument("FIRE table list shape");return e.args;
 }
 inline std::map<ibp::Integral,ibp::Relation> import_table_text(std::string text,const ExactField& field,std::size_t slots,const SymbolMap* symbols=nullptr) {
-  if(text.size()>64*1024*1024)throw std::runtime_error("FIRE tables exceed 64 MiB import budget");
+  if(text.size()>std::size_t(16)*1024*1024*1024)throw std::runtime_error("FIRE tables exceed 16 GiB import budget");
   // FIRE encloses rational-function coefficients in double quotes. They are
   // still parsed as data, and never interpreted by a shell or evaluator.
   text.erase(std::remove(text.begin(),text.end(),'"'),text.end());
@@ -178,7 +178,7 @@ inline std::map<ibp::Integral,ibp::Relation> import_table_text(std::string text,
   }
   return result;
 }
-inline std::string read_text(const std::filesystem::path& path,std::size_t limit=64*1024*1024) {
+inline std::string read_text(const std::filesystem::path& path,std::size_t limit=std::size_t(16)*1024*1024*1024) {
   std::ifstream in(path);if(!in)throw std::runtime_error("cannot read FIRE data: "+path.string());
   if(std::filesystem::file_size(path)>limit)throw std::runtime_error("FIRE data exceeds size budget");
   return std::string((std::istreambuf_iterator<char>(in)),{});

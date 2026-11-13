@@ -268,6 +268,9 @@ class Landau {
       }
       if(decided && common)return {Orientation::Kind::Oriented,f_rim*common,"dF/dx has one sign on the simplex"};
     }
+    // (slope modulo F)
+    if(const int s=slope_modulo_f(x,bits))
+      return {Orientation::Kind::Oriented,f_rim*s,"dF/dx + c F has one sign on the simplex"};
     if(matrix_.empty())
       return {Orientation::Kind::Undetermined,0,loops_==1?"the level has too many propagators for the face analysis":
         "F changes sign on the simplex and dF/dx has no common sign; the face analysis is implemented for one-loop levels only"};
@@ -313,6 +316,43 @@ class Landau {
     explicit Face(const ExactField& field):determinant(field){}
   };
   static constexpr int undecided=2;
+  // A constant c with every monomial coefficient of dF/dx + c F nonzero at
+  // the point and of one sign s. Where F vanishes on the simplex dF/dx then
+  // has the sign s; on a face where F does not vanish identically so does
+  // the combination, whose monomials include those of F. A pinch therefore
+  // has dF/dx of sign s, as in (slope), which is the case c = 0.
+  int slope_modulo_f(const B& x,slong bits)const {
+    std::vector<std::pair<B,B>> terms;
+    for(const auto& [key,coefficient]:coefficients_) {
+      const auto& slope=slopes_.at(key);
+      terms.emplace_back(value(coefficient,x,bits),slope.is_zero()?B(0):value(slope,x,bits));
+    }
+    if(terms.empty())return 0;
+    for(int s:{1,-1}) {
+      double low=-std::numeric_limits<double>::infinity(),high=std::numeric_limits<double>::infinity();bool possible=true;
+      for(const auto& [f,d]:terms) {
+        // s (d + c f) > 0, i.e. c above or below -d/f.
+        B fs,ds,bound;acb_mul_si(fs.raw(),f.raw(),s,bits);acb_mul_si(ds.raw(),d.raw(),s,bits);
+        // A coefficient that vanishes at the point (the invariant whose
+        // threshold this is) needs s dF/dx > 0 there; c f is checked below.
+        if(arb_contains_zero(acb_realref(fs.raw()))){if(!arb_is_positive(acb_realref(ds.raw()))){possible=false;break;}continue;}
+        acb_div(bound.raw(),ds.raw(),fs.raw(),bits);acb_neg(bound.raw(),bound.raw());
+        const double mid=arf_get_d(arb_midref(acb_realref(bound.raw())),ARF_RND_NEAR),radius=mag_get_d(arb_radref(acb_realref(bound.raw())));
+        if(arb_is_positive(acb_realref(fs.raw())))low=std::max(low,mid+radius);else high=std::min(high,mid-radius);
+      }
+      if(!possible || !(low<high))continue;
+      const double c=std::isfinite(low)&&std::isfinite(high)?(low+high)/2:std::isfinite(low)?low+1+std::abs(low):std::isfinite(high)?high-1-std::abs(high):0.0;
+      B constant;arb_set_d(acb_realref(constant.raw()),c);
+      bool verified=true;
+      for(const auto& [f,d]:terms) {
+        B combination;acb_mul(combination.raw(),f.raw(),constant.raw(),bits);
+        acb_add(combination.raw(),combination.raw(),d.raw(),bits);acb_mul_si(combination.raw(),combination.raw(),s,bits);
+        verified=verified && arb_is_positive(acb_realref(combination.raw()));
+      }
+      if(verified)return s;
+    }
+    return 0;
+  }
   static std::vector<std::string> names(std::size_t count,const std::string& parameter) {
     std::vector<std::string> out{parameter};for(std::size_t i=0;i<count;++i)out.push_back("landau_a"+std::to_string(i));return out;
   }

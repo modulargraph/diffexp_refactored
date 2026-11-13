@@ -180,10 +180,10 @@ struct Record {
 
 class Store {
  public:
-  explicit Store(fs::path root,std::size_t maximum_bytes=64*1024*1024,
+  explicit Store(fs::path root,std::size_t maximum_bytes=std::size_t(4)*1024*1024*1024,
                  std::size_t maximum_candidates=1024)
       :root_(fs::absolute(std::move(root))),maximum_bytes_(maximum_bytes),maximum_candidates_(maximum_candidates) {
-    if(!maximum_bytes || maximum_bytes>1024ULL*1024*1024 || !maximum_candidates || maximum_candidates>100000)
+    if(!maximum_bytes || maximum_bytes>64ULL*1024*1024*1024 || !maximum_candidates || maximum_candidates>100000)
       throw std::invalid_argument("invalid artifact store limits");
     fs::create_directories(root_);detail::sync_directory(root_);detail::sync_directory(root_.parent_path());
   }

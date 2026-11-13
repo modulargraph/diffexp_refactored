@@ -76,16 +76,18 @@ int main(){try {
     const auto adjacent=massless.orient(Rational("2/5"),Rational("2/5"),-1);
     std::cout<<"massless box, adjacent merge at 2/5: "<<adjacent.reason<<'\n';
     require(adjacent.kind!=causal::Orientation::Kind::Undetermined);
-    // Two loops: the sunrise above its threshold has faces with vanishing U.
-    // Nothing is guessed there; below it, in the Euclidean region, F is positive.
+    // Two loops: below its threshold, in the Euclidean region, F is positive.
+    // Above it dF/dx has no common sign but dF/dx + c F does (the CLI test
+    // compares the value with the continuation from a Euclidean point).
     auto sunrise=feynman::example_family("sunrise");sunrise.momenta.lines.resize(sunrise.physical_count);
     const causal::Landau two_loop_euclidean(ibp::PropagatorBasis(ibp::merge(ibp::quadratic_family(sunrise.momenta,x,3),0,1,x)));
     require(two_loop_euclidean.loops()==2 && two_loop_euclidean.orient(Rational("1/7"),Rational("1/7"),-1).kind==causal::Orientation::Kind::Free);
     sunrise.momenta.external_gram[0][0]=Rational(20);
     const causal::Landau two_loop(ibp::PropagatorBasis(ibp::merge(ibp::quadratic_family(sunrise.momenta,x,3),0,1,x)));
-    const auto undecided=two_loop.orient(Rational("1/11"),Rational("1/11"),-1);
-    require(undecided.kind==causal::Orientation::Kind::Undetermined && undecided.reason.find("one-loop")!=std::string::npos);
-    std::cout<<"derived orientations: leaf zeros, one-loop faces, multi-loop refusal PASS\n";
+    const auto above=two_loop.orient(Rational("1/11"),Rational("1/11"),-1);
+    std::cout<<"sunrise above threshold at 1/11: "<<above.reason<<'\n';
+    require(above.kind==causal::Orientation::Kind::Oriented && above.reason.find("dF/dx + c F")!=std::string::npos);
+    std::cout<<"derived orientations: leaf zeros, one-loop faces, multi-loop slope modulo F PASS\n";
   }
   std::cout<<"causal prescription validation PASS\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

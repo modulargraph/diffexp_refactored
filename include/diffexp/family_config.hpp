@@ -5,8 +5,16 @@
 
 namespace diffexp::family_config {
 namespace json=boost::json;
+// A physical point reached from a Euclidean one (euclidean_continuation.hpp).
+struct Continuation {
+  std::vector<std::vector<Rational>> external_gram;
+  std::vector<Rational> mass_squared;
+  std::optional<Rational> scale;
+  Rational height{1};
+};
 struct Configuration {
   feynman::ExampleFamily family;
+  std::optional<Continuation> continuation;
   std::vector<ibp::Integral> integrals;
   recursion::Options preparation;
   recursion::NumericalOptions numerical;
@@ -53,7 +61,7 @@ inline void known_keys(const json::object& o,std::initializer_list<std::string_v
 inline Configuration parse(const json::value& value) {
   const auto& o=value.as_object();
   known_keys(o,{"schema","name","loops","external_gram","propagators","physical_count","dimension_at_epsilon_zero",
-    "integrals","epsilon_order","preparation","numerical","causal","description"},"family");
+    "integrals","epsilon_order","preparation","numerical","causal","continuation","description"},"family");
   if(auto p=o.if_contains("schema");p && *p!="DiffExp.FeynmanFamily/v1")throw std::invalid_argument("unsupported family schema");
   Configuration c;auto& f=c.family;
   f.name=o.if_contains("name")?std::string(o.at("name").as_string()):"configured-family";
@@ -129,6 +137,16 @@ inline Configuration parse(const json::value& value) {
       if(method!="adjoint" && method!="factored" && method!="auto")throw std::invalid_argument("unknown numerical method");
       c.numerical.linear_method=method=="factored"?recursion::LinearMethod::factored:method=="auto"?recursion::LinearMethod::automatic:recursion::LinearMethod::adjoint;
     }
+  }
+  if(auto p=o.if_contains("continuation")) {
+    const auto& a=p->as_object();known_keys(a,{"euclidean_direction","scale","height"},"continuation");
+    Continuation k;
+    const auto& d=a.at("euclidean_direction").as_object();known_keys(d,{"external_gram","mass_squared"},"continuation euclidean_direction");
+    for(const auto& row:d.at("external_gram").as_array())k.external_gram.push_back(rationals(row));
+    k.mass_squared=rationals(d.at("mass_squared"));
+    if(auto v=a.if_contains("scale")){k.scale=rational(*v);if(k.scale->sign()<=0)throw std::invalid_argument("continuation scale must be positive");}
+    if(auto v=a.if_contains("height")){k.height=rational(*v);if(k.height.sign()<=0)throw std::invalid_argument("continuation height must be positive");}
+    c.continuation=std::move(k);
   }
   if(auto p=o.if_contains("causal")) {
     const auto& a=p->as_object();known_keys(a,{"f_rim","level_signs","points","provenance"},"causal");
